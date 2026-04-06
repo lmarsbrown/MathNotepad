@@ -656,13 +656,67 @@ async function updatePreview() {
   if (window.MathJax?.typesetClear) MathJax.typesetClear([previewContent]);
   previewContent.innerHTML = `<div class="preview-page">${inner}</div>`;
   if (window.MathJax?.typesetPromise) await MathJax.typesetPromise([previewContent]);
+  // Eliminate SVG stroke rendering that causes artefacts in printed PDFs.
+  // Must set stroke="none" on every element individually — PDF renderers don't
+  // reliably cascade SVG attributes, and child stroke-width="0" can reintroduce strokes.
+  previewContent.querySelectorAll('svg, svg *').forEach(el => el.setAttribute('stroke', 'none'));
+  paginatePreview();  // split content across separate page divs
   applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
+}
+
+// Split the single rendered page into multiple .preview-page divs at page boundaries.
+// Render happens in one tall page first so MathJax can lay out content naturally,
+// then we use actual offsetTop positions (not summed offsetHeights) so that CSS
+// margin collapsing between elements is already accounted for in the measurement.
+function paginatePreview() {
+  const singlePage = previewContent.querySelector('.preview-page');
+  if (!singlePage) return;
+
+  const children = Array.from(singlePage.children);
+  if (children.length === 0) return;
+
+  // 1in padding-top; content area = 9in = 864px (letter minus top+bottom padding).
+  // .preview-page has position:relative so offsetTop is relative to the page element.
+  const PADDING_TOP    = 96;  // 1in at 96 dpi
+  const PAGE_CONTENT_H = 864; // 9in at 96 dpi
+
+  // tops[i] = top of element i relative to the content area start (after padding)
+  // bottoms[i] = bottom of element i relative to the content area start
+  // Using offsetTop (which reflects actual rendered positions including margin collapsing)
+  // rather than summing offsetHeight values (which ignore margins).
+  const tops    = children.map(el => el.offsetTop - PADDING_TOP);
+  const bottoms = children.map((el, i) => tops[i] + el.offsetHeight);
+
+  children.forEach(el => el.remove());
+
+  const pages    = [[]];
+  let pageBaseY  = 0; // flow-Y where the current page's content area starts
+
+  for (let i = 0; i < children.length; i++) {
+    const relBottom = bottoms[i] - pageBaseY;
+
+    if (pages[pages.length - 1].length > 0 && relBottom > PAGE_CONTENT_H) {
+      pages.push([]);
+      pageBaseY = tops[i]; // next page begins at this element's top in the flow
+    }
+
+    pages[pages.length - 1].push(children[i]);
+  }
+
+  previewContent.innerHTML = '';
+  for (const group of pages) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'preview-page';
+    group.forEach(el => pageDiv.appendChild(el));
+    previewContent.appendChild(pageDiv);
+  }
 }
 
 function applyPreviewZoom() {
   const zoom = ZOOM_STEPS[previewZoomIndex];
-  const page = previewContent.querySelector('.preview-page');
-  if (page) page.style.zoom = zoom + '%';
+  previewContent.querySelectorAll('.preview-page').forEach(page => {
+    page.style.zoom = zoom + '%';
+  });
   previewZoomLabel.textContent = zoom + '%';
 }
 

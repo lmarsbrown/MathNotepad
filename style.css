@@ -558,6 +558,8 @@ html, body {
 /* White "page" inside the viewer — fixed width matches letter paper exactly */
 .preview-page {
   display: block;
+  position: relative;     /* makes children's offsetTop relative to this element */
+  box-sizing: border-box; /* min-height:11in = total box height, not content height */
   width: 8.5in;           /* fixed — prevents container-driven SVG rescaling */
   min-height: 11in;
   margin: 0 auto;
@@ -568,14 +570,11 @@ html, body {
   font-size: 12pt;
   line-height: 1.6;
   box-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
-  /* 2px page-break indicator at every 11in boundary */
-  background-image: repeating-linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent calc(11in - 2px),
-    #b8b8c8 calc(11in - 2px),
-    #b8b8c8 11in
-  );
+}
+
+/* Dark gap between consecutive pages in the viewer */
+.preview-page + .preview-page {
+  margin-top: 24px;
 }
 
 .preview-math {
@@ -626,9 +625,21 @@ html, body {
   .preview-page {
     box-shadow: none;
     margin: 0;
-    min-height: 0;
+    /* min-height: 11in is kept from screen CSS — each div fills exactly one letter page */
     /* NO width override — keeps 8.5in so SVG viewBoxes aren't rescaled at print time */
-    background-image: none;
     zoom: 1 !important; /* cancel app zoom for print */
+    /* Force a print page break after each preview page so PDF breaks align with preview */
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .preview-page:last-child {
+    /* Don't add a blank page after the final page */
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .preview-page + .preview-page {
+    margin-top: 0; /* no gap between pages in print */
   }
 }
