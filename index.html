@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Math Notepad</title>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mathquill@0.10.1-a/build/mathquill.css">
+  <script src="https://cdn.jsdelivr.net/npm/mathquill@0.10.1-a/build/mathquill.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="left-panel">
+      <div class="panel-header">LaTeX Source</div>
+      <textarea id="latex-source" spellcheck="false"></textarea>
+    </div>
+    <div id="divider"></div>
+    <div id="right-panel">
+      <div class="panel-header">
+        <span>Equations</span>
+        <div class="toolbar">
+          <button id="add-math-btn">+ Math</button>
+          <button id="add-text-btn">+ Text</button>
+          <span class="toolbar-sep"></span>
+          <button id="font-dec-btn" title="Decrease font size">A−</button>
+          <span id="font-size-label" class="font-size-label">16px</span>
+          <button id="font-inc-btn" title="Increase font size">A+</button>
+        </div>
+      </div>
+      <div id="box-list"></div>
+    </div>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
