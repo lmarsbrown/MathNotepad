@@ -42,6 +42,268 @@ html, body {
   flex-shrink: 0;
 }
 
+.header-left,
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#projects-btn {
+  background: none;
+  border: none;
+  color: #a6adc8;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+#projects-btn:hover {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+#project-title-label {
+  font-size: 12px;
+  color: #a6adc8;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+#project-title-label.dirty::after {
+  content: ' •';
+  color: #f38ba8;
+}
+
+#save-btn,
+#download-btn,
+#download-pdf-btn {
+  padding: 3px 10px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  transition: background 0.15s;
+}
+
+#save-btn:hover,
+#download-btn:hover,
+#download-pdf-btn:hover {
+  background: #45475a;
+}
+
+/* ── Projects panel ── */
+#projects-panel {
+  position: fixed;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 300px;
+  background: #181825;
+  border-right: 1px solid #313244;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+#projects-panel.open {
+  transform: translateX(0);
+}
+
+#projects-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 99;
+  display: none;
+}
+
+#projects-overlay.visible {
+  display: block;
+}
+
+.projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #a6adc8;
+  flex-shrink: 0;
+}
+
+.projects-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#new-project-btn {
+  padding: 2px 8px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  transition: background 0.15s;
+}
+
+#new-project-btn:hover {
+  background: #45475a;
+}
+
+#close-projects-btn {
+  background: none;
+  border: none;
+  color: #585b70;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+#close-projects-btn:hover {
+  color: #cdd6f4;
+  background: #313244;
+}
+
+#projects-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+#projects-list::-webkit-scrollbar { width: 6px; }
+#projects-list::-webkit-scrollbar-track { background: transparent; }
+#projects-list::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+
+.project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.15s;
+}
+
+.project-item:hover {
+  border-color: #45475a;
+}
+
+.project-item.drag-over {
+  border-color: #89b4fa;
+}
+
+.project-item.current {
+  border-color: #89b4fa;
+  background: #1e1e3a;
+}
+
+.project-drag-handle {
+  cursor: grab;
+  color: #585b70;
+  font-size: 16px;
+  flex-shrink: 0;
+  user-select: none;
+  line-height: 1;
+}
+
+.project-drag-handle:active {
+  cursor: grabbing;
+}
+
+.project-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #cdd6f4;
+  font-weight: normal;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.project-menu-btn {
+  background: none;
+  border: none;
+  color: #585b70;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.project-item:hover .project-menu-btn {
+  opacity: 1;
+}
+
+.project-menu-btn:hover {
+  color: #cdd6f4;
+  background: #313244;
+}
+
+.project-dropdown {
+  position: absolute;
+  right: 8px;
+  top: calc(100% + 2px);
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  z-index: 200;
+  min-width: 110px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  display: none;
+}
+
+.project-dropdown.open {
+  display: block;
+}
+
+.project-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  background: none;
+  border: none;
+  color: #cdd6f4;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-dropdown button:hover {
+  background: #45475a;
+}
+
 #divider {
   width: 3px;
   background: #313244;
@@ -117,7 +379,7 @@ html, body {
   background: #181825;
   border: 1px solid #313244;
   border-radius: 6px;
-  padding: 10px 36px 10px 14px;
+  padding: 10px 36px 10px 8px;
   min-height: 44px;
   display: flex;
   align-items: center;
@@ -130,6 +392,31 @@ html, body {
 
 .box.focused {
   border-color: #89b4fa;
+}
+
+.box.drag-over {
+  border-color: #89b4fa;
+  background: #1e1e3a;
+}
+
+.box-drag-handle {
+  cursor: grab;
+  color: #585b70;
+  font-size: 16px;
+  flex-shrink: 0;
+  user-select: none;
+  padding: 0 8px 0 0;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.box:hover .box-drag-handle {
+  opacity: 1;
+}
+
+.box-drag-handle:active {
+  cursor: grabbing;
 }
 
 /* MathQuill field fills the box */
@@ -229,4 +516,119 @@ html, body {
 #latex-source::-webkit-scrollbar-thumb {
   background: #45475a;
   border-radius: 3px;
+}
+
+/* ── Preview panel ── */
+#divider2 {
+  width: 3px;
+  background: #313244;
+  cursor: col-resize;
+  flex-shrink: 0;
+  display: none;
+}
+
+#preview-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#divider2.open {
+  display: block;
+}
+
+#preview-panel.open {
+  display: flex;
+}
+
+/* Scrollable document-viewer background */
+#preview-content {
+  flex: 1;
+  overflow: auto;
+  padding: 28px 24px;
+  background: #13131f;
+}
+
+#preview-content::-webkit-scrollbar { width: 6px; }
+#preview-content::-webkit-scrollbar-track { background: transparent; }
+#preview-content::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+
+/* White "page" inside the viewer — fixed width matches letter paper exactly */
+.preview-page {
+  display: block;
+  width: 8.5in;           /* fixed — prevents container-driven SVG rescaling */
+  min-height: 11in;
+  margin: 0 auto;
+  padding: 1in;
+  background-color: white;
+  color: #1a1a1a;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 12pt;
+  line-height: 1.6;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+  /* 2px page-break indicator at every 11in boundary */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(11in - 2px),
+    #b8b8c8 calc(11in - 2px),
+    #b8b8c8 11in
+  );
+}
+
+.preview-math {
+  margin: 14px 0;
+  text-align: center;
+  color: #1a1a1a;
+}
+
+.preview-text {
+  margin: 8px 0;
+  color: #1a1a1a;
+}
+
+/* ── Print / PDF ── */
+
+/* @page margin: 0 suppresses browser-added headers and footers (title, URL, date).
+   The 1in padding on .preview-page becomes the printed page margin instead. */
+@page {
+  size: letter;
+  margin: 0;
+}
+
+@media print {
+  #projects-panel,
+  #projects-overlay,
+  #left-panel,
+  #divider,
+  #right-panel,
+  #divider2,
+  .panel-header { display: none !important; }
+
+  body, html { background: white; }
+
+  #app { display: block; }
+
+  #preview-panel {
+    display: block !important;
+    width: 100%;
+    height: auto;
+  }
+
+  #preview-content {
+    padding: 0;
+    background: white;
+    overflow: visible;
+  }
+
+  .preview-page {
+    box-shadow: none;
+    margin: 0;
+    min-height: 0;
+    /* NO width override — keeps 8.5in so SVG viewBoxes aren't rescaled at print time */
+    background-image: none;
+    zoom: 1 !important; /* cancel app zoom for print */
+  }
 }

@@ -11,6 +11,19 @@ let suppressTextSync = false; // prevent feedback loops
 let suppressBoxSync  = false;
 let textSyncTimer = null;
 let focusedBoxId = null;
+let boxClipboard = null; // { type, content } — box-level cut/paste
+let dragSrcBoxId = null; // id of box being dragged
+
+// ── Preview state ────────────────────────────────────────────────────────────
+let isPreviewOpen = false;
+const ZOOM_STEPS = [50, 67, 75, 90, 100, 110, 125, 150, 175, 200];
+let previewZoomIndex = 4; // 100%
+
+// ── Project state ────────────────────────────────────────────────────────────
+const PROJ_KEY  = 'mathnotepad_projects';
+const DRAFT_KEY = 'mathnotepad_draft';
+let currentProjectId = null;
+let isDirty = false;
 
 // ── Undo history ──────────────────────────────────────────────────────────────
 const MAX_HISTORY = 200;
@@ -25,7 +38,23 @@ const addMathBtn  = document.getElementById('add-math-btn');
 const addTextBtn  = document.getElementById('add-text-btn');
 const fontDecBtn  = document.getElementById('font-dec-btn');
 const fontIncBtn  = document.getElementById('font-inc-btn');
-const fontSizeLabel = document.getElementById('font-size-label');
+const fontSizeLabel     = document.getElementById('font-size-label');
+const projectsBtn       = document.getElementById('projects-btn');
+const closeProjectsBtn  = document.getElementById('close-projects-btn');
+const projectsPanel     = document.getElementById('projects-panel');
+const projectsOverlay   = document.getElementById('projects-overlay');
+const projectsList      = document.getElementById('projects-list');
+const saveBtn           = document.getElementById('save-btn');
+const downloadBtn       = document.getElementById('download-btn');
+const projectTitleLabel = document.getElementById('project-title-label');
+const previewPanel      = document.getElementById('preview-panel');
+const divider2          = document.getElementById('divider2');
+const previewContent    = document.getElementById('preview-content');
+const togglePreviewBtn  = document.getElementById('toggle-preview-btn');
+const downloadPdfBtn    = document.getElementById('download-pdf-btn');
+const previewZoomInBtn  = document.getElementById('preview-zoom-in-btn');
+const previewZoomOutBtn = document.getElementById('preview-zoom-out-btn');
+const previewZoomLabel  = document.getElementById('preview-zoom-label');
 
 // ── ID generation ─────────────────────────────────────────────────────────────
 function genId() { return 'b' + (nextId++); }
@@ -125,6 +154,55 @@ function createBoxElement(box) {
   div.className = 'box';
   div.dataset.id = box.id;
 
+  // Drag handle
+  const dragHandle = document.createElement('span');
+  dragHandle.className = 'box-drag-handle';
+  dragHandle.textContent = '⠿';
+  dragHandle.title = 'Drag to reorder';
+  dragHandle.draggable = true;
+  dragHandle.addEventListener('dragstart', e => {
+    dragSrcBoxId = box.id;
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  div.appendChild(dragHandle);
+
+  // Click on box padding → focus the field
+  div.addEventListener('click', e => {
+    if (e.target.closest('.delete-btn') || e.target.closest('.box-drag-handle')) return;
+    if (e.target.closest('.mq-editable-field') || e.target.closest('.text-input')) return;
+    if (box.type === 'math') {
+      const field = mqFields.get(box.id);
+      if (field) field.focus();
+    } else {
+      const ta = div.querySelector('.text-input');
+      if (ta) ta.focus();
+    }
+  });
+
+  div.addEventListener('dragover', e => {
+    if (!dragSrcBoxId || dragSrcBoxId === box.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    div.classList.add('drag-over');
+  });
+  div.addEventListener('dragleave', e => {
+    if (e.relatedTarget && div.contains(e.relatedTarget)) return;
+    div.classList.remove('drag-over');
+  });
+  div.addEventListener('drop', e => {
+    e.preventDefault();
+    div.classList.remove('drag-over');
+    if (!dragSrcBoxId || dragSrcBoxId === box.id) return;
+    const srcIdx = boxes.findIndex(b => b.id === dragSrcBoxId);
+    const dstIdx = boxes.findIndex(b => b.id === box.id);
+    dragSrcBoxId = null;
+    if (srcIdx === -1 || dstIdx === -1) return;
+    const [moved] = boxes.splice(srcIdx, 1);
+    boxes.splice(dstIdx, 0, moved);
+    rebuildBoxList();
+    syncToText();
+  });
+
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'delete-btn';
   deleteBtn.textContent = '×';
@@ -138,6 +216,7 @@ function createBoxElement(box) {
 
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
+      autoCommands: 'sqrt sum int prod',
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -167,6 +246,19 @@ function createBoxElement(box) {
       if (e.key === 'Backspace' && field.latex() === '') {
         e.preventDefault();
         deleteBox(box.id);
+      }
+      // Ctrl+X: whole-box cut only when nothing is selected in MathQuill.
+      // Must be capture phase so we check selection state before MQ processes the key.
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+        const hasSelection = !!mqSpan.querySelector('.mq-selection');
+        if (!hasSelection) {
+          e.preventDefault();
+          e.stopPropagation();
+          cutBox(box.id);
+        } else {
+          // Partial cut — clear box clipboard so Ctrl+V falls through to MathQuill
+          boxClipboard = null;
+        }
       }
     }, true); // capture phase: fires before MathQuill's inner textarea handler
 
@@ -206,6 +298,16 @@ function createBoxElement(box) {
       if (e.key === 'Backspace' && ta.value === '') {
         e.preventDefault();
         deleteBox(box.id);
+      }
+      // Ctrl+X with no selection → cut whole box; with selection → let browser cut text
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+        if (ta.selectionStart === ta.selectionEnd) {
+          e.preventDefault();
+          cutBox(box.id);
+        } else {
+          // Partial cut — clear box clipboard so Ctrl+V falls through to browser paste
+          boxClipboard = null;
+        }
       }
     });
 
@@ -347,17 +449,19 @@ function pushHistory(latexStr) {
 
 function applyUndo() {
   if (historyIndex <= 0) return;
+  const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
   historyIndex--;
-  restoreSnapshot(history[historyIndex]);
+  restoreSnapshot(history[historyIndex], focusIdx);
 }
 
 function applyRedo() {
   if (historyIndex >= history.length - 1) return;
+  const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
   historyIndex++;
-  restoreSnapshot(history[historyIndex]);
+  restoreSnapshot(history[historyIndex], focusIdx);
 }
 
-function restoreSnapshot(snap) {
+function restoreSnapshot(snap, preferFocusIdx = -1) {
   suppressHistory = true;
   suppressBoxSync = true;
   boxes = parseFromLatex(snap.latex);
@@ -367,7 +471,10 @@ function restoreSnapshot(snap) {
   suppressTextSync = false;
   suppressBoxSync = false;
   suppressHistory = false;
-  if (snap.focusId) focusBox(snap.focusId);
+  // parseFromLatex always generates new IDs, so focus by position rather than ID
+  if (preferFocusIdx >= 0 && boxes.length > 0) {
+    focusBox(boxes[Math.min(preferFocusIdx, boxes.length - 1)].id);
+  }
 }
 
 // ── Sync right → left ─────────────────────────────────────────────────────────
@@ -378,6 +485,9 @@ function syncToText() {
   latexSource.value = latex;
   suppressTextSync = false;
   pushHistory(latex);
+  saveDraft();
+  markDirty();
+  updatePreview();
 }
 
 // ── Sync left → right (debounced) ─────────────────────────────────────────────
@@ -473,16 +583,153 @@ fontIncBtn.addEventListener('click', () => {
   if (fontSizeIndex < FONT_SIZES.length - 1) { fontSizeIndex++; applyFontSize(); }
 });
 
-// ── Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y (undo/redo) ───────────────────────────────
+// ── Cut / paste boxes ────────────────────────────────────────────────────────
+function cutBox(id) {
+  const idx = boxes.findIndex(b => b.id === id);
+  if (idx === -1) return;
+  const box = boxes[idx];
+  // Read live content from the DOM field
+  let content = box.content;
+  if (box.type === 'math') {
+    const field = mqFields.get(id);
+    if (field) content = field.latex();
+  } else {
+    const ta = boxList.querySelector(`[data-id="${id}"] .text-input`);
+    if (ta) content = ta.value;
+  }
+  boxClipboard = { type: box.type, content };
+  deleteBox(id);
+}
+
+function pasteBox() {
+  if (!boxClipboard || !focusedBoxId) return;
+  const idx = boxes.findIndex(b => b.id === focusedBoxId);
+  if (idx === -1) return;
+
+  // Determine if the focused box is empty
+  let isEmpty = false;
+  if (boxes[idx].type === 'math') {
+    const field = mqFields.get(focusedBoxId);
+    isEmpty = !field || field.latex() === '';
+  } else {
+    const ta = boxList.querySelector(`[data-id="${focusedBoxId}"] .text-input`);
+    isEmpty = !ta || ta.value === '';
+  }
+
+  const newBox = { id: genId(), type: boxClipboard.type, content: boxClipboard.content };
+
+  if (isEmpty) {
+    // Replace the empty box in-place
+    mqFields.delete(focusedBoxId);
+    boxes.splice(idx, 1, newBox);
+  } else {
+    // Insert a new box below the focused one
+    boxes.splice(idx + 1, 0, newBox);
+  }
+  // Suppress history during rebuild so field.latex() in createBoxElement doesn't
+  // fire an extra edit→syncToText→pushHistory before our single syncToText below.
+  suppressHistory = true;
+  rebuildBoxList();
+  suppressHistory = false;
+  syncToText();
+  focusBox(newBox.id);
+}
+
+// ── Preview ───────────────────────────────────────────────────────────────────
+async function updatePreview() {
+  if (!isPreviewOpen) return;
+
+  let inner = '';
+  for (const box of boxes) {
+    if (box.type === 'math') {
+      inner += `<div class="preview-math">\\[${box.content}\\]</div>`;
+    } else {
+      const escaped = box.content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+      inner += `<p class="preview-text">${escaped}</p>`;
+    }
+  }
+
+  if (window.MathJax?.typesetClear) MathJax.typesetClear([previewContent]);
+  previewContent.innerHTML = `<div class="preview-page">${inner}</div>`;
+  if (window.MathJax?.typesetPromise) await MathJax.typesetPromise([previewContent]);
+  applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
+}
+
+function applyPreviewZoom() {
+  const zoom = ZOOM_STEPS[previewZoomIndex];
+  const page = previewContent.querySelector('.preview-page');
+  if (page) page.style.zoom = zoom + '%';
+  previewZoomLabel.textContent = zoom + '%';
+}
+
+function stepPreviewZoom(delta) {
+  const next = Math.max(0, Math.min(ZOOM_STEPS.length - 1, previewZoomIndex + delta));
+  if (next !== previewZoomIndex) {
+    previewZoomIndex = next;
+    applyPreviewZoom();
+  }
+}
+
+previewZoomInBtn.addEventListener('click',  () => stepPreviewZoom(+1));
+previewZoomOutBtn.addEventListener('click', () => stepPreviewZoom(-1));
+
+previewContent.addEventListener('wheel', e => {
+  if (e.ctrlKey) {
+    e.preventDefault();
+    stepPreviewZoom(e.deltaY < 0 ? +1 : -1);
+  } else if (e.shiftKey) {
+    e.preventDefault();
+    previewContent.scrollLeft += e.deltaY;
+  }
+}, { passive: false });
+
+function togglePreview() {
+  isPreviewOpen = !isPreviewOpen;
+  previewPanel.classList.toggle('open', isPreviewOpen);
+  divider2.classList.toggle('open', isPreviewOpen);
+  togglePreviewBtn.textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
+  if (isPreviewOpen) {
+    // Reset any manually-dragged width so it starts at flex: 1
+    previewPanel.style.flex = '';
+    previewPanel.style.width = '';
+    updatePreview();
+  }
+}
+
+togglePreviewBtn.addEventListener('click', togglePreview);
+downloadPdfBtn.addEventListener('click', () => window.print()); // print dialog → "Save as PDF"
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   const mod = e.ctrlKey || e.metaKey;
   if (!mod) return;
-  // Don't intercept when editing the raw LaTeX textarea
+
+  if (e.key === 's') { e.preventDefault(); saveCurrentProject(); return; }
+
+  // Don't intercept other shortcuts when editing the raw LaTeX textarea
   if (document.activeElement === latexSource) return;
 
-  if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); applyUndo(); }
-  if (e.key === 'z' &&  e.shiftKey) { e.preventDefault(); applyRedo(); }
-  if (e.key === 'y')                 { e.preventDefault(); applyRedo(); }
+  const key = e.key.toLowerCase(); // normalize for Shift (e.g. 'Z' → 'z')
+
+  if (key === 'z' && !e.shiftKey) { e.preventDefault(); applyUndo();  return; }
+  if (key === 'z' &&  e.shiftKey) { e.preventDefault(); applyRedo();  return; }
+  if (key === 'y')                 { e.preventDefault(); applyRedo();  return; }
+
+  if (key === 'v' && boxClipboard && focusedBoxId) {
+    e.preventDefault();
+    pasteBox();
+    return;
+  }
+});
+
+// Clean up drag state if drop lands outside a box
+document.addEventListener('dragend', () => {
+  dragSrcBoxId = null;
+  boxList.querySelectorAll('.box.drag-over').forEach(el => el.classList.remove('drag-over'));
 });
 
 // ── Divider drag-to-resize ────────────────────────────────────────────────────
@@ -494,6 +741,10 @@ let dragging = false;
 let dragStartX = 0;
 let leftStartWidth = 0;
 
+let dragging2 = false;
+let drag2StartX = 0;
+let previewStartWidth = 0;
+
 divider.addEventListener('mousedown', e => {
   dragging = true;
   dragStartX = e.clientX;
@@ -502,14 +753,33 @@ divider.addEventListener('mousedown', e => {
   document.body.style.userSelect = 'none';
 });
 
+divider2.addEventListener('mousedown', e => {
+  if (!isPreviewOpen) return;
+  dragging2 = true;
+  drag2StartX = e.clientX;
+  previewStartWidth = previewPanel.getBoundingClientRect().width;
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+});
+
 document.addEventListener('mousemove', e => {
-  if (!dragging) return;
-  const delta = e.clientX - dragStartX;
-  const totalWidth = leftPanel.parentElement.getBoundingClientRect().width - divider.offsetWidth;
-  const newLeft = Math.max(200, Math.min(totalWidth - 200, leftStartWidth + delta));
-  leftPanel.style.flex = 'none';
-  leftPanel.style.width = newLeft + 'px';
-  rightPanel.style.flex = '1';
+  if (dragging) {
+    const delta = e.clientX - dragStartX;
+    const totalWidth = leftPanel.parentElement.getBoundingClientRect().width - divider.offsetWidth;
+    const newLeft = Math.max(200, Math.min(totalWidth - 200, leftStartWidth + delta));
+    leftPanel.style.flex = 'none';
+    leftPanel.style.width = newLeft + 'px';
+    rightPanel.style.flex = '1';
+  }
+  if (dragging2) {
+    // Dragging left → preview grows; right → preview shrinks
+    const delta = drag2StartX - e.clientX;
+    const app = previewPanel.parentElement;
+    const totalWidth = app.getBoundingClientRect().width - divider2.offsetWidth - divider.offsetWidth;
+    const newPreview = Math.max(200, Math.min(totalWidth - 200, previewStartWidth + delta));
+    previewPanel.style.flex = 'none';
+    previewPanel.style.width = newPreview + 'px';
+  }
 });
 
 document.addEventListener('mouseup', () => {
@@ -518,13 +788,301 @@ document.addEventListener('mouseup', () => {
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
   }
+  if (dragging2) {
+    dragging2 = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
 });
+
+// ── Project management ────────────────────────────────────────────────────────
+
+function loadProjects() {
+  return JSON.parse(localStorage.getItem(PROJ_KEY) || '[]');
+}
+
+function saveProjects(list) {
+  localStorage.setItem(PROJ_KEY, JSON.stringify(list));
+}
+
+function saveDraft() {
+  localStorage.setItem(DRAFT_KEY, JSON.stringify({
+    latex: latexSource.value,
+    projectId: currentProjectId,
+  }));
+}
+
+function markDirty() {
+  if (isDirty) return;
+  isDirty = true;
+  projectTitleLabel.classList.add('dirty');
+}
+
+function markClean() {
+  isDirty = false;
+  projectTitleLabel.classList.remove('dirty');
+}
+
+function restoreFromLatex(latex) {
+  suppressHistory = true;
+  suppressBoxSync = true;
+  boxes = parseFromLatex(latex);
+  mqFields.clear();
+  rebuildBoxList();
+  suppressTextSync = true;
+  latexSource.value = latex;
+  suppressTextSync = false;
+  suppressBoxSync = false;
+  suppressHistory = false;
+  history = [{ latex, focusId: null }];
+  historyIndex = 0;
+}
+
+function saveCurrentProject() {
+  const projects = loadProjects();
+  const latex = latexSource.value;
+
+  if (currentProjectId) {
+    const idx = projects.findIndex(p => p.id === currentProjectId);
+    if (idx !== -1) {
+      projects[idx].latex = latex;
+      saveProjects(projects);
+      markClean();
+      saveDraft();
+      renderProjectsList();
+    }
+  } else {
+    const title = prompt('Project title:')?.trim();
+    if (!title) return;
+    const id = Date.now().toString();
+    projects.push({ id, title, latex });
+    saveProjects(projects);
+    currentProjectId = id;
+    projectTitleLabel.textContent = title;
+    markClean();
+    saveDraft();
+    renderProjectsList();
+  }
+}
+
+function downloadCurrentProject() {
+  const title = projectTitleLabel.textContent.replace(/\s•$/, '') || 'Untitled';
+  const blob = new Blob([latexSource.value], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = title + '.tex';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function openProject(id) {
+  if (isDirty && !confirm('You have unsaved changes. Open anyway?')) return;
+  const projects = loadProjects();
+  const proj = projects.find(p => p.id === id);
+  if (!proj) return;
+  restoreFromLatex(proj.latex);
+  currentProjectId = id;
+  projectTitleLabel.textContent = proj.title;
+  markClean();
+  saveDraft();
+  closeProjectsPanel();
+  if (boxes.length > 0) focusBox(boxes[0].id);
+  renderProjectsList();
+}
+
+function deleteProject(id) {
+  if (!confirm('Delete this project?')) return;
+  let projects = loadProjects();
+  projects = projects.filter(p => p.id !== id);
+  saveProjects(projects);
+  if (currentProjectId === id) {
+    currentProjectId = null;
+    projectTitleLabel.textContent = 'Untitled';
+  }
+  renderProjectsList();
+}
+
+function renameProject(id) {
+  const projects = loadProjects();
+  const proj = projects.find(p => p.id === id);
+  if (!proj) return;
+  const newTitle = prompt('Rename project:', proj.title)?.trim();
+  if (!newTitle) return;
+  proj.title = newTitle;
+  saveProjects(projects);
+  if (currentProjectId === id) {
+    projectTitleLabel.textContent = newTitle;
+  }
+  renderProjectsList();
+}
+
+// ── Projects panel ────────────────────────────────────────────────────────────
+
+let dragSrcIndex = -1;
+
+function renderProjectsList() {
+  const projects = loadProjects();
+  projectsList.innerHTML = '';
+
+  projects.forEach((proj, i) => {
+    const item = document.createElement('div');
+    item.className = 'project-item' + (proj.id === currentProjectId ? ' current' : '');
+    item.draggable = true;
+    item.dataset.index = i;
+
+    const handle = document.createElement('span');
+    handle.className = 'project-drag-handle';
+    handle.textContent = '⠿';
+    handle.title = 'Drag to reorder';
+
+    const title = document.createElement('span');
+    title.className = 'project-title';
+    title.textContent = proj.title;
+
+    const menuBtn = document.createElement('button');
+    menuBtn.className = 'project-menu-btn';
+    menuBtn.textContent = '⋯';
+    menuBtn.title = 'Options';
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'project-dropdown';
+
+    const renameBtn = document.createElement('button');
+    renameBtn.textContent = 'Rename';
+    renameBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      dropdown.classList.remove('open');
+      renameProject(proj.id);
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      dropdown.classList.remove('open');
+      deleteProject(proj.id);
+    });
+
+    dropdown.appendChild(renameBtn);
+    dropdown.appendChild(deleteBtn);
+
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasOpen = dropdown.classList.contains('open');
+      // Close all other dropdowns
+      document.querySelectorAll('.project-dropdown.open').forEach(d => d.classList.remove('open'));
+      if (!wasOpen) dropdown.classList.add('open');
+    });
+
+    item.appendChild(handle);
+    item.appendChild(title);
+    item.appendChild(menuBtn);
+    item.appendChild(dropdown);
+
+    // Click to open (but not on handle/menu)
+    item.addEventListener('click', e => {
+      if (e.target.closest('.project-menu-btn') || e.target.closest('.project-dropdown')) return;
+      openProject(proj.id);
+    });
+
+    // Drag-to-reorder
+    item.addEventListener('dragstart', e => {
+      dragSrcIndex = i;
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    item.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', () => {
+      item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', e => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      if (dragSrcIndex === i) return;
+      const projects = loadProjects();
+      const [moved] = projects.splice(dragSrcIndex, 1);
+      projects.splice(i, 0, moved);
+      saveProjects(projects);
+      renderProjectsList();
+    });
+
+    projectsList.appendChild(item);
+  });
+}
+
+function newProject() {
+  if (isDirty && !confirm('You have unsaved changes. Start a new project anyway?')) return;
+  currentProjectId = null;
+  projectTitleLabel.textContent = 'Untitled';
+  mqFields.clear();
+  boxes = [{ id: genId(), type: 'math', content: '' }];
+  rebuildBoxList();
+  suppressTextSync = true;
+  latexSource.value = '';
+  suppressTextSync = false;
+  history = [{ latex: '', focusId: null }];
+  historyIndex = 0;
+  markClean();
+  saveDraft();
+  closeProjectsPanel();
+  renderProjectsList();
+  focusBox(boxes[0].id);
+}
+
+function openProjectsPanel() {
+  projectsPanel.classList.add('open');
+  projectsOverlay.classList.add('visible');
+  renderProjectsList();
+}
+
+function closeProjectsPanel() {
+  projectsPanel.classList.remove('open');
+  projectsOverlay.classList.remove('visible');
+}
+
+// Close dropdowns when clicking outside
+document.addEventListener('click', () => {
+  document.querySelectorAll('.project-dropdown.open').forEach(d => d.classList.remove('open'));
+});
+
+projectsBtn.addEventListener('click', () => {
+  if (projectsPanel.classList.contains('open')) {
+    closeProjectsPanel();
+  } else {
+    openProjectsPanel();
+  }
+});
+
+closeProjectsBtn.addEventListener('click', closeProjectsPanel);
+projectsOverlay.addEventListener('click', closeProjectsPanel);
+document.getElementById('new-project-btn').addEventListener('click', newProject);
+saveBtn.addEventListener('click', saveCurrentProject);
+downloadBtn.addEventListener('click', downloadCurrentProject);
 
 // ── Initialize ────────────────────────────────────────────────────────────────
 (function init() {
   applyFontSize();
-  boxes = [{ id: genId(), type: 'math', content: '' }];
-  renderBoxes();
-  syncToText(); // also seeds history[0]
-  focusBox(boxes[0].id);
+  const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+  if (draft && draft.latex != null) {
+    restoreFromLatex(draft.latex);
+    currentProjectId = draft.projectId || null;
+    if (currentProjectId) {
+      const proj = loadProjects().find(p => p.id === currentProjectId);
+      if (proj) projectTitleLabel.textContent = proj.title;
+    }
+  } else {
+    boxes = [{ id: genId(), type: 'math', content: '' }];
+    renderBoxes();
+    suppressHistory = true;
+    syncToText();
+    suppressHistory = false;
+    history = [{ latex: latexSource.value, focusId: null }];
+    historyIndex = 0;
+    focusBox(boxes[0].id);
+  }
+  markClean();
 })();

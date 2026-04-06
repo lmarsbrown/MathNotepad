@@ -7,12 +7,43 @@
   <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mathquill@0.10.1-a/build/mathquill.css">
   <script src="https://cdn.jsdelivr.net/npm/mathquill@0.10.1-a/build/mathquill.min.js"></script>
+  <script>
+  MathJax = {
+    tex: {
+      displayMath: [['\\[', '\\]']],
+      inlineMath:  [['\\(', '\\)']],
+    },
+    startup: { typeset: false },
+  };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="projects-panel">
+    <div class="projects-header">
+      <span>Projects</span>
+      <div class="projects-header-actions">
+        <button id="new-project-btn" title="New project">+ New</button>
+        <button id="close-projects-btn">×</button>
+      </div>
+    </div>
+    <div id="projects-list"></div>
+  </div>
+  <div id="projects-overlay"></div>
+
   <div id="app">
     <div id="left-panel">
-      <div class="panel-header">LaTeX Source</div>
+      <div class="panel-header">
+        <div class="header-left">
+          <button id="projects-btn" title="Projects">☰</button>
+          <span id="project-title-label">Untitled</span>
+        </div>
+        <div class="header-right">
+          <button id="save-btn">Save</button>
+          <button id="download-btn">Download</button>
+        </div>
+      </div>
       <textarea id="latex-source" spellcheck="false"></textarea>
     </div>
     <div id="divider"></div>
@@ -26,9 +57,25 @@
           <button id="font-dec-btn" title="Decrease font size">A−</button>
           <span id="font-size-label" class="font-size-label">16px</span>
           <button id="font-inc-btn" title="Increase font size">A+</button>
+          <span class="toolbar-sep"></span>
+          <button id="toggle-preview-btn">Preview</button>
         </div>
       </div>
       <div id="box-list"></div>
+    </div>
+    <div id="divider2"></div>
+    <div id="preview-panel">
+      <div class="panel-header">
+        <span>Preview</span>
+        <div class="toolbar">
+          <button id="preview-zoom-out-btn">−</button>
+          <span id="preview-zoom-label" class="font-size-label">100%</span>
+          <button id="preview-zoom-in-btn">+</button>
+          <span class="toolbar-sep"></span>
+          <button id="download-pdf-btn">Download PDF</button>
+        </div>
+      </div>
+      <div id="preview-content"></div>
     </div>
   </div>
   <script src="script.js"></script>
