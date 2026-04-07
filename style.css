@@ -313,6 +313,11 @@ html, body {
   flex-shrink: 0;
 }
 
+#left-panel.hidden,
+#divider.hidden {
+  display: none;
+}
+
 /* ── Left panel: textarea + line numbers ── */
 #latex-wrapper {
   flex: 1;
@@ -602,6 +607,56 @@ html, body {
   background: #313244;
 }
 
+/* Pagebreak box */
+.box.box-pagebreak {
+  min-height: 28px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  align-items: center;
+  cursor: default;
+}
+
+.pagebreak-rule {
+  flex: 1;
+  position: relative;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, #45475a 0px, #45475a 8px, transparent 8px, transparent 16px);
+}
+
+.pagebreak-rule::before {
+  content: 'PAGE BREAK';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #181825;
+  padding: 0 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #585b70;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Preview pagebreak: zero-height marker consumed by paginatePreview */
+.preview-pagebreak {
+  height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+/* Commented-out box */
+.box.commented {
+  opacity: 0.4;
+  border-color: #313244 !important;
+}
+
+.box.commented .mq-editable-field,
+.box.commented .text-input {
+  color: #585b70;
+}
+
 /* ── MathQuill overrides for dark theme ── */
 .mq-math-mode {
   color: #cdd6f4;
@@ -702,11 +757,17 @@ html, body {
 }
 
 .preview-math {
-  margin: 14px 0;
+  margin: 6px 0;
   text-align: center;
   color: #1a1a1a;
   overflow-x: auto;
   max-width: 100%;
+}
+
+/* MathJax injects margin:1em 0 on display containers by default — override to a
+   tighter value so simple equations don't leave excessive vertical gaps. */
+.preview-math mjx-container[jax="SVG"][display="true"] {
+  margin: 0.2em 0 !important;
 }
 
 .preview-text {

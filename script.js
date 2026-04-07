@@ -46,6 +46,7 @@ const addTextBtn    = document.getElementById('add-text-btn');
 const addH1Btn      = document.getElementById('add-h1-btn');
 const addH2Btn      = document.getElementById('add-h2-btn');
 const addH3Btn      = document.getElementById('add-h3-btn');
+const addBreakBtn   = document.getElementById('add-break-btn');
 const defaultMathBtn = document.getElementById('default-math-btn');
 const defaultTextBtn = document.getElementById('default-text-btn');
 const fontDecBtn  = document.getElementById('font-dec-btn');
@@ -74,12 +75,15 @@ function genId() { return 'b' + (nextId++); }
 // ── Serialization ─────────────────────────────────────────────────────────────
 function serializeToLatex(boxArray) {
   return boxArray.map(b => {
-    if (b.type === 'math') return `\\[${b.content}\\]`;
-    if (b.type === 'h1') return `\\section{${b.content}}`;
-    if (b.type === 'h2') return `\\subsection{${b.content}}`;
-    if (b.type === 'h3') return `\\subsubsection{${b.content}}`;
-    // text: prefix each line with '%'
-    return b.content.split('\n').map(line => '% ' + line).join('\n');
+    let serialized;
+    if (b.type === 'math') serialized = `\\[${b.content}\\]`;
+    else if (b.type === 'h1') serialized = `\\section{${b.content}}`;
+    else if (b.type === 'h2') serialized = `\\subsection{${b.content}}`;
+    else if (b.type === 'h3') serialized = `\\subsubsection{${b.content}}`;
+    else if (b.type === 'pagebreak') serialized = '\\newpage';
+    else serialized = b.content.split('\n').map(line => '% ' + line).join('\n');
+    if (b.commented) return serialized.split('\n').map(line => '%% ' + line).join('\n');
+    return serialized;
   }).join('\n\n');
 }
 
@@ -90,6 +94,19 @@ function parseFromLatex(src) {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i].trimEnd();
+
+    // Commented box: lines starting with '%% '
+    if (line.startsWith('%% ') || line.trimEnd() === '%%') {
+      const commentedLines = [line.startsWith('%% ') ? line.slice(3) : ''];
+      i++;
+      while (i < lines.length && (lines[i].startsWith('%% ') || lines[i].trimEnd() === '%%')) {
+        commentedLines.push(lines[i].startsWith('%% ') ? lines[i].slice(3) : '');
+        i++;
+      }
+      const inner = parseFromLatex(commentedLines.join('\n'));
+      if (inner.length > 0) result.push({ ...inner[0], id: genId(), commented: true });
+      continue;
+    }
 
     // Heading boxes: \section{}, \subsection{}, \subsubsection{}
     const headingPatterns = [
@@ -129,6 +146,13 @@ function parseFromLatex(src) {
         i++;
       }
       result.push({ id: genId(), type: 'text', content: textLines.join('\n') });
+      continue;
+    }
+
+    // Pagebreak: \newpage
+    if (line.trimEnd() === '\\newpage') {
+      result.push({ id: genId(), type: 'pagebreak', content: '' });
+      i++;
       continue;
     }
 
@@ -183,7 +207,7 @@ function collectMathBlock(lines, startLine) {
 // ── Box → DOM ─────────────────────────────────────────────────────────────────
 function createBoxElement(box) {
   const div = document.createElement('div');
-  div.className = 'box';
+  div.className = 'box' + (box.commented ? ' commented' : '');
   div.dataset.id = box.id;
 
   // Drag handle
@@ -205,6 +229,8 @@ function createBoxElement(box) {
     if (box.type === 'math') {
       const field = mqFields.get(box.id);
       if (field) field.focus();
+    } else if (box.type === 'pagebreak') {
+      setFocused(box.id, div);
     } else {
       const ta = div.querySelector('.text-input');
       if (ta) ta.focus();
@@ -320,6 +346,23 @@ function createBoxElement(box) {
           boxClipboard = null;
         }
       }
+      // Ctrl+/: toggle comment
+      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleComment(box.id);
+      }
+      // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: intercept before MathQuill's own undo handler
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) applyRedo(); else applyUndo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        e.stopPropagation();
+        applyRedo();
+      }
     }, true); // capture phase: fires before MathQuill's inner textarea handler
 
     // Track focus
@@ -370,6 +413,11 @@ function createBoxElement(box) {
         } else {
           boxClipboard = null;
         }
+      }
+      // Ctrl+/: toggle comment
+      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault();
+        toggleComment(box.id);
       }
       // Arrow key inter-box navigation (only plain arrow keys — no modifier keys)
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -456,6 +504,11 @@ function createBoxElement(box) {
           boxClipboard = null;
         }
       }
+      // Ctrl+/: toggle comment
+      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault();
+        toggleComment(box.id);
+      }
       // Arrow key inter-box navigation (plain arrow keys only)
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const idx = boxes.findIndex(b => b.id === box.id);
@@ -479,6 +532,13 @@ function createBoxElement(box) {
     div.appendChild(deleteBtn);
 
     requestAnimationFrame(autoResize);
+  } else if (box.type === 'pagebreak') {
+    div.classList.add('box-pagebreak');
+
+    const rule = document.createElement('div');
+    rule.className = 'pagebreak-rule';
+    div.appendChild(rule);
+    div.appendChild(deleteBtn);
   }
 
   return div;
@@ -493,6 +553,10 @@ function reflowBox(box){
 }
 
 function setFocused(id, el) {
+  if (focusedBoxId && focusedBoxId !== id) {
+    const prevEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
+    if (prevEl) prevEl.classList.remove('focused');
+  }
   focusedBoxId = id;
   el.classList.add('focused');
   // Clear source-panel box outline (source panel takes over when textarea is focused)
@@ -545,6 +609,11 @@ function appendBox(type = 'math') {
     if (idx !== -1) {
       // Check if focused box is empty
       const focused = boxes[idx];
+      // Pagebreaks have no content — always insert after, never convert
+      if (focused.type === 'pagebreak') {
+        insertBoxAfter(focusedBoxId, type);
+        return;
+      }
       let isEmpty = false;
       if (focused.type === 'math') {
         const field = mqFields.get(focusedBoxId);
@@ -596,6 +665,15 @@ function deleteBox(id) {
   syncToText();
 
   if (focusTarget) focusBox(focusTarget);
+}
+
+function toggleComment(id) {
+  const idx = boxes.findIndex(b => b.id === id);
+  if (idx === -1) return;
+  boxes[idx].commented = !boxes[idx].commented;
+  const el = boxList.querySelector(`[data-id="${id}"]`);
+  if (el) el.classList.toggle('commented', !!boxes[idx].commented);
+  syncToText();
 }
 
 // Efficient rebuild: only touch the DOM, reuse MQ fields where possible
@@ -689,15 +767,14 @@ function applyRedo() {
 function restoreSnapshot(snap, preferFocusIdx = -1) {
   suppressHistory = true;
   suppressBoxSync = true;
-  boxes = parseFromLatex(snap.latex);
-  rebuildBoxList();
+  diffAndApply(parseFromLatex(snap.latex));
   suppressTextSync = true;
   latexSource.value = snap.latex;
   suppressTextSync = false;
   suppressBoxSync = false;
   suppressHistory = false;
   updateLineNumbers();
-  updatePreview();
+  schedulePreview(150);
   // parseFromLatex always generates new IDs, so focus by position rather than ID
   if (preferFocusIdx >= 0 && boxes.length > 0) {
     focusBox(boxes[Math.min(preferFocusIdx, boxes.length - 1)].id);
@@ -755,8 +832,8 @@ function diffAndApply(newBoxes) {
   const result = newBoxes.map((nb, i) => {
     const existing = boxes[i];
     if (existing && existing.type === nb.type) {
-      // Reuse id, update content
-      return { ...existing, content: nb.content };
+      // Reuse id, update content and commented state
+      return { ...existing, content: nb.content, commented: nb.commented };
     }
     return nb;
   });
@@ -783,6 +860,8 @@ function diffAndApply(newBoxes) {
     const existingEl = boxList.children[i];
 
     if (existingEl && existingEl.dataset.id === box.id) {
+      // Sync commented state
+      existingEl.classList.toggle('commented', !!box.commented);
       // Update content of existing box
       const field = mqFields.get(box.id);
       if (field) {
@@ -957,7 +1036,7 @@ defaultTextBtn.addEventListener('click', () => setDefaultBoxType('text'));
 
 // ── Toolbar buttons ───────────────────────────────────────────────────────────
 // Prevent mousedown from stealing focus (which would clear focusedBoxId before click fires)
-[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn].forEach(btn => {
+[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn].forEach(btn => {
   btn.addEventListener('mousedown', e => e.preventDefault());
 });
 addMathBtn.addEventListener('click', () => appendBox('math'));
@@ -965,6 +1044,7 @@ addTextBtn.addEventListener('click', () => appendBox('text'));
 addH1Btn.addEventListener('click', () => appendBox('h1'));
 addH2Btn.addEventListener('click', () => appendBox('h2'));
 addH3Btn.addEventListener('click', () => appendBox('h3'));
+addBreakBtn.addEventListener('click', () => appendBox('pagebreak'));
 
 // ── Font size ─────────────────────────────────────────────────────────────────
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32];
@@ -993,7 +1073,7 @@ function cutBox(id) {
   if (box.type === 'math') {
     const field = mqFields.get(id);
     if (field) content = field.latex();
-  } else {
+  } else if (box.type !== 'pagebreak') {
     const ta = boxList.querySelector(`[data-id="${id}"] .text-input`);
     if (ta) content = ta.value;
   }
@@ -1040,6 +1120,7 @@ function pasteBox() {
 
 // Blackboard bold shorthands: RR → \mathbb{R}, etc.
 // Applied to LaTeX strings in the preview only; boxes/source are left untouched.
+// IMPORTANT: call this BEFORE escapeHtml so that <-/-> are substituted before < and > are escaped.
 const BB_SUBS = {
   'RR': '\\mathbb{R}',
   'CC': '\\mathbb{C}',
@@ -1051,6 +1132,11 @@ const BB_SUBS = {
 };
 function applyBBSubs(latex) {
   let out = latex;
+  out = out.replace(/<=/g, '\\leq ');
+  out = out.replace(/>=/g, '\\geq ');
+  out = out.replace(/->/g, '\\rightarrow ');
+  out = out.replace(/<-/g, '\\leftarrow ');
+  out = out.replace(/!=/g, '\\neq ');
   for (const [key, val] of Object.entries(BB_SUBS)) out = out.replaceAll(key, val);
   return out;
 }
@@ -1061,7 +1147,7 @@ const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/
 
 function processTextContent(text) {
   return text.split(/\$([^$]+)\$/).map((part, i) => {
-    if (i % 2 === 1) return `\\(${applyBBSubs(escapeHtml(part))}\\)`;
+    if (i % 2 === 1) return `\\(${escapeHtml(applyBBSubs(part))}\\)`;
     return escapeHtml(part).replace(/\n/g, '<br>');
   }).join('');
 }
@@ -1071,16 +1157,25 @@ function schedulePreview(delay = 400) {
   previewTimer = setTimeout(() => updatePreview(), delay);
 }
 
+let previewRunning = false;
+let previewPending = false;
+
 async function updatePreview() {
   if (!isPreviewOpen) return;
+  if (previewRunning) { previewPending = true; return; }
+  previewRunning = true;
+  previewPending = false;
 
   let inner = '';
   for (const box of boxes) {
+    if (box.commented) continue;
     if (box.type === 'math') {
-      inner += `<div class="preview-math">\\[${applyBBSubs(escapeHtml(box.content))}\\]</div>`;
+      inner += `<div class="preview-math">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
     } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
       const tag = box.type;
       inner += `<${tag} class="preview-${tag}">${processTextContent(box.content)}</${tag}>`;
+    } else if (box.type === 'pagebreak') {
+      inner += `<div class="preview-pagebreak"></div>`;
     } else {
       inner += `<p class="preview-text">${processTextContent(box.content)}</p>`;
     }
@@ -1099,6 +1194,8 @@ async function updatePreview() {
   applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
 
   previewContent.scrollTop = savedScroll;
+  previewRunning = false;
+  if (previewPending) schedulePreview(0);
 }
 
 // Try to split a .preview-text element at a <br> boundary so that the first
@@ -1153,7 +1250,10 @@ function paginatePreview() {
 
   // Measure positions before detaching elements.
   const tops    = children.map(el => el.offsetTop - PADDING_TOP);
-  const bottoms = children.map((el, i) => tops[i] + el.offsetHeight);
+  const bottoms = children.map((el, i) => {
+    const mb = parseFloat(getComputedStyle(el).marginBottom) || 0;
+    return tops[i] + el.offsetHeight + mb;
+  });
 
   // Hidden off-screen ruler with the same CSS as a real page — used to measure
   // split fragment heights without affecting the visible layout.
@@ -1177,6 +1277,13 @@ function paginatePreview() {
     const relTop      = item.top    - pageBaseY;
     const relBottom   = item.bottom - pageBaseY;
     const currentPage = pages[pages.length - 1];
+
+    // Forced page break — start a new page without adding any element
+    if (el.classList.contains('preview-pagebreak')) {
+      pages.push([]);
+      pageBaseY = item.top;
+      continue;
+    }
 
     if (currentPage.length > 0 && relBottom > PAGE_CONTENT_H) {
       // Element overflows the current page. Try splitting text boxes.
@@ -1264,8 +1371,25 @@ function togglePreview() {
 togglePreviewBtn.addEventListener('click', togglePreview);
 downloadPdfBtn.addEventListener('click', () => window.print()); // print dialog → "Save as PDF"
 
+const toggleSourceBtn = document.getElementById('toggle-source-btn');
+let isSourceOpen = true;
+
+function toggleSource() {
+  isSourceOpen = !isSourceOpen;
+  document.getElementById('left-panel').classList.toggle('hidden', !isSourceOpen);
+  document.getElementById('divider').classList.toggle('hidden', !isSourceOpen);
+  toggleSourceBtn.textContent = isSourceOpen ? 'Hide Source' : 'Source';
+}
+
+toggleSourceBtn.addEventListener('click', toggleSource);
+
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
+  if (e.altKey && !e.ctrlKey && !e.metaKey) {
+    if (e.key === 't') { e.preventDefault(); appendBox('text'); return; }
+    if (e.key === 'm') { e.preventDefault(); appendBox('math'); return; }
+  }
+
   const mod = e.ctrlKey || e.metaKey;
   if (!mod) return;
 
