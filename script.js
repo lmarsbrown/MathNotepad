@@ -4,15 +4,20 @@
 const MQ = MathQuill.getInterface(2);
 
 // ── State ────────────────────────────────────────────────────────────────────
-let boxes = [];           // [{ id, type: 'math'|'text', content }]
+let boxes = [];           // [{ id, type: 'math'|'text'|'h1'|'h2'|'h3', content }]
 let mqFields = new Map(); // id → MathQuill field instance
+let boxResizers = new Map(); // id → resize function (called on panel width change)
 let nextId = 1;
 let suppressTextSync = false; // prevent feedback loops
 let suppressBoxSync  = false;
 let textSyncTimer = null;
+let previewTimer = null;
 let focusedBoxId = null;
 let boxClipboard = null; // { type, content } — box-level cut/paste
 let dragSrcBoxId = null; // id of box being dragged
+
+// ── Default box type ─────────────────────────────────────────────────────────
+let defaultBoxType = 'math';
 
 // ── Preview state ────────────────────────────────────────────────────────────
 let isPreviewOpen = false;
@@ -32,10 +37,17 @@ let historyIndex = -1; // points to current state in history
 let suppressHistory = false;
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
-const boxList     = document.getElementById('box-list');
-const latexSource = document.getElementById('latex-source');
-const addMathBtn  = document.getElementById('add-math-btn');
-const addTextBtn  = document.getElementById('add-text-btn');
+const boxList       = document.getElementById('box-list');
+const latexSource   = document.getElementById('latex-source');
+const lineNumbers         = document.getElementById('line-numbers');
+const sourceLineHighlight = document.getElementById('source-line-highlight');
+const addMathBtn    = document.getElementById('add-math-btn');
+const addTextBtn    = document.getElementById('add-text-btn');
+const addH1Btn      = document.getElementById('add-h1-btn');
+const addH2Btn      = document.getElementById('add-h2-btn');
+const addH3Btn      = document.getElementById('add-h3-btn');
+const defaultMathBtn = document.getElementById('default-math-btn');
+const defaultTextBtn = document.getElementById('default-text-btn');
 const fontDecBtn  = document.getElementById('font-dec-btn');
 const fontIncBtn  = document.getElementById('font-inc-btn');
 const fontSizeLabel     = document.getElementById('font-size-label');
@@ -63,9 +75,12 @@ function genId() { return 'b' + (nextId++); }
 function serializeToLatex(boxArray) {
   return boxArray.map(b => {
     if (b.type === 'math') return `\\[${b.content}\\]`;
+    if (b.type === 'h1') return `\\section{${b.content}}`;
+    if (b.type === 'h2') return `\\subsection{${b.content}}`;
+    if (b.type === 'h3') return `\\subsubsection{${b.content}}`;
     // text: prefix each line with '%'
     return b.content.split('\n').map(line => '% ' + line).join('\n');
-  }).join('\n');
+  }).join('\n\n');
 }
 
 function parseFromLatex(src) {
@@ -75,6 +90,23 @@ function parseFromLatex(src) {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i].trimEnd();
+
+    // Heading boxes: \section{}, \subsection{}, \subsubsection{}
+    const headingPatterns = [
+      { prefix: '\\section{',       type: 'h1', len: 9  },
+      { prefix: '\\subsection{',    type: 'h2', len: 12 },
+      { prefix: '\\subsubsection{', type: 'h3', len: 15 },
+    ];
+    let matchedHeading = false;
+    for (const { prefix, type, len } of headingPatterns) {
+      if (line.startsWith(prefix) && line.endsWith('}')) {
+        result.push({ id: genId(), type, content: line.slice(len, -1) });
+        i++;
+        matchedHeading = true;
+        break;
+      }
+    }
+    if (matchedHeading) continue;
 
     // Math box: starts with \[ on this line
     if (line.startsWith('\\[')) {
@@ -214,9 +246,23 @@ function createBoxElement(box) {
     div.appendChild(mqSpan);
     div.appendChild(deleteBtn);
 
+    // Resize the box to fit the rendered equation height.
+    // MathQuill's internal vertical-align tricks don't always push the CSS block
+    // height, so we measure the actual rendered offsetHeight and set min-height.
+    const resizeBox = () => {
+      requestAnimationFrame(() => {
+        div.style.minHeight = '';
+        const h = mqSpan.offsetHeight;
+        if (h > 0) div.style.minHeight = (h + 20) + 'px';
+      });
+    };
+    boxResizers.set(box.id, resizeBox);
+
+    const greekLetters = "alpha beta Gamma gamma Delta delta epsilon zeta eta Theta theta iota kappa Lambda lambda mu nu Xi xi Pi pi rho Sigma sigma tau Upsilon upsilon Phi phi Chi chi Psi Omega omega";
+
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
-      autoCommands: 'sqrt sum int prod',
+      autoCommands: 'sqrt sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus '+greekLetters,
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -224,23 +270,39 @@ function createBoxElement(box) {
             boxes[idx].content = field.latex();
             syncToText();
           }
+          resizeBox();
         },
         enter: () => {
-          insertBoxAfter(box.id, 'math');
+          insertBoxAfter(box.id, defaultBoxType);
+        },
+        // dir === 1 → right arrow past end; dir === -1 → left arrow past start
+        moveOutOf: (dir) => {
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (dir === 1 && idx < boxes.length - 1) focusBoxAtEdge(boxes[idx + 1].id, 'start');
+          else if (dir === -1 && idx > 0)          focusBoxAtEdge(boxes[idx - 1].id, 'end');
+        },
+        upOutOf: () => {
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (idx > 0) focusBoxAtEdge(boxes[idx - 1].id, 'end');
+        },
+        downOutOf: () => {
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (idx < boxes.length - 1) focusBoxAtEdge(boxes[idx + 1].id, 'start');
         },
       },
     });
 
-    if (box.content) field.latex(box.content);
+    if (box.content){
+      field.latex(box.content);
+    }
+    setTimeout(resizeBox, 0);
 
-    // Capture-phase keydown: fires before MathQuill's inner handler so we read
-    // field state before MathQuill mutates it, and can override Enter/Backspace.
+    // Capture-phase keydown: fires before MathQuill's inner textarea handler.
     mqSpan.addEventListener('keydown', e => {
-      // Enter with any modifier combo → new box (MathQuill's handlers.enter only
-      // fires for plain Enter, so we must handle modified Enter here)
+      // Enter with any modifier combo → new box
       if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey || e.altKey)) {
         e.preventDefault();
-        insertBoxAfter(box.id, 'math');
+        insertBoxAfter(box.id, defaultBoxType);
       }
       // Backspace on empty → delete box
       if (e.key === 'Backspace' && field.latex() === '') {
@@ -248,7 +310,6 @@ function createBoxElement(box) {
         deleteBox(box.id);
       }
       // Ctrl+X: whole-box cut only when nothing is selected in MathQuill.
-      // Must be capture phase so we check selection state before MQ processes the key.
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
         const hasSelection = !!mqSpan.querySelector('.mq-selection');
         if (!hasSelection) {
@@ -256,7 +317,6 @@ function createBoxElement(box) {
           e.stopPropagation();
           cutBox(box.id);
         } else {
-          // Partial cut — clear box clipboard so Ctrl+V falls through to MathQuill
           boxClipboard = null;
         }
       }
@@ -268,7 +328,7 @@ function createBoxElement(box) {
 
     mqFields.set(box.id, field);
 
-  } else {
+  } else if (box.type === 'text') {
     // Text box: textarea that auto-resizes
     const ta = document.createElement('textarea');
     ta.className = 'text-input';
@@ -277,9 +337,12 @@ function createBoxElement(box) {
     ta.placeholder = 'Text…';
 
     const autoResize = () => {
-      ta.style.height = 'auto';
+      const savedScroll = boxList.scrollTop;
+      ta.style.height = '1px'; // collapse first so scrollHeight reflects content, not current size
       ta.style.height = ta.scrollHeight + 'px';
+      boxList.scrollTop = savedScroll;
     };
+    boxResizers.set(box.id, autoResize);
 
     ta.addEventListener('input', () => {
       autoResize();
@@ -293,7 +356,7 @@ function createBoxElement(box) {
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        insertBoxAfter(box.id, 'math');
+        insertBoxAfter(box.id, defaultBoxType);
       }
       if (e.key === 'Backspace' && ta.value === '') {
         e.preventDefault();
@@ -305,8 +368,24 @@ function createBoxElement(box) {
           e.preventDefault();
           cutBox(box.id);
         } else {
-          // Partial cut — clear box clipboard so Ctrl+V falls through to browser paste
           boxClipboard = null;
+        }
+      }
+      // Arrow key inter-box navigation (only plain arrow keys — no modifier keys)
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (e.key === 'ArrowLeft' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+          if (idx > 0) { e.preventDefault(); focusBoxAtEdge(boxes[idx - 1].id, 'end'); }
+        } else if (e.key === 'ArrowRight' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+          if (idx < boxes.length - 1) { e.preventDefault(); focusBoxAtEdge(boxes[idx + 1].id, 'start'); }
+        } else if (e.key === 'ArrowUp') {
+          // Navigate up only when cursor is already on the first line
+          const onFirstLine = ta.value.lastIndexOf('\n', ta.selectionStart - 1) === -1;
+          if (onFirstLine && idx > 0) { e.preventDefault(); focusBoxAtEdge(boxes[idx - 1].id, 'end'); }
+        } else if (e.key === 'ArrowDown') {
+          // Navigate down only when cursor is already on the last line
+          const onLastLine = ta.value.indexOf('\n', ta.selectionStart) === -1;
+          if (onLastLine && idx < boxes.length - 1) { e.preventDefault(); focusBoxAtEdge(boxes[idx + 1].id, 'start'); }
         }
       }
     });
@@ -319,19 +398,112 @@ function createBoxElement(box) {
 
     // Trigger resize after append
     requestAnimationFrame(autoResize);
+
+  } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
+    // Badge sits on the top border of the box (absolutely positioned)
+    const label = document.createElement('span');
+    label.className = 'box-type-label';
+    label.textContent = box.type.toUpperCase();
+    div.appendChild(label);
+
+    // Inner flex container for the textarea only
+    const inner = document.createElement('div');
+    inner.className = 'box-heading-inner';
+
+    const fontSizes = { h1: '20px', h2: '17px', h3: '15px' };
+
+    const ta = document.createElement('textarea');
+    ta.className = 'text-input';
+    ta.rows = 1;
+    ta.value = box.content || '';
+    ta.placeholder = box.type.toUpperCase() + '…';
+    ta.style.fontWeight = 'bold';
+    ta.style.fontSize = fontSizes[box.type];
+
+    const autoResize = () => {
+      const savedScroll = boxList.scrollTop;
+      ta.style.height = '1px';
+      ta.style.height = ta.scrollHeight + 'px';
+      boxList.scrollTop = savedScroll;
+    };
+    boxResizers.set(box.id, autoResize);
+
+    ta.addEventListener('input', () => {
+      autoResize();
+      // Strip newlines from headings
+      if (ta.value.includes('\n')) ta.value = ta.value.replace(/\n/g, '');
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx !== -1) {
+        boxes[idx].content = ta.value;
+        syncToText();
+      }
+    });
+
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        insertBoxAfter(box.id, defaultBoxType);
+      }
+      if (e.key === 'Backspace' && ta.value === '') {
+        e.preventDefault();
+        deleteBox(box.id);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+        if (ta.selectionStart === ta.selectionEnd) {
+          e.preventDefault();
+          cutBox(box.id);
+        } else {
+          boxClipboard = null;
+        }
+      }
+      // Arrow key inter-box navigation (plain arrow keys only)
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (e.key === 'ArrowLeft' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+          if (idx > 0) { e.preventDefault(); focusBoxAtEdge(boxes[idx - 1].id, 'end'); }
+        } else if (e.key === 'ArrowRight' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+          if (idx < boxes.length - 1) { e.preventDefault(); focusBoxAtEdge(boxes[idx + 1].id, 'start'); }
+        } else if (e.key === 'ArrowUp' && idx > 0) {
+          e.preventDefault(); focusBoxAtEdge(boxes[idx - 1].id, 'end');
+        } else if (e.key === 'ArrowDown' && idx < boxes.length - 1) {
+          e.preventDefault(); focusBoxAtEdge(boxes[idx + 1].id, 'start');
+        }
+      }
+    });
+
+    ta.addEventListener('focus', () => setFocused(box.id, div));
+    ta.addEventListener('blur',  () => clearFocused(box.id, div));
+
+    inner.appendChild(ta);
+    div.appendChild(inner);
+    div.appendChild(deleteBtn);
+
+    requestAnimationFrame(autoResize);
   }
 
   return div;
 }
 
+// Setting the latex of a box before it is in the DOM can cause bugs. Callnig reflow after it is added fixes this.
+function reflowBox(box){
+  if(mqFields.get(box.id) != undefined){
+    const field = mqFields.get(box.id) ;
+    field.reflow();
+  }
+}
+
 function setFocused(id, el) {
   focusedBoxId = id;
   el.classList.add('focused');
+  // Clear source-panel box outline (source panel takes over when textarea is focused)
+  boxList.querySelectorAll('.box-source-active').forEach(b => b.classList.remove('box-source-active'));
+  highlightSourceForBox(id);
 }
 
 function clearFocused(id, el) {
   if (focusedBoxId === id) focusedBoxId = null;
   el.classList.remove('focused');
+  updateSourceHighlight(-1, -1);
 }
 
 // ── Render all boxes ──────────────────────────────────────────────────────────
@@ -339,13 +511,18 @@ function renderBoxes() {
   // Remove MQ instances for boxes that no longer exist
   const currentIds = new Set(boxes.map(b => b.id));
   for (const [id] of mqFields) {
-    if (!currentIds.has(id)) mqFields.delete(id);
+    if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
   }
 
   boxList.innerHTML = '';
   for (const box of boxes) {
-    boxList.appendChild(createBoxElement(box));
+    let boxElement = createBoxElement(box);
+
+    boxList.appendChild(boxElement);
+    reflowBox(box);
   }
+
+  
 }
 
 // ── Insert / delete ───────────────────────────────────────────────────────────
@@ -363,8 +540,37 @@ function insertBoxAfter(afterId, type = 'math') {
 }
 
 function appendBox(type = 'math') {
-  // Insert after currently focused box, or at end
   if (focusedBoxId) {
+    const idx = boxes.findIndex(b => b.id === focusedBoxId);
+    if (idx !== -1) {
+      // Check if focused box is empty
+      const focused = boxes[idx];
+      let isEmpty = false;
+      if (focused.type === 'math') {
+        const field = mqFields.get(focusedBoxId);
+        isEmpty = !field || field.latex() === '';
+      } else {
+        const ta = boxList.querySelector(`[data-id="${focusedBoxId}"] .text-input`);
+        isEmpty = !ta || ta.value === '';
+      }
+      if (isEmpty) {
+        if (focused.type === type) {
+          // Already the right type and empty — just refocus
+          focusBox(focusedBoxId);
+          return;
+        }
+        // Convert the empty box to the new type in-place
+        mqFields.delete(focusedBoxId);
+        boxResizers.delete(focusedBoxId);
+        const oldEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
+        if (oldEl) oldEl.remove();
+        boxes[idx] = { id: focusedBoxId, type, content: '' };
+        rebuildBoxList();
+        syncToText();
+        focusBox(focusedBoxId);
+        return;
+      }
+    }
     insertBoxAfter(focusedBoxId, type);
   } else {
     const newBox = { id: genId(), type, content: '' };
@@ -384,6 +590,7 @@ function deleteBox(id) {
   const focusTarget = focusTargetIdx >= 0 ? boxes[focusTargetIdx]?.id : null;
 
   mqFields.delete(id);
+  boxResizers.delete(id);
   boxes.splice(idx, 1);
   rebuildBoxList();
   syncToText();
@@ -406,6 +613,7 @@ function rebuildBoxList() {
     if (!currentIds.has(id)) {
       boxList.removeChild(el);
       mqFields.delete(id);
+      boxResizers.delete(id);
       existing.delete(id);
     }
   }
@@ -420,6 +628,7 @@ function rebuildBoxList() {
     const currentAtPos = boxList.children[i];
     if (currentAtPos !== el) {
       boxList.insertBefore(el, currentAtPos || null);
+      reflowBox(box);
     }
   }
 }
@@ -428,13 +637,29 @@ function rebuildBoxList() {
 function focusBox(id) {
   const field = mqFields.get(id);
   if (field) {
-    // MathQuill focus
     setTimeout(() => field.focus(), 0);
     return;
   }
-  // Text box
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
   if (el) setTimeout(() => el.focus(), 0);
+}
+
+// Focus a box and place the cursor at 'start' or 'end'.
+// For MathQuill fields the cursor lands wherever it was last (MQ manages this).
+function focusBoxAtEdge(id, edge) {
+  const field = mqFields.get(id);
+  if (field) {
+    setTimeout(() => field.focus(), 0);
+    return;
+  }
+  const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
+  if (el) {
+    setTimeout(() => {
+      el.focus();
+      const pos = edge === 'start' ? 0 : el.value.length;
+      el.setSelectionRange(pos, pos);
+    }, 0);
+  }
 }
 
 // ── History (undo) ────────────────────────────────────────────────────────────
@@ -471,6 +696,8 @@ function restoreSnapshot(snap, preferFocusIdx = -1) {
   suppressTextSync = false;
   suppressBoxSync = false;
   suppressHistory = false;
+  updateLineNumbers();
+  updatePreview();
   // parseFromLatex always generates new IDs, so focus by position rather than ID
   if (preferFocusIdx >= 0 && boxes.length > 0) {
     focusBox(boxes[Math.min(preferFocusIdx, boxes.length - 1)].id);
@@ -481,26 +708,47 @@ function restoreSnapshot(snap, preferFocusIdx = -1) {
 function syncToText() {
   if (suppressBoxSync) return;
   suppressTextSync = true;
-  const latex = serializeToLatex(boxes);
+  let latex = serializeToLatex(boxes);
+
   latexSource.value = latex;
   suppressTextSync = false;
+  updateLineNumbers();
   pushHistory(latex);
   saveDraft();
   markDirty();
-  updatePreview();
+  schedulePreview();
 }
 
 // ── Sync left → right (debounced) ─────────────────────────────────────────────
 latexSource.addEventListener('input', () => {
   if (suppressTextSync) return;
+  updateLineNumbers();
   clearTimeout(textSyncTimer);
   textSyncTimer = setTimeout(() => {
     suppressBoxSync = true;
     const parsed = parseFromLatex(latexSource.value);
     diffAndApply(parsed);
     suppressBoxSync = false;
+    schedulePreview();
+    pushHistory(latexSource.value);
+    saveDraft();
+    markDirty();
   }, 300);
 });
+
+// When the textarea gains focus, clear the source-highlight on boxes.
+latexSource.addEventListener('focus', () => {
+  updateSourceHighlight(-1, -1);
+  onSourceCursorChange();
+});
+latexSource.addEventListener('blur', () => {
+  boxList.querySelectorAll('.box-source-active').forEach(b => b.classList.remove('box-source-active'));
+  updateSourceHighlight(-1, -1);
+});
+// Track cursor position changes so the corresponding box gets a yellow outline.
+latexSource.addEventListener('click',   onSourceCursorChange);
+latexSource.addEventListener('keyup',   onSourceCursorChange);
+latexSource.addEventListener('select',  onSourceCursorChange);
 
 function diffAndApply(newBoxes) {
   // Strategy: match by position; preserve IDs where type/content match
@@ -525,6 +773,7 @@ function diffAndApply(newBoxes) {
   while (boxList.children.length > boxes.length) {
     const last = boxList.lastElementChild;
     mqFields.delete(last.dataset.id);
+    boxResizers.delete(last.dataset.id);
     boxList.removeChild(last);
   }
 
@@ -542,7 +791,7 @@ function diffAndApply(newBoxes) {
         const ta = existingEl.querySelector('.text-input');
         if (ta && ta.value !== box.content) {
           ta.value = box.content;
-          ta.style.height = 'auto';
+          ta.style.height = '1px';
           ta.style.height = ta.scrollHeight + 'px';
         }
       }
@@ -558,13 +807,164 @@ function diffAndApply(newBoxes) {
       } else {
         boxList.appendChild(newEl);
       }
+      reflowBox(box);
     }
   }
 }
 
+// ── Line numbers + highlight overlay ─────────────────────────────────────────
+
+let cachedLineHeights = []; // px height of each logical line as rendered in the textarea
+
+// Measure the rendered visual height of every logical line by cloning the
+// textarea's font/width into a hidden mirror div and reading offsetHeight once
+// per line.  All line divs are added in one shot so the browser needs only a
+// single layout pass.
+function measureLineHeights() {
+  const style      = window.getComputedStyle(latexSource);
+  const padL       = parseFloat(style.paddingLeft);
+  const padR       = parseFloat(style.paddingRight);
+  const innerWidth = Math.max(1, latexSource.clientWidth - padL - padR);
+
+  const mirror = document.createElement('div');
+  Object.assign(mirror.style, {
+    position:     'fixed',
+    left:         '-9999px',
+    top:          '0',
+    width:        innerWidth + 'px',
+    height:       'auto',
+    visibility:   'hidden',
+    fontFamily:   style.fontFamily,
+    fontSize:     style.fontSize,
+    fontWeight:   style.fontWeight,
+    lineHeight:   style.lineHeight,
+    letterSpacing: style.letterSpacing,
+    tabSize:      style.tabSize,
+    whiteSpace:   'pre-wrap',
+    overflowWrap: 'break-word',
+    wordBreak:    'normal',
+    padding:      '0',
+    margin:       '0',
+    border:       '0',
+    boxSizing:    'content-box',
+  });
+
+  const lines = latexSource.value.split('\n');
+  const rowEls = lines.map(line => {
+    const div = document.createElement('div');
+    // Use a non-breaking space so empty lines still produce one row of height.
+    div.textContent = line || '\u00a0';
+    mirror.appendChild(div);
+    return div;
+  });
+
+  document.body.appendChild(mirror);
+  const heights = rowEls.map(el => el.getBoundingClientRect().height); // sub-pixel precision
+  document.body.removeChild(mirror);
+  return heights;
+}
+
+function updateLineNumbers() {
+  cachedLineHeights = measureLineHeights();
+
+  // Build gutter text: each logical line gets its number on the first visual
+  // row and blank lines for any additional wrapped rows so numbers stay aligned.
+  const lineH = parseFloat(window.getComputedStyle(lineNumbers).lineHeight) || (13 * 1.7);
+  let gutterText = '';
+  for (let i = 0; i < cachedLineHeights.length; i++) {
+    const visualRows = Math.max(1, Math.round(cachedLineHeights[i] / lineH));
+    gutterText += (i + 1) + '\n' + '\n'.repeat(visualRows - 1);
+  }
+  lineNumbers.textContent = gutterText.replace(/\n$/, '');
+
+  // Rebuild overlay if a box is currently highlighted
+  if (focusedBoxId) highlightSourceForBox(focusedBoxId);
+  else updateSourceHighlight(-1, -1);
+}
+
+latexSource.addEventListener('scroll', () => {
+  lineNumbers.scrollTop = latexSource.scrollTop;
+  sourceLineHighlight.style.transform = `translateY(${-latexSource.scrollTop}px)`;
+});
+
+// ── Source ↔ box cross-highlighting ──────────────────────────────────────────
+
+// Compute which line range (0-based, inclusive) each box occupies in the
+// serialized LaTeX (mirrors serializeToLatex exactly).
+function computeBoxLineRanges(boxArray) {
+  const ranges = [];
+  let line = 0;
+  for (let i = 0; i < boxArray.length; i++) {
+    const b = boxArray[i];
+    const lineCount = serializeToLatex([b]).split('\n').length;
+    ranges.push({ id: b.id, start: line, end: line + lineCount - 1 });
+    line += lineCount + 1; // +1 for blank separator (\n\n join)
+  }
+  return ranges;
+}
+
+// Rebuild the highlight overlay from scratch.  activeStart/activeEnd are
+// 0-based line indices into latexSource.value, or both -1 for no highlight.
+// Each overlay div gets the exact pixel height of its logical line so that
+// wrapped lines take their full visual space.
+function updateSourceHighlight(activeStart, activeEnd) {
+  const fallbackH  = 13 * 1.7; // used only before first measureLineHeights call
+  const totalLines = latexSource.value.split('\n').length;
+  let html = '';
+  for (let i = 0; i < totalLines; i++) {
+    const on = activeStart >= 0 && i >= activeStart && i <= activeEnd;
+    const h  = cachedLineHeights[i] ?? fallbackH;
+    html += `<div class="source-hl${on ? ' active' : ''}" style="height:${h}px"></div>`;
+  }
+  sourceLineHighlight.innerHTML = html;
+  sourceLineHighlight.style.transform = `translateY(${-latexSource.scrollTop}px)`;
+}
+
+// Called when a box is focused — highlight its lines in the source panel.
+function highlightSourceForBox(boxId) {
+  const ranges = computeBoxLineRanges(boxes);
+  const r = ranges.find(x => x.id === boxId);
+  if (r) updateSourceHighlight(r.start, r.end);
+  else    updateSourceHighlight(-1, -1);
+}
+
+// Called when the source textarea cursor moves — outline the corresponding box.
+let _sourceHighlightTimer = null;
+function onSourceCursorChange() {
+  clearTimeout(_sourceHighlightTimer);
+  _sourceHighlightTimer = setTimeout(() => {
+    const cursorLine = latexSource.value.substring(0, latexSource.selectionStart).split('\n').length - 1;
+    const ranges = computeBoxLineRanges(boxes);
+    const r = ranges.find(x => cursorLine >= x.start && cursorLine <= x.end);
+    // Update box outlines
+    boxList.querySelectorAll('.box').forEach(el => el.classList.remove('box-source-active'));
+    if (r) {
+      const el = boxList.querySelector(`[data-id="${r.id}"]`);
+      if (el) el.classList.add('box-source-active');
+    }
+  }, 50);
+}
+
+// ── Default box type toggle ───────────────────────────────────────────────────
+function setDefaultBoxType(type) {
+  defaultBoxType = type;
+  defaultMathBtn.classList.toggle('active', type === 'math');
+  defaultTextBtn.classList.toggle('active', type === 'text');
+}
+
+defaultMathBtn.addEventListener('click', () => setDefaultBoxType('math'));
+defaultTextBtn.addEventListener('click', () => setDefaultBoxType('text'));
+
 // ── Toolbar buttons ───────────────────────────────────────────────────────────
+// Prevent mousedown from stealing focus (which would clear focusedBoxId before click fires)
+[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn].forEach(btn => {
+  btn.addEventListener('mousedown', e => e.preventDefault());
+});
 addMathBtn.addEventListener('click', () => appendBox('math'));
 addTextBtn.addEventListener('click', () => appendBox('text'));
+addH1Btn.addEventListener('click', () => appendBox('h1'));
+addH2Btn.addEventListener('click', () => appendBox('h2'));
+addH3Btn.addEventListener('click', () => appendBox('h3'));
 
 // ── Font size ─────────────────────────────────────────────────────────────────
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32];
@@ -621,6 +1021,7 @@ function pasteBox() {
   if (isEmpty) {
     // Replace the empty box in-place
     mqFields.delete(focusedBoxId);
+    boxResizers.delete(focusedBoxId);
     boxes.splice(idx, 1, newBox);
   } else {
     // Insert a new box below the focused one
@@ -636,22 +1037,56 @@ function pasteBox() {
 }
 
 // ── Preview ───────────────────────────────────────────────────────────────────
+
+// Blackboard bold shorthands: RR → \mathbb{R}, etc.
+// Applied to LaTeX strings in the preview only; boxes/source are left untouched.
+const BB_SUBS = {
+  'RR': '\\mathbb{R}',
+  'CC': '\\mathbb{C}',
+  'ZZ': '\\mathbb{Z}',
+  'NN': '\\mathbb{N}',
+  'QQ': '\\mathbb{Q}',
+  'FF': '\\mathbb{F}',
+  'HH': '\\mathbb{H}',
+};
+function applyBBSubs(latex) {
+  let out = latex;
+  for (const [key, val] of Object.entries(BB_SUBS)) out = out.replaceAll(key, val);
+  return out;
+}
+
+// Escape HTML and convert $...$ to MathJax inline math \(...\).
+// Splits on dollar-sign pairs; odd-indexed segments are math, even are plain text.
+const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function processTextContent(text) {
+  return text.split(/\$([^$]+)\$/).map((part, i) => {
+    if (i % 2 === 1) return `\\(${applyBBSubs(escapeHtml(part))}\\)`;
+    return escapeHtml(part).replace(/\n/g, '<br>');
+  }).join('');
+}
+
+function schedulePreview(delay = 400) {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => updatePreview(), delay);
+}
+
 async function updatePreview() {
   if (!isPreviewOpen) return;
 
   let inner = '';
   for (const box of boxes) {
     if (box.type === 'math') {
-      inner += `<div class="preview-math">\\[${box.content}\\]</div>`;
+      inner += `<div class="preview-math">\\[${applyBBSubs(escapeHtml(box.content))}\\]</div>`;
+    } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
+      const tag = box.type;
+      inner += `<${tag} class="preview-${tag}">${processTextContent(box.content)}</${tag}>`;
     } else {
-      const escaped = box.content
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
-      inner += `<p class="preview-text">${escaped}</p>`;
+      inner += `<p class="preview-text">${processTextContent(box.content)}</p>`;
     }
   }
+
+  const savedScroll = previewContent.scrollTop;
 
   if (window.MathJax?.typesetClear) MathJax.typesetClear([previewContent]);
   previewContent.innerHTML = `<div class="preview-page">${inner}</div>`;
@@ -662,12 +1097,48 @@ async function updatePreview() {
   previewContent.querySelectorAll('svg, svg *').forEach(el => el.setAttribute('stroke', 'none'));
   paginatePreview();  // split content across separate page divs
   applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
+
+  previewContent.scrollTop = savedScroll;
+}
+
+// Try to split a .preview-text element at a <br> boundary so that the first
+// part fits within maxHeight px. Returns [part1El, part2El] or null if no
+// split is possible (no <br>s, or even the first line exceeds maxHeight).
+function splitTextAtBr(el, maxHeight, ruler) {
+  const parts = el.innerHTML.split(/<br\s*\/?>/i);
+  if (parts.length <= 1) return null;
+
+  let lastFitting = 0;
+  for (let i = 1; i < parts.length; i++) {
+    const testEl = el.cloneNode(false);
+    testEl.innerHTML = parts.slice(0, i).join('<br>');
+    ruler.appendChild(testEl);
+    const h = testEl.offsetHeight;
+    ruler.removeChild(testEl);
+    if (h <= maxHeight) {
+      lastFitting = i;
+    } else {
+      break;
+    }
+  }
+
+  if (lastFitting === 0 || lastFitting >= parts.length) return null;
+
+  const part1 = el.cloneNode(false);
+  part1.innerHTML = parts.slice(0, lastFitting).join('<br>');
+
+  const part2 = el.cloneNode(false);
+  part2.innerHTML = parts.slice(lastFitting).join('<br>');
+
+  return [part1, part2];
 }
 
 // Split the single rendered page into multiple .preview-page divs at page boundaries.
 // Render happens in one tall page first so MathJax can lay out content naturally,
 // then we use actual offsetTop positions (not summed offsetHeights) so that CSS
 // margin collapsing between elements is already accounted for in the measurement.
+// Text boxes (.preview-text) are split across pages at <br> boundaries using a
+// hidden ruler element for accurate height measurement.
 function paginatePreview() {
   const singlePage = previewContent.querySelector('.preview-page');
   if (!singlePage) return;
@@ -680,28 +1151,64 @@ function paginatePreview() {
   const PADDING_TOP    = 96;  // 1in at 96 dpi
   const PAGE_CONTENT_H = 864; // 9in at 96 dpi
 
-  // tops[i] = top of element i relative to the content area start (after padding)
-  // bottoms[i] = bottom of element i relative to the content area start
-  // Using offsetTop (which reflects actual rendered positions including margin collapsing)
-  // rather than summing offsetHeight values (which ignore margins).
+  // Measure positions before detaching elements.
   const tops    = children.map(el => el.offsetTop - PADDING_TOP);
   const bottoms = children.map((el, i) => tops[i] + el.offsetHeight);
 
+  // Hidden off-screen ruler with the same CSS as a real page — used to measure
+  // split fragment heights without affecting the visible layout.
+  const ruler = document.createElement('div');
+  ruler.className = 'preview-page';
+  ruler.style.cssText = 'position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;min-height:0;';
+  document.body.appendChild(ruler);
+
   children.forEach(el => el.remove());
 
-  const pages    = [[]];
-  let pageBaseY  = 0; // flow-Y where the current page's content area starts
+  // Queue: each entry carries the element plus its measured top/bottom in the
+  // original single-page coordinate space (or estimated coords for split parts).
+  const queue = children.map((el, i) => ({ el, top: tops[i], bottom: bottoms[i] }));
 
-  for (let i = 0; i < children.length; i++) {
-    const relBottom = bottoms[i] - pageBaseY;
+  const pages   = [[]];
+  let pageBaseY = 0; // where the current page's content area starts in original coords
 
-    if (pages[pages.length - 1].length > 0 && relBottom > PAGE_CONTENT_H) {
+  while (queue.length > 0) {
+    const item        = queue.shift();
+    const { el }      = item;
+    const relTop      = item.top    - pageBaseY;
+    const relBottom   = item.bottom - pageBaseY;
+    const currentPage = pages[pages.length - 1];
+
+    if (currentPage.length > 0 && relBottom > PAGE_CONTENT_H) {
+      // Element overflows the current page. Try splitting text boxes.
+      const remaining = PAGE_CONTENT_H - relTop;
+
+      if (el.classList.contains('preview-text') && remaining > 20) {
+        const parts = splitTextAtBr(el, remaining, ruler);
+        if (parts) {
+          currentPage.push(parts[0]);
+          // Measure part2 in the ruler so subsequent items can estimate positions.
+          ruler.appendChild(parts[1]);
+          const part2H = parts[1].offsetHeight;
+          ruler.removeChild(parts[1]);
+          // New page starts at item.top in original coords.
+          pages.push([]);
+          pageBaseY = item.top;
+          // Part2 sits at the top of the new page.
+          queue.unshift({ el: parts[1], top: item.top, bottom: item.top + part2H });
+          continue;
+        }
+      }
+
+      // Can't split — move the whole element to a new page.
       pages.push([]);
-      pageBaseY = tops[i]; // next page begins at this element's top in the flow
+      pageBaseY = item.top;
+      pages[pages.length - 1].push(el);
+    } else {
+      currentPage.push(el);
     }
-
-    pages[pages.length - 1].push(children[i]);
   }
+
+  ruler.remove();
 
   previewContent.innerHTML = '';
   for (const group of pages) {
@@ -881,7 +1388,7 @@ function restoreFromLatex(latex) {
   suppressHistory = true;
   suppressBoxSync = true;
   boxes = parseFromLatex(latex);
-  mqFields.clear();
+  mqFields.clear(); boxResizers.clear();
   rebuildBoxList();
   suppressTextSync = true;
   latexSource.value = latex;
@@ -890,6 +1397,7 @@ function restoreFromLatex(latex) {
   suppressHistory = false;
   history = [{ latex, focusId: null }];
   historyIndex = 0;
+  updateLineNumbers();
 }
 
 function saveCurrentProject() {
@@ -1072,7 +1580,7 @@ function newProject() {
   if (isDirty && !confirm('You have unsaved changes. Start a new project anyway?')) return;
   currentProjectId = null;
   projectTitleLabel.textContent = 'Untitled';
-  mqFields.clear();
+  mqFields.clear(); boxResizers.clear();
   boxes = [{ id: genId(), type: 'math', content: '' }];
   rebuildBoxList();
   suppressTextSync = true;
@@ -1080,6 +1588,7 @@ function newProject() {
   suppressTextSync = false;
   history = [{ latex: '', focusId: null }];
   historyIndex = 0;
+  updateLineNumbers();
   markClean();
   saveDraft();
   closeProjectsPanel();
@@ -1117,6 +1626,26 @@ document.getElementById('new-project-btn').addEventListener('click', newProject)
 saveBtn.addEventListener('click', saveCurrentProject);
 downloadBtn.addEventListener('click', downloadCurrentProject);
 
+// ── Reflow all boxes when the panel width changes ──────────────────────────────
+// MathQuill equations and textareas need explicit re-measurement; they don't
+// reflow automatically when the containing flex column is resized by the divider.
+let lastBoxListWidth = 0;
+new ResizeObserver(entries => {
+  const w = entries[0].contentRect.width;
+  if (w === lastBoxListWidth) return;
+  lastBoxListWidth = w;
+  for (const fn of boxResizers.values()) fn();
+}).observe(boxList);
+
+// Re-measure line heights when the source panel width changes (wrapping changes).
+let lastSourceWidth = 0;
+new ResizeObserver(entries => {
+  const w = entries[0].contentRect.width;
+  if (w === lastSourceWidth) return;
+  lastSourceWidth = w;
+  updateLineNumbers();
+}).observe(latexSource);
+
 // ── Initialize ────────────────────────────────────────────────────────────────
 (function init() {
   applyFontSize();
@@ -1139,4 +1668,5 @@ downloadBtn.addEventListener('click', downloadCurrentProject);
     focusBox(boxes[0].id);
   }
   markClean();
+  updateLineNumbers();
 })();

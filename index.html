@@ -44,15 +44,28 @@
           <button id="download-btn">Download</button>
         </div>
       </div>
-      <textarea id="latex-source" spellcheck="false"></textarea>
+      <div id="latex-wrapper">
+        <div id="line-numbers" aria-hidden="true"></div>
+        <div id="latex-source-container">
+          <div id="source-line-highlight" aria-hidden="true"></div>
+          <textarea id="latex-source" spellcheck="false"></textarea>
+        </div>
+      </div>
     </div>
     <div id="divider"></div>
     <div id="right-panel">
       <div class="panel-header">
         <span>Equations</span>
         <div class="toolbar">
+          <div id="default-type-toggle">
+            <button id="default-math-btn" class="type-seg active">Math</button><button id="default-text-btn" class="type-seg">Text</button>
+          </div>
+          <span class="toolbar-sep"></span>
           <button id="add-math-btn">+ Math</button>
           <button id="add-text-btn">+ Text</button>
+          <button id="add-h1-btn">H1</button>
+          <button id="add-h2-btn">H2</button>
+          <button id="add-h3-btn">H3</button>
           <span class="toolbar-sep"></span>
           <button id="font-dec-btn" title="Decrease font size">A−</button>
           <span id="font-size-label" class="font-size-label">16px</span>
