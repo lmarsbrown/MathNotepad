@@ -58,6 +58,79 @@ Projects are stored in `localStorage` under key `mathnotepad_projects` (JSON arr
 | `cutBox(id)` / `pasteBox()` | Box-level clipboard (type + content) |
 | `setDefaultBoxType(type)` | Set which type Enter key creates; updates toggle button state |
 
+### Graph boxes
+
+Graph boxes are a special `type: 'graph'` variant. Their structure differs from other boxes:
+
+```js
+{
+  id, type: 'graph', content: '',
+  width: 600, height: 400,
+  lightTheme: false,
+  expressions: [
+    { id: 'ge1', latex: 'x^{2}+y^{2}=1', color: '#3b82f6', enabled: true, thickness: 2.0 },
+    ...
+  ]
+}
+```
+
+**Serialization format** (in the LaTeX source textarea):
+```
+\begin{graph}{600}{400}{light}     ← {light} suffix is optional, omit for dark
+x^{2}+y^{2}=1|#3b82f6|2|1         ← latex|color|thickness|enabled(0/1)
+\end{graph}
+```
+Parsing happens in `parseFromLatex` via the `\begin{graph}` / `\end{graph}` block handler.
+
+**Graph mode** — clicking a graph box in the right panel opens the graph editor, which replaces the preview panel. `graphModeBoxId` holds the active box id (or `null`). Key graph-mode flow:
+1. `openGraphEditor(boxId)` — builds the expression editor UI into `#preview-content`, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
+2. Any expression edit → `commitGraphEditorToBox(graphModeBoxId)` reads DOM state back into `boxes[idx].expressions`, then calls `syncToText()`.
+3. `scheduleGraphRender()` → `renderGraphPreview()` — compiles all expressions via `compileLatexToGlsl`, calls `graphRenderer.render(exprs, w, h, lightTheme)`.
+4. `closeGraphEditor()` — clears `graphModeBoxId`, restores preview panel, calls `updatePreview()`.
+
+**Key graph functions in script.js:**
+| Function | Purpose |
+|---|---|
+| `openGraphEditor(boxId)` | Enter graph edit mode for a box |
+| `closeGraphEditor()` | Exit graph mode, restore preview |
+| `commitGraphEditorToBox(boxId)` | DOM → `boxes[idx].expressions` → `syncToText()` |
+| `renderGraphPreview()` | Compile + render active graph box |
+| `scheduleGraphRender()` | rAF-debounced `renderGraphPreview()` |
+| `createGraphExprRow(expr)` | Build one expression row DOM element |
+| `addGraphExpression()` | Append a new expression row |
+| `makeGraphBox(id)` | Create a default graph box object |
+| `nextGraphColor()` | Cycle through `GRAPH_COLORS` palette |
+
+**Color palette** — `GRAPH_COLORS` in `script.js` is a 7-color array of medium-saturation hex colors chosen to be readable on both light and dark backgrounds (Tailwind 500 level: `#3b82f6`, `#22c55e`, `#f97316`, `#ef4444`, `#a855f7`, `#eab308`, `#06b6d4`). New expressions cycle through this list via `nextGraphColor()`. The color stored on each expression is the literal CSS hex used both in the swatch (`<input type="color">`) and passed unchanged to the renderer — **do not transform colors at render time**, as it breaks swatch/render parity.
+
+---
+
+### GraphRenderer (graph.js)
+
+`graph.js` contains two independent pieces: the **LaTeX → GLSL compiler** and the **`GraphRenderer` class**.
+
+**LaTeX → GLSL compiler** (`compileLatexToGlsl(latex)`):
+- Entry point: returns `{ glsl }` or `{ error }`.
+- Internally: `latexToGlslF` splits on `=` at brace-depth 0, compiles each side via a recursive-descent `Parser`, producing a GLSL float expression `F(x,y)` representing the implicit curve `F=0`.
+- Supported: arithmetic, `\frac`, `\sqrt`, trig/log/exp, `\pi`, `\infty`, absolute value `|...|`, Greek letters (passed through as GLSL variable names — only `x` and `y` are meaningful).
+- Throws `CompileError` on unknown commands.
+
+**`GraphRenderer` — WebGL2 two-pass implicit curve renderer:**
+
+*Pass 1 (one draw call per expression):* Each expression gets its own fragment shader with `F(x,y)` inlined. A 7×7 subpixel grid samples `F` per pixel to detect sign changes; binary search refines the crossing to subpixel precision. Output is a float texture: `vec4(subpixelOffsetX, subpixelOffsetY, graphId, 1.0)` at crossing pixels, or the previous frame's value otherwise. Multiple expressions share one ping-pong buffer (`GPUImage`) via `img.swapBuffers()`.
+
+*Pass 2 (single draw call):* The thicken shader reads the crossing texture, expands each crossing into a circle of radius `thickness` pixels with smooth anti-aliasing, looks up `u_colors[graphId]`, and composites all curves over the background. Also draws grid and axes using world-space distance fields.
+
+**Theme handling in the renderer:**
+- `render(expressions, width, height, lightTheme)` — `lightTheme` is `!!box.lightTheme`.
+- Dark mode bg: `#1e1e2e` (rgb `0.118, 0.118, 0.180`). Light mode bg: white.
+- Both `u_bgColor` (vec3) and `u_lightTheme` (float 0/1) must be uploaded — the shader uses `u_lightTheme` to select light vs dark grid/axis colors.
+- Grid colors are theme-aware in the shader; curve colors are passed as-is from `u_colors`.
+
+**Shader caching:** Each unique GLSL expression string gets its own compiled program, cached in `thinLineShaders: Map<string, {program, uniforms}>`. `clearShaderCache()` deletes all programs. Cache is invalidated in `renderGraphPreview()` when the expression set changes.
+
+**Interaction:** `_setupInteraction()` wires mouse drag (pan) and wheel (zoom) on the canvas. Pan/zoom update `xMin/xMax/yMin/yMax` and call `this._onRender()` (set by `openGraphEditor` to `scheduleGraphRender`). Y range is aspect-corrected at render time from the stored Y center, so only the X range and Y center are truly authoritative.
+
 ### External libraries (CDN, no npm)
 - **jQuery 3.7.1** — required by MathQuill
 - **MathQuill 0.10.1-a** — WYSIWYG math editor fields; accessed via `MQ.MathField(span, opts)`

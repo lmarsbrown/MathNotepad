@@ -30,6 +30,158 @@ const DRAFT_KEY = 'mathnotepad_draft';
 let currentProjectId = null;
 let isDirty = false;
 
+// ── Graph mode ───────────────────────────────────────────────────────────────
+let graphModeBoxId = null;        // id of box being edited in graph mode, or null
+let focusedGraphExprId = null;    // id of the expression row currently focused
+let graphExprNextId = 1;
+let graphMqFields = new Map();    // expr id → MathQuill field
+let graphCommitTimer = null;
+
+const GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4'];
+let graphColorIdx = 0;
+function nextGraphColor() { return GRAPH_COLORS[graphColorIdx++ % GRAPH_COLORS.length]; }
+
+let graphRenderer = null; // lazily created GraphRenderer
+let graphRenderPending = false;
+let showGraphCropRect = false;
+function getGraphRenderer() {
+  if (!graphRenderer) graphRenderer = new GraphRenderer();
+  return graphRenderer;
+}
+
+/** Compile all expressions for the active graph box and re-render. */
+let _lastGraphExprsKey = '';
+function renderGraphPreview() {
+  if (!graphModeBoxId) return;
+  const box = boxes.find(b => b.id === graphModeBoxId);
+  if (!box) return;
+
+  const renderer = getGraphRenderer();
+  const baseExprs = (box.expressions || []).map(e => {
+    const result = e.enabled ? compileLatexToGlsl(e.latex) : { error: 'disabled' };
+    return { glsl: result.glsl || null, color: e.color, enabled: e.enabled && !!result.glsl, thickness: e.thickness != null ? e.thickness : 2.0, _exprId: e.id };
+  });
+
+  // Cache key uses canonical order so focus changes never trigger shader recompile
+  const exprsKey = baseExprs.map(e => e.glsl || '').join('|');
+  if (exprsKey !== _lastGraphExprsKey) {
+    renderer.clearShaderCache();
+    _lastGraphExprsKey = exprsKey;
+  }
+
+  // Move focused expression last (renders on top) with a temporary thickness boost
+  let exprs = baseExprs;
+  if (focusedGraphExprId) {
+    const fi = exprs.findIndex(e => e._exprId === focusedGraphExprId);
+    if (fi !== -1) {
+      const focused = { ...exprs[fi], thickness: exprs[fi].thickness + 0.5 };
+      exprs = [...exprs.slice(0, fi), ...exprs.slice(fi + 1), focused];
+    }
+  }
+
+  const container = document.getElementById('preview-content');
+  const w = container.clientWidth  || box.width  || 600;
+  const h = container.clientHeight || box.height || 400;
+
+  renderer.render(exprs, w, h, !!box.lightTheme);
+  updateGraphCropOverlay();
+}
+
+function scheduleGraphRender() {
+  if (graphRenderPending) return;
+  graphRenderPending = true;
+  requestAnimationFrame(() => {
+    graphRenderPending = false;
+    renderGraphPreview();
+  });
+}
+
+/**
+ * Compute the crop rect (canvas pixels) and world-coordinate bounds for the
+ * document output, given the current preview canvas size and box dimensions.
+ *
+ * The limiting dimension switches based on aspect ratio so the crop rect
+ * always fits within the canvas:
+ *   - X-limited (box is wider/shorter): fill full canvas width, center vertically
+ *   - Y-limited (box is taller/narrower): fill full canvas height, center horizontally
+ */
+function getGraphCropInfo(box) {
+  const container = document.getElementById('preview-content');
+  const canvasW = container.clientWidth  || 1;
+  const canvasH = container.clientHeight || 1;
+  const boxW = box.width  || 600;
+  const boxH = box.height || 400;
+
+  const renderer = graphRenderer;
+  const xRange   = renderer.xMax - renderer.xMin;
+  const xCenter  = (renderer.xMin + renderer.xMax) / 2;
+  const yCenter  = (renderer.yMin + renderer.yMax) / 2;
+
+  // Canvas Y half-range (world units)
+  const canvasYHalf = xRange * (canvasH / canvasW) * 0.5;
+
+  let left, top, width, height;   // pixel rect
+  let worldXMin, worldXMax, worldYMin, worldYMax;
+
+  if (boxH / boxW <= canvasH / canvasW) {
+    // X-limited: box is wider/shorter than the canvas → fill full width
+    const cropYHalf = xRange * (boxH / boxW) * 0.5;
+    width  = canvasW;
+    height = canvasW * boxH / boxW;
+    left   = 0;
+    top    = (canvasH - height) / 2;
+
+    worldXMin = renderer.xMin;
+    worldXMax = renderer.xMax;
+    worldYMin = yCenter - cropYHalf;
+    worldYMax = yCenter + cropYHalf;
+  } else {
+    // Y-limited: box is taller/narrower than the canvas → fill full height
+    width  = canvasH * boxW / boxH;
+    height = canvasH;
+    left   = (canvasW - width) / 2;
+    top    = 0;
+
+    const cropXHalf = canvasYHalf * (boxW / boxH);
+    worldXMin = xCenter - cropXHalf;
+    worldXMax = xCenter + cropXHalf;
+    worldYMin = yCenter - canvasYHalf;
+    worldYMax = yCenter + canvasYHalf;
+  }
+
+  return { left, top, width, height, worldXMin, worldXMax, worldYMin, worldYMax };
+}
+
+/** Draw (or hide) the crop rectangle overlay on the graph canvas. */
+function updateGraphCropOverlay() {
+  const container = document.getElementById('preview-content');
+  let overlay = document.getElementById('graph-crop-overlay');
+
+  if (!showGraphCropRect || !graphModeBoxId || !graphRenderer) {
+    if (overlay) overlay.remove();
+    return;
+  }
+
+  const box = boxes.find(b => b.id === graphModeBoxId);
+  if (!box) { if (overlay) overlay.remove(); return; }
+
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'graph-crop-overlay';
+    container.appendChild(overlay);
+  }
+
+  const { left, top, width, height } = getGraphCropInfo(box);
+
+  overlay.style.left   = Math.round(left)   + 'px';
+  overlay.style.top    = Math.round(top)     + 'px';
+  overlay.style.width  = Math.round(width)   + 'px';
+  overlay.style.height = Math.round(height)  + 'px';
+  // Clear right/bottom so explicit width/height drives the size
+  overlay.style.right  = '';
+  overlay.style.bottom = '';
+}
+
 // ── Undo history ──────────────────────────────────────────────────────────────
 const MAX_HISTORY = 200;
 let history = [];      // array of { latex, focusId } snapshots
@@ -72,6 +224,20 @@ const previewZoomLabel  = document.getElementById('preview-zoom-label');
 // ── ID generation ─────────────────────────────────────────────────────────────
 function genId() { return 'b' + (nextId++); }
 
+function makeGraphBox(id) {
+  return {
+    id: id || genId(),
+    type: 'graph',
+    content: '',
+    width: 600,
+    height: 400,
+    lightTheme: false,
+    expressions: [
+      { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 },
+    ],
+  };
+}
+
 // ── Serialization ─────────────────────────────────────────────────────────────
 function serializeToLatex(boxArray) {
   return boxArray.map(b => {
@@ -81,6 +247,13 @@ function serializeToLatex(boxArray) {
     else if (b.type === 'h2') serialized = `\\subsection{${b.content}}`;
     else if (b.type === 'h3') serialized = `\\subsubsection{${b.content}}`;
     else if (b.type === 'pagebreak') serialized = '\\newpage';
+    else if (b.type === 'graph') {
+      const exprLines = (b.expressions || []).map(e =>
+        `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.latex}`
+      );
+      const themeFlag = b.lightTheme ? '{light}' : '';
+      serialized = `\\begin{graph}{${b.width}}{${b.height}}${themeFlag}\n${exprLines.join('\n')}\n\\end{graph}`;
+    }
     else serialized = b.content.split('\n').map(line => '% ' + line).join('\n');
     if (b.commented) return serialized.split('\n').map(line => '%% ' + line).join('\n');
     return serialized;
@@ -146,6 +319,42 @@ function parseFromLatex(src) {
         i++;
       }
       result.push({ id: genId(), type: 'text', content: textLines.join('\n') });
+      continue;
+    }
+
+    // Graph block: \begin{graph}{W}{H} ... \end{graph}
+    if (line.startsWith('\\begin{graph}')) {
+      const m = line.match(/^\\begin\{graph\}\{(\d+)\}\{(\d+)\}(\{light\})?/);
+      const width  = m ? parseInt(m[1]) : 600;
+      const height = m ? parseInt(m[2]) : 400;
+      const lightTheme = !!(m && m[3]);
+      const expressions = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('\\end{graph}')) {
+        const el = lines[i].trim();
+        if (el.startsWith('% ')) {
+          const rest = el.slice(2);
+          // format: "<id> <color> <on|off> <thickness> <latex...>"
+          // (backwards-compat: thickness may be absent in old data)
+          const parts = rest.split(' ');
+          if (parts.length >= 3) {
+            const exprId  = parts[0];
+            const color   = parts[1];
+            const enabled = parts[2] === 'on';
+            let thickness = 2.0;
+            let latexStart = 3;
+            if (parts.length >= 4 && !isNaN(parseFloat(parts[3]))) {
+              thickness = parseFloat(parts[3]);
+              latexStart = 4;
+            }
+            const latex = parts.slice(latexStart).join(' ');
+            expressions.push({ id: exprId, latex, color, enabled, thickness });
+          }
+        }
+        i++;
+      }
+      i++; // consume \end{graph}
+      result.push({ id: genId(), type: 'graph', content: '', width, height, lightTheme, expressions });
       continue;
     }
 
@@ -229,7 +438,7 @@ function createBoxElement(box) {
     if (box.type === 'math') {
       const field = mqFields.get(box.id);
       if (field) field.focus();
-    } else if (box.type === 'pagebreak') {
+    } else if (box.type === 'pagebreak' || box.type === 'graph') {
       setFocused(box.id, div);
     } else {
       const ta = div.querySelector('.text-input');
@@ -539,12 +748,92 @@ function createBoxElement(box) {
     rule.className = 'pagebreak-rule';
     div.appendChild(rule);
     div.appendChild(deleteBtn);
+  } else if (box.type === 'graph') {
+    div.classList.add('box-graph');
+
+    const badge = document.createElement('span');
+    badge.className = 'box-type-label';
+    badge.textContent = 'GRAPH';
+    div.appendChild(badge);
+
+    const controls = document.createElement('div');
+    controls.className = 'graph-box-controls';
+
+    const wLabel = document.createElement('label');
+    wLabel.textContent = 'W ';
+    const wInput = document.createElement('input');
+    wInput.type = 'number'; wInput.min = '100'; wInput.max = '2000'; wInput.step = '10';
+    wInput.value = box.width || 600;
+    wInput.className = 'graph-size-input';
+    wInput.addEventListener('mousedown', e => e.stopPropagation());
+    wInput.addEventListener('change', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx !== -1) { boxes[idx].width = parseInt(wInput.value) || 600; syncToText(); }
+    });
+    wLabel.appendChild(wInput);
+    controls.appendChild(wLabel);
+
+    const hLabel = document.createElement('label');
+    hLabel.textContent = ' H ';
+    const hInput = document.createElement('input');
+    hInput.type = 'number'; hInput.min = '100'; hInput.max = '2000'; hInput.step = '10';
+    hInput.value = box.height || 400;
+    hInput.className = 'graph-size-input';
+    hInput.addEventListener('mousedown', e => e.stopPropagation());
+    hInput.addEventListener('change', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx !== -1) { boxes[idx].height = parseInt(hInput.value) || 400; syncToText(); }
+    });
+    hLabel.appendChild(hInput);
+    controls.appendChild(hLabel);
+
+    const countSpan = document.createElement('span');
+    countSpan.className = 'graph-expr-count';
+    const n = (box.expressions || []).length;
+    countSpan.textContent = `${n} expression${n !== 1 ? 's' : ''}`;
+    controls.appendChild(countSpan);
+
+    const themeLabel = document.createElement('label');
+    themeLabel.className = 'graph-theme-label';
+    const themeCheck = document.createElement('input');
+    themeCheck.type = 'checkbox';
+    themeCheck.checked = !!box.lightTheme;
+    themeCheck.addEventListener('mousedown', e => e.stopPropagation());
+    themeCheck.addEventListener('change', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx !== -1) { boxes[idx].lightTheme = themeCheck.checked; syncToText(); }
+    });
+    themeLabel.appendChild(themeCheck);
+    themeLabel.appendChild(document.createTextNode(' Light'));
+    controls.appendChild(themeLabel);
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'graph-edit-btn';
+    editBtn.textContent = 'Edit Graph';
+    editBtn.addEventListener('mousedown', e => e.preventDefault());
+    editBtn.addEventListener('click', () => enterGraphMode(box.id));
+    controls.appendChild(editBtn);
+
+    div.appendChild(controls);
+
+    // Show snapshot thumbnail if available
+    if (box._snapshotDataUrl) {
+      const thumb = document.createElement('img');
+      thumb.src = box._snapshotDataUrl;
+      thumb.className = 'graph-snapshot-thumb';
+      thumb.style.maxWidth = '100%';
+      thumb.style.borderRadius = '4px';
+      thumb.style.marginTop = '4px';
+      div.appendChild(thumb);
+    }
+
+    div.appendChild(deleteBtn);
   }
 
   return div;
 }
 
-// Setting the latex of a box before it is in the DOM can cause bugs. Callnig reflow after it is added fixes this.
+// Setting the latex of a box before it is in the DOM can cause bugs. Calling reflow after it is added fixes this.
 function reflowBox(box){
   if(mqFields.get(box.id) != undefined){
     const field = mqFields.get(box.id) ;
@@ -591,7 +880,7 @@ function renderBoxes() {
 
 // ── Insert / delete ───────────────────────────────────────────────────────────
 function insertBoxAfter(afterId, type = 'math') {
-  const newBox = { id: genId(), type, content: '' };
+  const newBox = type === 'graph' ? makeGraphBox() : { id: genId(), type, content: '' };
   const idx = boxes.findIndex(b => b.id === afterId);
   if (idx === -1) {
     boxes.push(newBox);
@@ -609,8 +898,8 @@ function appendBox(type = 'math') {
     if (idx !== -1) {
       // Check if focused box is empty
       const focused = boxes[idx];
-      // Pagebreaks have no content — always insert after, never convert
-      if (focused.type === 'pagebreak') {
+      // Pagebreaks and graphs have no editable content — always insert after, never convert
+      if (focused.type === 'pagebreak' || focused.type === 'graph') {
         insertBoxAfter(focusedBoxId, type);
         return;
       }
@@ -633,7 +922,7 @@ function appendBox(type = 'math') {
         boxResizers.delete(focusedBoxId);
         const oldEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
         if (oldEl) oldEl.remove();
-        boxes[idx] = { id: focusedBoxId, type, content: '' };
+        boxes[idx] = type === 'graph' ? makeGraphBox(focusedBoxId) : { id: focusedBoxId, type, content: '' };
         rebuildBoxList();
         syncToText();
         focusBox(focusedBoxId);
@@ -642,7 +931,7 @@ function appendBox(type = 'math') {
     }
     insertBoxAfter(focusedBoxId, type);
   } else {
-    const newBox = { id: genId(), type, content: '' };
+    const newBox = type === 'graph' ? makeGraphBox() : { id: genId(), type, content: '' };
     boxes.push(newBox);
     rebuildBoxList();
     syncToText();
@@ -752,16 +1041,26 @@ function pushHistory(latexStr) {
 
 function applyUndo() {
   if (historyIndex <= 0) return;
+  const graphBoxIdx = graphModeBoxId ? boxes.findIndex(b => b.id === graphModeBoxId) : -1;
+  if (graphModeBoxId) _teardownGraphModeUI();
   const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
   historyIndex--;
   restoreSnapshot(history[historyIndex], focusIdx);
+  if (graphBoxIdx >= 0 && graphBoxIdx < boxes.length && boxes[graphBoxIdx].type === 'graph') {
+    enterGraphMode(boxes[graphBoxIdx].id);
+  }
 }
 
 function applyRedo() {
   if (historyIndex >= history.length - 1) return;
+  const graphBoxIdx = graphModeBoxId ? boxes.findIndex(b => b.id === graphModeBoxId) : -1;
+  if (graphModeBoxId) _teardownGraphModeUI();
   const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
   historyIndex++;
   restoreSnapshot(history[historyIndex], focusIdx);
+  if (graphBoxIdx >= 0 && graphBoxIdx < boxes.length && boxes[graphBoxIdx].type === 'graph') {
+    enterGraphMode(boxes[graphBoxIdx].id);
+  }
 }
 
 function restoreSnapshot(snap, preferFocusIdx = -1) {
@@ -832,6 +1131,10 @@ function diffAndApply(newBoxes) {
   const result = newBoxes.map((nb, i) => {
     const existing = boxes[i];
     if (existing && existing.type === nb.type) {
+      if (existing.type === 'graph') {
+        // Preserve id but take all parsed fields (expressions, width, height)
+        return { ...nb, id: existing.id };
+      }
       // Reuse id, update content and commented state
       return { ...existing, content: nb.content, commented: nb.commented };
     }
@@ -1036,7 +1339,8 @@ defaultTextBtn.addEventListener('click', () => setDefaultBoxType('text'));
 
 // ── Toolbar buttons ───────────────────────────────────────────────────────────
 // Prevent mousedown from stealing focus (which would clear focusedBoxId before click fires)
-[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn].forEach(btn => {
+const addGraphBtn = document.getElementById('add-graph-btn');
+[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn, addGraphBtn].forEach(btn => {
   btn.addEventListener('mousedown', e => e.preventDefault());
 });
 addMathBtn.addEventListener('click', () => appendBox('math'));
@@ -1045,6 +1349,7 @@ addH1Btn.addEventListener('click', () => appendBox('h1'));
 addH2Btn.addEventListener('click', () => appendBox('h2'));
 addH3Btn.addEventListener('click', () => appendBox('h3'));
 addBreakBtn.addEventListener('click', () => appendBox('pagebreak'));
+addGraphBtn.addEventListener('click', () => appendBox('graph'));
 
 // ── Font size ─────────────────────────────────────────────────────────────────
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32];
@@ -1162,6 +1467,7 @@ let previewPending = false;
 
 async function updatePreview() {
   if (!isPreviewOpen) return;
+  if (graphModeBoxId) return; // preview panel is used for graph canvas in graph mode
   if (previewRunning) { previewPending = true; return; }
   previewRunning = true;
   previewPending = false;
@@ -1176,6 +1482,15 @@ async function updatePreview() {
       inner += `<${tag} class="preview-${tag}">${processTextContent(box.content)}</${tag}>`;
     } else if (box.type === 'pagebreak') {
       inner += `<div class="preview-pagebreak"></div>`;
+    } else if (box.type === 'graph') {
+      if (box._snapshotDataUrl) {
+        inner += `<div class="preview-graph-image" style="text-align:center;margin:8px 0">
+          <img src="${box._snapshotDataUrl}" style="max-width:100%;width:${box.width||600}px;height:auto;border-radius:4px"></div>`;
+      } else {
+        const n = (box.expressions || []).filter(e => e.enabled).length;
+        inner += `<div class="preview-graph-placeholder" style="width:${box.width || 600}px;height:${box.height || 400}px">
+          <span>${n} expression${n !== 1 ? 's' : ''}</span></div>`;
+      }
     } else {
       inner += `<p class="preview-text">${processTextContent(box.content)}</p>`;
     }
@@ -1359,7 +1674,9 @@ function togglePreview() {
   isPreviewOpen = !isPreviewOpen;
   previewPanel.classList.toggle('open', isPreviewOpen);
   divider2.classList.toggle('open', isPreviewOpen);
-  togglePreviewBtn.textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
+  const previewLabel = isPreviewOpen ? 'Hide Preview' : 'Preview';
+  togglePreviewBtn.textContent = previewLabel;
+  document.getElementById('graph-toggle-preview-btn').textContent = previewLabel;
   if (isPreviewOpen) {
     // Reset any manually-dragged width so it starts at flex: 1
     previewPanel.style.flex = '';
@@ -1378,10 +1695,14 @@ function toggleSource() {
   isSourceOpen = !isSourceOpen;
   document.getElementById('left-panel').classList.toggle('hidden', !isSourceOpen);
   document.getElementById('divider').classList.toggle('hidden', !isSourceOpen);
-  toggleSourceBtn.textContent = isSourceOpen ? 'Hide Source' : 'Source';
+  const sourceLabel = isSourceOpen ? 'Hide Source' : 'Source';
+  toggleSourceBtn.textContent = sourceLabel;
+  document.getElementById('graph-toggle-source-btn').textContent = sourceLabel;
 }
 
 toggleSourceBtn.addEventListener('click', toggleSource);
+document.getElementById('graph-toggle-source-btn').addEventListener('click', toggleSource);
+document.getElementById('graph-toggle-preview-btn').addEventListener('click', togglePreview);
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
@@ -1750,6 +2071,405 @@ document.getElementById('new-project-btn').addEventListener('click', newProject)
 saveBtn.addEventListener('click', saveCurrentProject);
 downloadBtn.addEventListener('click', downloadCurrentProject);
 
+// ── Graph editing mode ────────────────────────────────────────────────────────
+
+function enterGraphMode(boxId) {
+  const box = boxes.find(b => b.id === boxId);
+  if (!box || box.type !== 'graph') return;
+
+  _lastGraphExprsKey = '';
+
+  // Open preview first (while graphModeBoxId is still null so updatePreview runs)
+  if (!isPreviewOpen) togglePreview();
+
+  // Now lock graph mode — subsequent updatePreview calls are blocked
+  graphModeBoxId = boxId;
+
+  // Swap right-panel content: hide box list, show graph editor
+  boxList.style.display = 'none';
+  document.getElementById('graph-editor-content').style.display = 'flex';
+  document.getElementById('normal-toolbar').style.display = 'none';
+  // Sync graph toolbar toggle button labels to current panel state
+  document.getElementById('graph-toggle-source-btn').textContent = isSourceOpen ? 'Hide Source' : 'Source';
+  document.getElementById('graph-toggle-preview-btn').textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
+  document.getElementById('graph-crop-checkbox').checked = showGraphCropRect;
+  document.getElementById('graph-toolbar').style.display = '';
+  document.getElementById('right-panel-title').textContent = 'Graph Expressions';
+
+  // Set size inputs
+  document.getElementById('graph-width-input').value  = box.width  || 600;
+  document.getElementById('graph-height-input').value = box.height || 400;
+
+  // Populate expression list
+  renderGraphExprList(box);
+
+  // Mount the WebGL canvas into the preview panel
+  const renderer = getGraphRenderer();
+  // Restore view bounds if this graph was edited before
+  if (box._viewBounds) {
+    renderer.xMin = box._viewBounds.xMin;
+    renderer.xMax = box._viewBounds.xMax;
+    renderer.yMin = box._viewBounds.yMin;
+    renderer.yMax = box._viewBounds.yMax;
+  } else {
+    renderer.xMin = -5; renderer.xMax = 5;
+    renderer.yMin = -5; renderer.yMax = 5;
+  }
+  previewContent.innerHTML = '';
+  previewContent.classList.add('graph-mode');
+  previewContent.appendChild(renderer.canvas);
+  renderer.canvas.style.width  = '100%';
+  renderer.canvas.style.height = '100%';
+
+  // Set up re-render callback for pan/zoom
+  renderer._onRender = () => scheduleGraphRender();
+
+  // Set up click-to-focus: clicking a curve focuses its expression row
+  renderer._onPick = exprId => {
+    const listEl = document.getElementById('graph-expr-list');
+    if (!listEl) return;
+    const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
+    const idx = rows.findIndex(r => r.dataset.exprId === exprId);
+    if (idx !== -1) focusGraphExpr(idx, 'start');
+  };
+
+  // Initial render
+  renderGraphPreview();
+}
+
+function _teardownGraphModeUI() {
+  clearTimeout(graphCommitTimer);
+  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; }
+  graphMqFields.clear();
+  focusedGraphExprId = null;
+  document.getElementById('graph-expr-list').innerHTML = '';
+  boxList.style.display = '';
+  document.getElementById('graph-editor-content').style.display = 'none';
+  document.getElementById('normal-toolbar').style.display = '';
+  document.getElementById('graph-toolbar').style.display = 'none';
+  document.getElementById('right-panel-title').textContent = 'Equations';
+  graphModeBoxId = null;
+  previewContent.classList.remove('graph-mode');
+  // Remove crop overlay if present
+  const overlay = document.getElementById('graph-crop-overlay');
+  if (overlay) overlay.remove();
+}
+
+function exitGraphMode() {
+  if (!graphModeBoxId) return;
+
+  commitGraphEditorToBox(graphModeBoxId);
+  clearTimeout(graphCommitTimer);
+
+  // Capture the graph to a static image for the document
+  if (graphRenderer) {
+    const box = boxes.find(b => b.id === graphModeBoxId);
+    if (box) {
+      // Use crop world-bounds so the snapshot matches what the overlay shows
+      const crop = getGraphCropInfo(box);
+
+      // Save the canvas-view bounds for restore, then apply the crop bounds
+      const savedXMin = graphRenderer.xMin, savedXMax = graphRenderer.xMax;
+      const savedYMin = graphRenderer.yMin, savedYMax = graphRenderer.yMax;
+      graphRenderer.xMin = crop.worldXMin; graphRenderer.xMax = crop.worldXMax;
+      graphRenderer.yMin = crop.worldYMin; graphRenderer.yMax = crop.worldYMax;
+
+      const exprs = (box.expressions || []).map(e => {
+        const result = e.enabled ? compileLatexToGlsl(e.latex) : { error: 'disabled' };
+        return { glsl: result.glsl || null, color: e.color, enabled: e.enabled && !!result.glsl, thickness: e.thickness != null ? e.thickness : 2.0 };
+      });
+      graphRenderer.render(exprs, box.width || 600, box.height || 400, !!box.lightTheme);
+      box._snapshotDataUrl = graphRenderer.canvas.toDataURL('image/png');
+
+      // Restore canvas-view bounds and save them for re-entry
+      graphRenderer.xMin = savedXMin; graphRenderer.xMax = savedXMax;
+      graphRenderer.yMin = savedYMin; graphRenderer.yMax = savedYMax;
+      box._viewBounds = { xMin: savedXMin, xMax: savedXMax,
+                          yMin: savedYMin, yMax: savedYMax };
+    }
+  }
+
+  _teardownGraphModeUI();
+
+  // Rebuild box list to show updated snapshot, then restore preview
+  rebuildBoxList();
+  syncToText();
+  if (isPreviewOpen) schedulePreview(0);
+}
+
+function renderGraphExprList(box) {
+  const listEl = document.getElementById('graph-expr-list');
+  listEl.innerHTML = '';
+  graphMqFields.clear();
+  // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
+  for (const expr of (box.expressions || [])) {
+    const m = expr.id.match(/^ge(\d+)$/);
+    if (m) graphExprNextId = Math.max(graphExprNextId, parseInt(m[1]) + 1);
+  }
+  for (const expr of (box.expressions || [])) {
+    listEl.appendChild(createGraphExprRow(expr));
+  }
+  // Reflow MathQuill fields after they're mounted in the DOM
+  for (const field of graphMqFields.values()) {
+    field.reflow();
+  }
+}
+
+// Focus a graph expression by its index in the DOM list, placing cursor at 'start' or 'end'.
+function focusGraphExpr(idx, edge) {
+  const listEl = document.getElementById('graph-expr-list');
+  if (!listEl) return;
+  const rows = listEl.querySelectorAll('.graph-expr-row');
+  if (idx < 0 || idx >= rows.length) return;
+  const exprId = rows[idx].dataset.exprId;
+  const field = graphMqFields.get(exprId);
+  if (field) setTimeout(() => field.focus(), 0);
+}
+
+// Delete a graph expression by id, focusing adjacent expression or nothing.
+function deleteGraphExpr(exprId) {
+  const listEl = document.getElementById('graph-expr-list');
+  if (!listEl) return;
+  const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
+  const idx = rows.findIndex(r => r.dataset.exprId === exprId);
+  const focusIdx = idx > 0 ? idx - 1 : (rows.length > 1 ? 1 : -1);
+
+  clearTimeout(graphCommitTimer);
+  const boxIdx = boxes.findIndex(b => b.id === graphModeBoxId);
+  if (boxIdx !== -1) {
+    boxes[boxIdx].expressions = boxes[boxIdx].expressions.filter(e => e.id !== exprId);
+  }
+  graphMqFields.delete(exprId);
+  rows[idx].remove();
+  updateGraphBoxCount(graphModeBoxId);
+  syncToText();
+  scheduleGraphRender();
+  if (focusIdx >= 0) focusGraphExpr(focusIdx, 'end');
+}
+
+function createGraphExprRow(expr) {
+  const row = document.createElement('div');
+  row.className = 'graph-expr-row';
+  row.dataset.exprId = expr.id;
+
+  // Enable/disable toggle
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.className = 'graph-expr-toggle';
+  toggle.checked = expr.enabled;
+  toggle.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
+  row.appendChild(toggle);
+
+  // Color picker
+  const colorInput = document.createElement('input');
+  colorInput.type = 'color';
+  colorInput.className = 'graph-expr-color';
+  colorInput.value = expr.color || '#3b82f6';
+  colorInput.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
+  row.appendChild(colorInput);
+
+  // Thickness input
+  const thicknessInput = document.createElement('input');
+  thicknessInput.type = 'range';
+  thicknessInput.className = 'graph-expr-thickness';
+  thicknessInput.min = '0.5';
+  thicknessInput.max = '7';
+  thicknessInput.step = '0.5';
+  thicknessInput.value = expr.thickness != null ? expr.thickness : 2.0;
+  thicknessInput.title = 'Line thickness';
+  thicknessInput.addEventListener('input', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
+  row.appendChild(thicknessInput);
+
+  // MathQuill field
+  const mqSpan = document.createElement('span');
+  mqSpan.className = 'graph-expr-mq';
+  row.appendChild(mqSpan);
+
+  const greekLetters = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega";
+  const field = MQ.MathField(mqSpan, {
+    spaceBehavesLikeTab: false,
+    autoCommands: 'sqrt sum int prod infty partial ' + greekLetters,
+    autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp',
+    handlers: {
+      edit: () => {
+        clearTimeout(graphCommitTimer);
+        graphCommitTimer = setTimeout(() => {
+          commitGraphEditorToBox(graphModeBoxId);
+          scheduleGraphRender();
+        }, 300);
+      },
+      enter: () => {
+        addGraphExpressionAfter(expr.id);
+      },
+      moveOutOf: (dir) => {
+        const listEl = document.getElementById('graph-expr-list');
+        if (!listEl) return;
+        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
+        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+        if (dir === 1 && idx < rows.length - 1) focusGraphExpr(idx + 1, 'start');
+        else if (dir === -1 && idx > 0)         focusGraphExpr(idx - 1, 'end');
+      },
+      upOutOf: () => {
+        const listEl = document.getElementById('graph-expr-list');
+        if (!listEl) return;
+        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
+        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+        if (idx > 0) focusGraphExpr(idx - 1, 'end');
+      },
+      downOutOf: () => {
+        const listEl = document.getElementById('graph-expr-list');
+        if (!listEl) return;
+        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
+        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+        if (idx < rows.length - 1) focusGraphExpr(idx + 1, 'start');
+      },
+    },
+  });
+  if (expr.latex) field.latex(expr.latex);
+  graphMqFields.set(expr.id, field);
+
+  mqSpan.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.shiftKey) applyRedo(); else applyUndo();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      e.stopPropagation();
+      applyRedo();
+    }
+    // Backspace on empty expression → delete it (mirrors regular box behavior)
+    if (e.key === 'Backspace' && field.latex() === '') {
+      e.preventDefault();
+      deleteGraphExpr(expr.id);
+    }
+  }, true); // capture phase: fires before MathQuill's inner textarea handler
+
+  // Delete button
+  const delBtn = document.createElement('button');
+  delBtn.className = 'graph-expr-delete';
+  delBtn.textContent = '×';
+  delBtn.title = 'Remove expression';
+  delBtn.addEventListener('click', () => deleteGraphExpr(expr.id));
+  row.appendChild(delBtn);
+
+  // Track focus for render-on-top highlight
+  row.addEventListener('focusin', () => {
+    if (focusedGraphExprId !== expr.id) {
+      focusedGraphExprId = expr.id;
+      scheduleGraphRender();
+    }
+  });
+  row.addEventListener('focusout', e => {
+    if (!row.contains(e.relatedTarget)) {
+      const leavingId = expr.id;
+      setTimeout(() => {
+        if (focusedGraphExprId === leavingId) {
+          focusedGraphExprId = null;
+          scheduleGraphRender();
+        }
+      }, 0);
+    }
+  });
+
+  return row;
+}
+
+function commitGraphEditorToBox(boxId) {
+  if (!boxId) return;
+  const idx = boxes.findIndex(b => b.id === boxId);
+  if (idx === -1) return;
+
+  const rows = document.querySelectorAll('#graph-expr-list .graph-expr-row');
+  const expressions = [];
+  for (const row of rows) {
+    const exprId  = row.dataset.exprId;
+    const enabled   = row.querySelector('.graph-expr-toggle').checked;
+    const color     = row.querySelector('.graph-expr-color').value;
+    const thickness = parseFloat(row.querySelector('.graph-expr-thickness').value) || 2.0;
+    const field     = graphMqFields.get(exprId);
+    const latex     = field ? field.latex() : '';
+    expressions.push({ id: exprId, latex, color, enabled, thickness });
+  }
+  boxes[idx].expressions = expressions;
+  boxes[idx].width  = parseInt(document.getElementById('graph-width-input').value)  || 600;
+  boxes[idx].height = parseInt(document.getElementById('graph-height-input').value) || 400;
+
+  updateGraphBoxCount(boxId);
+  syncToText();
+}
+
+function updateGraphBoxCount(boxId) {
+  const boxEl = boxList.querySelector(`[data-id="${boxId}"] .graph-expr-count`);
+  if (!boxEl) return;
+  const box = boxes.find(b => b.id === boxId);
+  const n = box ? (box.expressions || []).length : 0;
+  boxEl.textContent = `${n} expression${n !== 1 ? 's' : ''}`;
+}
+
+function addGraphExpression() {
+  if (!graphModeBoxId) return;
+  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
+  const listEl = document.getElementById('graph-expr-list');
+  const row = createGraphExprRow(newExpr);
+  listEl.appendChild(row);
+  const field = graphMqFields.get(newExpr.id);
+  if (field) field.reflow();
+  commitGraphEditorToBox(graphModeBoxId);
+  if (field) setTimeout(() => field.focus(), 0);
+}
+
+function addGraphExpressionAfter(afterId) {
+  if (!graphModeBoxId) return;
+  clearTimeout(graphCommitTimer);
+  commitGraphEditorToBox(graphModeBoxId);
+
+  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
+  const listEl  = document.getElementById('graph-expr-list');
+  const afterRow = listEl.querySelector(`.graph-expr-row[data-expr-id="${afterId}"]`);
+  const newRow   = createGraphExprRow(newExpr);
+
+  if (afterRow) {
+    listEl.insertBefore(newRow, afterRow.nextSibling);
+  } else {
+    listEl.appendChild(newRow);
+  }
+
+  // Also insert into boxes array
+  const idx = boxes.findIndex(b => b.id === graphModeBoxId);
+  if (idx !== -1) {
+    const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterId);
+    if (exprIdx !== -1) {
+      boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+    } else {
+      boxes[idx].expressions.push(newExpr);
+    }
+  }
+  const field = graphMqFields.get(newExpr.id);
+  if (field) field.reflow();
+  updateGraphBoxCount(graphModeBoxId);
+  syncToText();
+  if (field) setTimeout(() => field.focus(), 0);
+}
+
+// Wire up graph editor panel buttons
+document.getElementById('graph-done-btn').addEventListener('click', exitGraphMode);
+document.getElementById('graph-add-expr-btn').addEventListener('mousedown', e => e.preventDefault());
+document.getElementById('graph-add-expr-btn').addEventListener('click', addGraphExpression);
+
+document.getElementById('graph-width-input').addEventListener('change', () => {
+  if (graphModeBoxId) { commitGraphEditorToBox(graphModeBoxId); updateGraphCropOverlay(); }
+});
+document.getElementById('graph-height-input').addEventListener('change', () => {
+  if (graphModeBoxId) { commitGraphEditorToBox(graphModeBoxId); updateGraphCropOverlay(); }
+});
+
+document.getElementById('graph-crop-checkbox').addEventListener('change', e => {
+  showGraphCropRect = e.target.checked;
+  updateGraphCropOverlay();
+});
+
 // ── Reflow all boxes when the panel width changes ──────────────────────────────
 // MathQuill equations and textareas need explicit re-measurement; they don't
 // reflow automatically when the containing flex column is resized by the divider.
@@ -1769,6 +2489,11 @@ new ResizeObserver(entries => {
   lastSourceWidth = w;
   updateLineNumbers();
 }).observe(latexSource);
+
+// Re-render graph when preview panel is resized
+new ResizeObserver(() => {
+  if (graphModeBoxId) scheduleGraphRender();
+}).observe(document.getElementById('preview-content'));
 
 // ── Initialize ────────────────────────────────────────────────────────────────
 (function init() {
