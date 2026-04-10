@@ -25,8 +25,9 @@ const ZOOM_STEPS = [50, 67, 75, 90, 100, 110, 125, 150, 175, 200];
 let previewZoomIndex = 4; // 100%
 
 // ── Project state ────────────────────────────────────────────────────────────
-const PROJ_KEY  = 'mathnotepad_projects';
-const DRAFT_KEY = 'mathnotepad_draft';
+const PROJ_KEY     = 'mathnotepad_projects';
+const DRAFT_KEY    = 'mathnotepad_draft';
+const UI_STATE_KEY = 'mathnotepad_ui';
 let currentProjectId = null;
 let isDirty = false;
 
@@ -35,11 +36,19 @@ let graphModeBoxId = null;        // id of box being edited in graph mode, or nu
 let focusedGraphExprId = null;    // id of the expression row currently focused
 let graphExprNextId = 1;
 let graphMqFields = new Map();    // expr id → MathQuill field
+let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that row's badges
 let graphCommitTimer = null;
 
 const GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4'];
 let graphColorIdx = 0;
 function nextGraphColor() { return GRAPH_COLORS[graphColorIdx++ % GRAPH_COLORS.length]; }
+
+function formatConstantValue(v) {
+  if (!isFinite(v)) return null;
+  if (Number.isInteger(v) && Math.abs(v) < 1e15) return '= ' + v;
+  const s = parseFloat(v.toPrecision(6)).toString();
+  return '≈ ' + s;
+}
 
 let graphRenderer = null; // lazily created GraphRenderer
 let graphRenderPending = false;
@@ -51,19 +60,34 @@ function getGraphRenderer() {
 
 /** Compile all expressions for the active graph box and re-render. */
 let _lastGraphExprsKey = '';
+let _lastGraphAnalysis = null;
 function renderGraphPreview() {
   if (!graphModeBoxId) return;
   const box = boxes.find(b => b.id === graphModeBoxId);
   if (!box) return;
 
   const renderer = getGraphRenderer();
-  const baseExprs = (box.expressions || []).map(e => {
-    const result = e.enabled ? compileLatexToGlsl(e.latex) : { error: 'disabled' };
-    return { glsl: result.glsl || null, color: e.color, enabled: e.enabled && !!result.glsl, thickness: e.thickness != null ? e.thickness : 2.0, _exprId: e.id };
-  });
 
-  // Cache key uses canonical order so focus changes never trigger shader recompile
-  const exprsKey = baseExprs.map(e => e.glsl || '').join('|');
+  // Use the new expression analysis pipeline
+  const { analysis, renderExprs, jsEvaluators } = compileGraphExpressions(box.expressions || []);
+  _lastGraphAnalysis = analysis;
+
+  // Update error indicators on expression rows
+  updateGraphExprErrors(analysis.errors);
+
+  // Build the expression array for the renderer
+  const baseExprs = renderExprs.map(re => ({
+    shaderInfo: re.shaderInfo,
+    constantValues: analysis.constantValues,
+    color: re.color,
+    enabled: re.enabled,
+    thickness: re.thickness,
+    _exprId: re.exprId,
+    _jsEval: jsEvaluators.get(re.exprId) || null,
+  }));
+
+  // Cache key uses shader keys so focus changes never trigger shader recompile
+  const exprsKey = baseExprs.map(e => e.shaderInfo ? e.shaderInfo.shaderKey : '').join('|');
   if (exprsKey !== _lastGraphExprsKey) {
     renderer.clearShaderCache();
     _lastGraphExprsKey = exprsKey;
@@ -85,6 +109,32 @@ function renderGraphPreview() {
 
   renderer.render(exprs, w, h, !!box.lightTheme);
   updateGraphCropOverlay();
+
+  // Refresh all expression row badges now that constants may have changed
+  for (const fn of graphExprUpdateFns.values()) fn();
+}
+
+/** Update error indicators on graph expression rows. */
+function updateGraphExprErrors(errors) {
+  const rows = document.querySelectorAll('#graph-expr-list .graph-expr-row');
+  for (const row of rows) {
+    const exprId = row.dataset.exprId;
+    const errorMsg = errors.get(exprId);
+    let errorEl = row.querySelector('.graph-expr-error');
+    if (errorMsg) {
+      if (!errorEl) {
+        errorEl = document.createElement('span');
+        errorEl.className = 'graph-expr-error';
+        row.appendChild(errorEl);
+      }
+      errorEl.textContent = errorMsg;
+      errorEl.title = errorMsg;
+      row.classList.add('has-error');
+    } else {
+      if (errorEl) errorEl.remove();
+      row.classList.remove('has-error');
+    }
+  }
 }
 
 function scheduleGraphRender() {
@@ -249,7 +299,7 @@ function serializeToLatex(boxArray) {
     else if (b.type === 'pagebreak') serialized = '\\newpage';
     else if (b.type === 'graph') {
       const exprLines = (b.expressions || []).map(e =>
-        `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.latex}`
+        `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.sliderMin != null ? e.sliderMin : 0} ${e.sliderMax != null ? e.sliderMax : 10} ${e.latex}`
       );
       const themeFlag = b.lightTheme ? '{light}' : '';
       serialized = `\\begin{graph}{${b.width}}{${b.height}}${themeFlag}\n${exprLines.join('\n')}\n\\end{graph}`;
@@ -334,21 +384,27 @@ function parseFromLatex(src) {
         const el = lines[i].trim();
         if (el.startsWith('% ')) {
           const rest = el.slice(2);
-          // format: "<id> <color> <on|off> <thickness> <latex...>"
-          // (backwards-compat: thickness may be absent in old data)
+          // format: "<id> <color> <on|off> <thickness> <sliderMin> <sliderMax> <latex...>"
+          // (backwards-compat: thickness / sliderMin / sliderMax may be absent in old data)
           const parts = rest.split(' ');
           if (parts.length >= 3) {
             const exprId  = parts[0];
             const color   = parts[1];
             const enabled = parts[2] === 'on';
             let thickness = 2.0;
+            let sliderMin = 0, sliderMax = 10;
             let latexStart = 3;
             if (parts.length >= 4 && !isNaN(parseFloat(parts[3]))) {
               thickness = parseFloat(parts[3]);
               latexStart = 4;
             }
+            if (parts.length >= latexStart + 2 && !isNaN(parseFloat(parts[latexStart])) && !isNaN(parseFloat(parts[latexStart + 1]))) {
+              sliderMin = parseFloat(parts[latexStart]);
+              sliderMax = parseFloat(parts[latexStart + 1]);
+              latexStart += 2;
+            }
             const latex = parts.slice(latexStart).join(' ');
-            expressions.push({ id: exprId, latex, color, enabled, thickness });
+            expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
           }
         }
         i++;
@@ -1476,23 +1532,23 @@ async function updatePreview() {
   for (const box of boxes) {
     if (box.commented) continue;
     if (box.type === 'math') {
-      inner += `<div class="preview-math">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
+      inner += `<div class="preview-math" data-box-id="${box.id}">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
     } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
       const tag = box.type;
-      inner += `<${tag} class="preview-${tag}">${processTextContent(box.content)}</${tag}>`;
+      inner += `<${tag} class="preview-${tag}" data-box-id="${box.id}">${processTextContent(box.content)}</${tag}>`;
     } else if (box.type === 'pagebreak') {
-      inner += `<div class="preview-pagebreak"></div>`;
+      inner += `<div class="preview-pagebreak" data-box-id="${box.id}"></div>`;
     } else if (box.type === 'graph') {
       if (box._snapshotDataUrl) {
-        inner += `<div class="preview-graph-image" style="text-align:center;margin:8px 0">
+        inner += `<div class="preview-graph-image" data-box-id="${box.id}" style="text-align:center;margin:8px 0">
           <img src="${box._snapshotDataUrl}" style="max-width:100%;width:${box.width||600}px;height:auto;border-radius:4px"></div>`;
       } else {
         const n = (box.expressions || []).filter(e => e.enabled).length;
-        inner += `<div class="preview-graph-placeholder" style="width:${box.width || 600}px;height:${box.height || 400}px">
+        inner += `<div class="preview-graph-placeholder" data-box-id="${box.id}" style="width:${box.width || 600}px;height:${box.height || 400}px">
           <span>${n} expression${n !== 1 ? 's' : ''}</span></div>`;
       }
     } else {
-      inner += `<p class="preview-text">${processTextContent(box.content)}</p>`;
+      inner += `<p class="preview-text" data-box-id="${box.id}">${processTextContent(box.content)}</p>`;
     }
   }
 
@@ -1670,6 +1726,35 @@ previewContent.addEventListener('wheel', e => {
   }
 }, { passive: false });
 
+previewContent.addEventListener('click', e => {
+  if (graphModeBoxId) return;
+  // Walk up from the clicked element to find a data-box-id
+  let target = e.target;
+  while (target && target !== previewContent) {
+    if (target.dataset.boxId) {
+      scrollAndHighlightBox(target.dataset.boxId);
+      return;
+    }
+    target = target.parentElement;
+  }
+});
+
+function scrollAndHighlightBox(boxId) {
+  const el = boxList.querySelector(`[data-id="${boxId}"]`);
+  if (!el) return;
+  // Scroll box into center of the box list
+  const listRect = boxList.getBoundingClientRect();
+  const elRect   = el.getBoundingClientRect();
+  const offset   = elRect.top - listRect.top - (listRect.height / 2) + (elRect.height / 2);
+  boxList.scrollBy({ top: offset, behavior: 'smooth' });
+  // Blink yellow
+  el.classList.remove('box-highlight-blink');
+  // Force reflow so removing+re-adding restarts the animation
+  void el.offsetWidth;
+  el.classList.add('box-highlight-blink');
+  el.addEventListener('animationend', () => el.classList.remove('box-highlight-blink'), { once: true });
+}
+
 function togglePreview() {
   isPreviewOpen = !isPreviewOpen;
   previewPanel.classList.toggle('open', isPreviewOpen);
@@ -1683,6 +1768,7 @@ function togglePreview() {
     previewPanel.style.width = '';
     updatePreview();
   }
+  saveUiState();
 }
 
 togglePreviewBtn.addEventListener('click', togglePreview);
@@ -1698,6 +1784,7 @@ function toggleSource() {
   const sourceLabel = isSourceOpen ? 'Hide Source' : 'Source';
   toggleSourceBtn.textContent = sourceLabel;
   document.getElementById('graph-toggle-source-btn').textContent = sourceLabel;
+  saveUiState();
 }
 
 toggleSourceBtn.addEventListener('click', toggleSource);
@@ -1793,11 +1880,13 @@ document.addEventListener('mouseup', () => {
     dragging = false;
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
+    saveUiState();
   }
   if (dragging2) {
     dragging2 = false;
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
+    saveUiState();
   }
 });
 
@@ -1815,6 +1904,15 @@ function saveDraft() {
   localStorage.setItem(DRAFT_KEY, JSON.stringify({
     latex: latexSource.value,
     projectId: currentProjectId,
+  }));
+}
+
+function saveUiState() {
+  localStorage.setItem(UI_STATE_KEY, JSON.stringify({
+    isPreviewOpen,
+    isSourceOpen,
+    leftPanelWidth:   leftPanel.style.width   || null,
+    previewPanelWidth: previewPanel.style.width || null,
   }));
 }
 
@@ -1843,6 +1941,7 @@ function restoreFromLatex(latex) {
   history = [{ latex, focusId: null }];
   historyIndex = 0;
   updateLineNumbers();
+  updatePreview();
 }
 
 function saveCurrentProject() {
@@ -2141,6 +2240,7 @@ function _teardownGraphModeUI() {
   clearTimeout(graphCommitTimer);
   if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; }
   graphMqFields.clear();
+  graphExprUpdateFns.clear();
   focusedGraphExprId = null;
   document.getElementById('graph-expr-list').innerHTML = '';
   boxList.style.display = '';
@@ -2174,10 +2274,15 @@ function exitGraphMode() {
       graphRenderer.xMin = crop.worldXMin; graphRenderer.xMax = crop.worldXMax;
       graphRenderer.yMin = crop.worldYMin; graphRenderer.yMax = crop.worldYMax;
 
-      const exprs = (box.expressions || []).map(e => {
-        const result = e.enabled ? compileLatexToGlsl(e.latex) : { error: 'disabled' };
-        return { glsl: result.glsl || null, color: e.color, enabled: e.enabled && !!result.glsl, thickness: e.thickness != null ? e.thickness : 2.0 };
-      });
+      const { analysis, renderExprs } = compileGraphExpressions(box.expressions || []);
+      const exprs = renderExprs.map(re => ({
+        shaderInfo: re.shaderInfo,
+        constantValues: analysis.constantValues,
+        color: re.color,
+        enabled: re.enabled,
+        thickness: re.thickness,
+        _exprId: re.exprId,
+      }));
       graphRenderer.render(exprs, box.width || 600, box.height || 400, !!box.lightTheme);
       box._snapshotDataUrl = graphRenderer.canvas.toDataURL('image/png');
 
@@ -2201,6 +2306,7 @@ function renderGraphExprList(box) {
   const listEl = document.getElementById('graph-expr-list');
   listEl.innerHTML = '';
   graphMqFields.clear();
+  graphExprUpdateFns.clear();
   // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
   for (const expr of (box.expressions || [])) {
     const m = expr.id.match(/^ge(\d+)$/);
@@ -2240,7 +2346,8 @@ function deleteGraphExpr(exprId) {
     boxes[boxIdx].expressions = boxes[boxIdx].expressions.filter(e => e.id !== exprId);
   }
   graphMqFields.delete(exprId);
-  rows[idx].remove();
+  graphExprUpdateFns.delete(exprId);
+  (rows[idx].closest('.graph-expr-wrapper') || rows[idx]).remove();
   updateGraphBoxCount(graphModeBoxId);
   syncToText();
   scheduleGraphRender();
@@ -2248,9 +2355,87 @@ function deleteGraphExpr(exprId) {
 }
 
 function createGraphExprRow(expr) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'graph-expr-wrapper';
+
   const row = document.createElement('div');
   row.className = 'graph-expr-row';
   row.dataset.exprId = expr.id;
+  row.dataset.sliderMin = expr.sliderMin != null ? expr.sliderMin : 0;
+  row.dataset.sliderMax = expr.sliderMax != null ? expr.sliderMax : 10;
+  wrapper.appendChild(row);
+
+  // Slider row (shown only for numeric constant expressions)
+  const sliderRow = document.createElement('div');
+  sliderRow.className = 'graph-expr-slider-row';
+  sliderRow.style.display = 'none';
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.className = 'graph-expr-slider';
+  slider.min = row.dataset.sliderMin;
+  slider.max = row.dataset.sliderMax;
+  slider.step = 'any';
+
+  const minInput = document.createElement('input');
+  minInput.type = 'number';
+  minInput.className = 'graph-expr-slider-min';
+  minInput.value = row.dataset.sliderMin;
+  minInput.title = 'Min';
+
+  const maxInput = document.createElement('input');
+  maxInput.type = 'number';
+  maxInput.className = 'graph-expr-slider-max';
+  maxInput.value = row.dataset.sliderMax;
+  maxInput.title = 'Max';
+
+  sliderRow.appendChild(minInput);
+  sliderRow.appendChild(slider);
+  sliderRow.appendChild(maxInput);
+
+  let sliderDragging = false;
+
+  function applySliderValue(val) {
+    // Extract variable name from current latex and update the expression
+    const field = graphMqFields.get(expr.id);
+    if (!field) return;
+    const currentLatex = field.latex();
+    const nameMatch = currentLatex.match(/^([a-zA-Z]\w*)\s*=/);
+    if (!nameMatch) return;
+    const rounded = parseFloat(val.toPrecision(6));
+    field.latex(`${nameMatch[1]}=${rounded}`);
+    commitGraphEditorToBox(graphModeBoxId);
+    scheduleGraphRender();
+  }
+
+  slider.addEventListener('mousedown', () => { sliderDragging = true; });
+  slider.addEventListener('mouseup',   () => { sliderDragging = false; });
+  slider.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
+  slider.addEventListener('touchend',   () => { sliderDragging = false; });
+  slider.addEventListener('input', () => applySliderValue(parseFloat(slider.value)));
+
+  minInput.addEventListener('change', () => {
+    const min = parseFloat(minInput.value);
+    if (isNaN(min)) return;
+    slider.min = min;
+    row.dataset.sliderMin = min;
+    commitGraphEditorToBox(graphModeBoxId);
+  });
+
+  maxInput.addEventListener('change', () => {
+    const max = parseFloat(maxInput.value);
+    if (isNaN(max)) return;
+    slider.max = max;
+    row.dataset.sliderMax = max;
+    commitGraphEditorToBox(graphModeBoxId);
+  });
+
+  // Drag handle
+  const handle = document.createElement('div');
+  handle.className = 'graph-expr-handle';
+  handle.innerHTML = '&#8942;&#8942;';
+  handle.title = 'Drag to reorder';
+  row.appendChild(handle);
 
   // Enable/disable toggle
   const toggle = document.createElement('input');
@@ -2260,7 +2445,7 @@ function createGraphExprRow(expr) {
   toggle.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
   row.appendChild(toggle);
 
-  // Color picker
+  // Color picker (hidden for non-graphing expressions)
   const colorInput = document.createElement('input');
   colorInput.type = 'color';
   colorInput.className = 'graph-expr-color';
@@ -2268,7 +2453,7 @@ function createGraphExprRow(expr) {
   colorInput.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
   row.appendChild(colorInput);
 
-  // Thickness input
+  // Thickness input (hidden for non-graphing expressions)
   const thicknessInput = document.createElement('input');
   thicknessInput.type = 'range';
   thicknessInput.className = 'graph-expr-thickness';
@@ -2280,10 +2465,89 @@ function createGraphExprRow(expr) {
   thicknessInput.addEventListener('input', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
   row.appendChild(thicknessInput);
 
+  // Constant value badge — declared here so updateGraphingControls can reference it
+  const constValueSpan = document.createElement('span');
+  constValueSpan.className = 'graph-expr-const-value';
+  constValueSpan.style.display = 'none';
+
+  function updateGraphingControls(latex) {
+    let graphing = false;
+    let isNumericConst = false;
+    let constValue = null;
+    let constEvalValue = null;
+    if (latex.trim() !== '' && graphModeBoxId) {
+      const box = boxes.find(b => b.id === graphModeBoxId);
+      const allExprs = (box ? box.expressions || [] : []).map(e =>
+        e.id === expr.id ? { ...e, latex } : e
+      );
+      if (!allExprs.find(e => e.id === expr.id)) {
+        allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
+      }
+      const { renderExprs, analysis } = compileGraphExpressions(allExprs);
+      graphing = renderExprs.some(re => re.exprId === expr.id);
+      if (!graphing) {
+        const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
+        if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
+          const constName = nameMatch[1];
+          const constInfo = analysis.constants.find(c => c.name === constName);
+          // Slider only for depth-0 constants (directly adjustable)
+          if (constInfo && constInfo.depth === 0) {
+            isNumericConst = true;
+            constValue = analysis.constantValues.get(constName);
+          }
+          // Badge for any constant whose value was evaluated and isn't a plain number literal
+          if (constInfo) {
+            const evalVal = analysis.constantValues.get(constName);
+            if (evalVal !== undefined) {
+              const eqIdx = latex.indexOf('=');
+              const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
+              if (!/^-?\d+(\.\d+)?$/.test(rhs)) {
+                constEvalValue = evalVal;
+              }
+            }
+          }
+        } else {
+          // Try to evaluate bare constant expressions (no = sign, no x/y)
+          const trimmed = latex.trim();
+          if (findEqAtDepth0(trimmed) === -1) {
+            try {
+              const ast = parseLatexToAst(trimmed);
+              const vars = collectVariables(ast);
+              if (!vars.has('x') && !vars.has('y')) {
+                const val = evaluateAst(ast, analysis.constantValues);
+                if (isFinite(val) && !/^-?\d+(\.\d+)?$/.test(trimmed)) {
+                  constEvalValue = val;
+                }
+              }
+            } catch (e) { /* not evaluable */ }
+          }
+        }
+      }
+    }
+    colorInput.style.display = graphing ? '' : 'none';
+    thicknessInput.style.display = graphing ? '' : 'none';
+    toggle.style.display = graphing ? '' : 'none';
+    if (!graphing) toggle.checked = true;
+    sliderRow.style.display = isNumericConst ? '' : 'none';
+    if (isNumericConst && constValue !== null && !sliderDragging) {
+      slider.value = constValue;
+    }
+    // Update the constant value badge
+    const formatted = constEvalValue !== null ? formatConstantValue(constEvalValue) : null;
+    if (formatted !== null) {
+      constValueSpan.textContent = formatted;
+      constValueSpan.style.display = 'block';
+    } else {
+      constValueSpan.style.display = 'none';
+    }
+  }
+  updateGraphingControls(expr.latex || '');
+
   // MathQuill field
   const mqSpan = document.createElement('span');
   mqSpan.className = 'graph-expr-mq';
   row.appendChild(mqSpan);
+  row.appendChild(sliderRow);
 
   const greekLetters = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega";
   const field = MQ.MathField(mqSpan, {
@@ -2292,6 +2556,7 @@ function createGraphExprRow(expr) {
     autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp',
     handlers: {
       edit: () => {
+        updateGraphingControls(field.latex());
         clearTimeout(graphCommitTimer);
         graphCommitTimer = setTimeout(() => {
           commitGraphEditorToBox(graphModeBoxId);
@@ -2327,6 +2592,7 @@ function createGraphExprRow(expr) {
   });
   if (expr.latex) field.latex(expr.latex);
   graphMqFields.set(expr.id, field);
+  graphExprUpdateFns.set(expr.id, () => updateGraphingControls(field.latex()));
 
   mqSpan.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -2352,7 +2618,85 @@ function createGraphExprRow(expr) {
   delBtn.textContent = '×';
   delBtn.title = 'Remove expression';
   delBtn.addEventListener('click', () => deleteGraphExpr(expr.id));
-  row.appendChild(delBtn);
+  row.insertBefore(delBtn, sliderRow);
+
+  // Append constant value badge last so it wraps to its own line below everything
+  constValueSpan.addEventListener('click', () => {
+    const raw = constValueSpan.textContent.replace(/^[≈=]\s*/, '');
+    navigator.clipboard.writeText(raw).catch(() => {});
+  });
+  row.appendChild(constValueSpan);
+
+  // Drag-to-reorder
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const list = document.getElementById('graph-expr-list');
+    if (!list) return;
+
+    const allWrappers = () => Array.from(list.querySelectorAll('.graph-expr-wrapper'));
+    const wrapperEl = wrapper;
+    const startY = e.clientY;
+    const origRect = wrapperEl.getBoundingClientRect();
+
+    // Create a floating clone
+    const ghost = wrapperEl.cloneNode(true);
+    ghost.style.cssText = `
+      position: fixed;
+      left: ${origRect.left}px;
+      top: ${origRect.top}px;
+      width: ${origRect.width}px;
+      opacity: 0.85;
+      pointer-events: none;
+      z-index: 9999;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    `;
+    document.body.appendChild(ghost);
+
+    // Placeholder to hold space
+    const placeholder = document.createElement('div');
+    placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
+    wrapperEl.replaceWith(placeholder);
+
+    let currentTarget = placeholder;
+
+    function onMove(ev) {
+      ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
+
+      const siblings = allWrappers().filter(w => w !== wrapperEl);
+      let inserted = false;
+      for (const sib of siblings) {
+        const r = sib.getBoundingClientRect();
+        const mid = r.top + r.height / 2;
+        if (ev.clientY < mid) {
+          if (currentTarget !== sib) {
+            sib.before(placeholder);
+            currentTarget = sib;
+          }
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) {
+        const last = siblings[siblings.length - 1];
+        if (last && currentTarget !== null) {
+          list.appendChild(placeholder);
+          currentTarget = null;
+        }
+      }
+    }
+
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      ghost.remove();
+      placeholder.replaceWith(wrapperEl);
+      commitGraphEditorToBox(graphModeBoxId);
+      scheduleGraphRender();
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 
   // Track focus for render-on-top highlight
   row.addEventListener('focusin', () => {
@@ -2373,7 +2717,7 @@ function createGraphExprRow(expr) {
     }
   });
 
-  return row;
+  return wrapper;
 }
 
 function commitGraphEditorToBox(boxId) {
@@ -2388,9 +2732,11 @@ function commitGraphEditorToBox(boxId) {
     const enabled   = row.querySelector('.graph-expr-toggle').checked;
     const color     = row.querySelector('.graph-expr-color').value;
     const thickness = parseFloat(row.querySelector('.graph-expr-thickness').value) || 2.0;
+    const sliderMin = parseFloat(row.dataset.sliderMin) || 0;
+    const sliderMax = parseFloat(row.dataset.sliderMax) || 10;
     const field     = graphMqFields.get(exprId);
     const latex     = field ? field.latex() : '';
-    expressions.push({ id: exprId, latex, color, enabled, thickness });
+    expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
   }
   boxes[idx].expressions = expressions;
   boxes[idx].width  = parseInt(document.getElementById('graph-width-input').value)  || 600;
@@ -2428,12 +2774,13 @@ function addGraphExpressionAfter(afterId) {
   const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
   const listEl  = document.getElementById('graph-expr-list');
   const afterRow = listEl.querySelector(`.graph-expr-row[data-expr-id="${afterId}"]`);
-  const newRow   = createGraphExprRow(newExpr);
+  const newWrapper = createGraphExprRow(newExpr);
 
   if (afterRow) {
-    listEl.insertBefore(newRow, afterRow.nextSibling);
+    const afterWrapper = afterRow.closest('.graph-expr-wrapper') || afterRow;
+    listEl.insertBefore(newWrapper, afterWrapper.nextSibling);
   } else {
-    listEl.appendChild(newRow);
+    listEl.appendChild(newWrapper);
   }
 
   // Also insert into boxes array
@@ -2498,6 +2845,23 @@ new ResizeObserver(() => {
 // ── Initialize ────────────────────────────────────────────────────────────────
 (function init() {
   applyFontSize();
+
+  // Restore UI layout (panel visibility + divider positions)
+  const uiState = JSON.parse(localStorage.getItem(UI_STATE_KEY) || 'null');
+  if (uiState) {
+    if (!uiState.isSourceOpen) toggleSource();
+    if (uiState.isPreviewOpen)  togglePreview();
+    if (uiState.leftPanelWidth) {
+      leftPanel.style.flex  = 'none';
+      leftPanel.style.width = uiState.leftPanelWidth;
+      rightPanel.style.flex = '1';
+    }
+    if (uiState.previewPanelWidth && uiState.isPreviewOpen) {
+      previewPanel.style.flex  = 'none';
+      previewPanel.style.width = uiState.previewPanelWidth;
+    }
+  }
+
   const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
   if (draft && draft.latex != null) {
     restoreFromLatex(draft.latex);

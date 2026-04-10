@@ -344,11 +344,34 @@ html, body {
 .graph-expr-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 5px 8px;
   background: #181825;
   border: 1px solid #313244;
   border-radius: 6px;
+}
+
+.graph-expr-handle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  color: #45475a;
+  cursor: grab;
+  font-size: 10px;
+  letter-spacing: -1px;
+  padding: 0 2px;
+  user-select: none;
+  line-height: 1;
+}
+
+.graph-expr-handle:hover {
+  color: #7f849c;
+}
+
+.graph-expr-handle:active {
+  cursor: grabbing;
 }
 
 .graph-expr-toggle {
@@ -414,6 +437,70 @@ html, body {
 .graph-expr-delete:hover {
   color: #f38ba8;
   background: #313244;
+}
+
+.graph-expr-const-value {
+  display: block;
+  width: 100%;
+  text-align: right;
+  font-size: 11px;
+  font-family: monospace;
+  color: #6c7086;
+  padding: 1px 2px 0 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.graph-expr-const-value:hover {
+  color: #cdd6f4;
+}
+
+.graph-expr-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 0 0 0;
+}
+
+.graph-expr-slider {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  accent-color: #89b4fa;
+}
+
+.graph-expr-slider-min,
+.graph-expr-slider-max {
+  width: 48px;
+  background: transparent;
+  border: 1px solid #45475a;
+  border-radius: 3px;
+  color: #cdd6f4;
+  font-size: 11px;
+  padding: 1px 3px;
+  text-align: center;
+}
+
+.graph-expr-slider-min:focus,
+.graph-expr-slider-max:focus {
+  outline: none;
+  border-color: #89b4fa;
+}
+
+.graph-expr-error {
+  display: block;
+  width: 100%;
+  font-size: 10px;
+  color: #f38ba8;
+  padding: 0 4px 2px 28px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-expr-row.has-error .mq-editable-field {
+  border-color: #f38ba8;
 }
 
 #graph-size-controls {
@@ -755,6 +842,17 @@ html, body {
 .box.drag-over {
   border-color: #89b4fa;
   background: #1e1e3a;
+}
+
+@keyframes box-blink-yellow {
+  0%   { background: #181825; }
+  20%  { background: #4a4400; border-color: #f5c400; }
+  60%  { background: #4a4400; border-color: #f5c400; }
+  100% { background: #181825; }
+}
+
+.box.box-highlight-blink {
+  animation: box-blink-yellow 0.7s ease-out;
 }
 
 .box-drag-handle {
