@@ -1,26 +1,21 @@
 'use strict';
 
-// ── LaTeX → GLSL compiler ────────────────────────────────────────────────────
+// ── LaTeX → AST compiler & expression analysis ─────────────────────────────
 //
-// Converts a MathQuill LaTeX expression (e.g. "x^{2}+y^{2}=1") into a GLSL
-// float expression F(x,y) suitable for implicit-curve rendering.
-// Returns a string like "(pow(x,2.0)+pow(y,2.0))-(1.0)".
-// Throws CompileError on parse failure.
+// Parses MathQuill LaTeX expressions into ASTs, classifies them as definitions
+// or implicit equations, tracks dependencies, evaluates constants on the CPU,
+// and generates GLSL with uniforms for constants and inlined xy-dependent defs.
+//
+// AST node types:
+//   Leaf:     { type: 'number', value: <float> }
+//             { type: 'variable', name: <string> }
+//   Internal: { type: 'call', name: <string>, args: [<node>, ...] }
+//     name is one of: 'add', 'sub', 'mul', 'div', 'pow', 'neg',
+//                     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+//                     'ln', 'log', 'exp', 'abs', 'sqrt'
 
 class CompileError extends Error {
   constructor(msg) { super(msg); this.name = 'CompileError'; }
-}
-
-function latexToGlslF(latex) {
-  // Split on '=' at brace-depth 0
-  const eqIdx = findEqAtDepth0(latex);
-  if (eqIdx === -1) {
-    // No '=': treat whole thing as f(x,y)=0
-    return glslExpr(latex);
-  }
-  const lhs = latex.slice(0, eqIdx).trim();
-  const rhs = latex.slice(eqIdx + 1).trim();
-  return `(${glslExpr(lhs)})-(${glslExpr(rhs)})`;
 }
 
 function findEqAtDepth0(s) {
@@ -126,7 +121,6 @@ class Parser {
     const t = this.peek();
     if (t.type === TK.EOF || t.type === TK.RBRACE || t.type === TK.RPAREN ||
         t.type === TK.RBRACKET || t.type === TK.PIPE) return true;
-    // \right is a delimiter, not an operand — stop parsing before it
     if (t.type === TK.CMD && t.val === '\\right') return true;
     return false;
   }
@@ -135,11 +129,17 @@ class Parser {
 
   parseSum() {
     let left = this.parseProduct();
-    while (this.peek().type === TK.PLUS || this.peek().type === TK.MINUS) {
-      const op = this.next().type === TK.PLUS ? '+' : '-';
-      // Re-check: we already advanced, recalculate
-      const prevType = this.tokens[this.pos - 1].type;
-      left = `(${left}${prevType === TK.PLUS ? '+' : '-'}${this.parseProduct()})`;
+    for (;;) {
+      const t = this.peek();
+      if (t.type === TK.PLUS) {
+        this.next();
+        left = { type: 'call', name: 'add', args: [left, this.parseProduct()] };
+      } else if (t.type === TK.MINUS) {
+        this.next();
+        left = { type: 'call', name: 'sub', args: [left, this.parseProduct()] };
+      } else {
+        break;
+      }
     }
     return left;
   }
@@ -147,17 +147,15 @@ class Parser {
   parseProduct() {
     let left = this.parseUnary();
     while (!this.atExprEnd() && this.peek().type !== TK.PLUS && this.peek().type !== TK.MINUS) {
-      // Implicit multiplication — but don't consume operators that belong to sum
       const nextType = this.peek().type;
       if (nextType === TK.PLUS || nextType === TK.MINUS || nextType === TK.EOF ||
           nextType === TK.RBRACE || nextType === TK.RPAREN || nextType === TK.RBRACKET ||
           nextType === TK.PIPE) break;
-      // Skip explicit multiplication operators (\cdot, \times, *)
-      if (nextType === TK.STAR) { this.next(); continue; }
-      if (nextType === TK.CMD && (this.peek().val === '\\cdot' || this.peek().val === '\\times')) {
-        this.next(); continue;
+      if (nextType === TK.STAR) { this.next(); }
+      else if (nextType === TK.CMD && (this.peek().val === '\\cdot' || this.peek().val === '\\times')) {
+        this.next();
       }
-      left = `(${left}*${this.parseUnary()})`;
+      left = { type: 'call', name: 'mul', args: [left, this.parseUnary()] };
     }
     return left;
   }
@@ -165,7 +163,7 @@ class Parser {
   parseUnary() {
     if (this.peek().type === TK.MINUS) {
       this.next();
-      return `(-(${this.parsePower()}))`;
+      return { type: 'call', name: 'neg', args: [this.parsePower()] };
     }
     return this.parsePower();
   }
@@ -175,7 +173,7 @@ class Parser {
     if (this.peek().type === TK.CARET) {
       this.next();
       const exp = this.parseAtom();
-      base = `pow(${base},${exp})`;
+      base = { type: 'call', name: 'pow', args: [base, exp] };
     }
     return base;
   }
@@ -186,8 +184,7 @@ class Parser {
     // Number
     if (t.type === TK.NUM) {
       this.next();
-      const s = t.val;
-      return s.includes('.') ? s : s + '.0';
+      return { type: 'number', value: parseFloat(t.val) };
     }
 
     // Parenthesised group
@@ -195,7 +192,7 @@ class Parser {
       this.next();
       const inner = this.parseExpr();
       if (this.peek().type === TK.RPAREN) this.next();
-      return `(${inner})`;
+      return inner;
     }
 
     // Braced group
@@ -211,7 +208,7 @@ class Parser {
       this.next();
       const inner = this.parseExpr();
       if (this.peek().type === TK.PIPE) this.next();
-      return `abs(${inner})`;
+      return { type: 'call', name: 'abs', args: [inner] };
     }
 
     // Command
@@ -221,8 +218,8 @@ class Parser {
     if (t.type === TK.IDENT) {
       this.next();
       const v = t.val;
-      if (v === 'e') return '2.718281828459045';
-      return v; // x, y, or other variable — passed through
+      if (v === 'e') return { type: 'number', value: Math.E };
+      return { type: 'variable', name: v };
     }
 
     throw new CompileError(`Unexpected token: ${t.type} (${t.val || ''})`);
@@ -235,172 +232,652 @@ class Parser {
       this.eat(TK.RBRACE);
       return v;
     }
-    // Fallback: single atom
     return this.parseAtom();
   }
 
   parseCommand() {
-    const cmd = this.next().val; // consume the CMD token
+    const cmd = this.next().val;
 
     switch (cmd) {
       case '\\frac': {
         const num = this.parseBracedArg();
         const den = this.parseBracedArg();
-        return `((${num})/(${den}))`;
+        return { type: 'call', name: 'div', args: [num, den] };
       }
       case '\\sqrt': {
-        // \sqrt[n]{x} or \sqrt{x}
         if (this.peek().type === TK.LBRACKET) {
-          this.next(); // [
+          this.next();
           const n = this.parseExpr();
           this.eat(TK.RBRACKET);
           const x = this.parseBracedArg();
-          return `pow(${x},1.0/(${n}))`;
+          return { type: 'call', name: 'pow', args: [x, { type: 'call', name: 'div', args: [{ type: 'number', value: 1 }, n] }] };
         }
         const x = this.parseBracedArg();
-        return `sqrt(${x})`;
+        return { type: 'call', name: 'sqrt', args: [x] };
       }
       case '\\left': {
-        // \left( ... \right) or \left| ... \right|
         const delim = this.peek();
         if (delim.type === TK.LPAREN) {
           this.next();
           const inner = this.parseExpr();
-          // consume \right)
           if (this.peek().type === TK.CMD && this.peek().val === '\\right') this.next();
           if (this.peek().type === TK.RPAREN) this.next();
-          return `(${inner})`;
+          return inner;
         }
         if (delim.type === TK.PIPE) {
           this.next();
           const inner = this.parseExpr();
           if (this.peek().type === TK.CMD && this.peek().val === '\\right') this.next();
           if (this.peek().type === TK.PIPE) this.next();
-          return `abs(${inner})`;
+          return { type: 'call', name: 'abs', args: [inner] };
         }
-        // Unknown delimiter — skip it and parse inner
         this.next();
         return this.parseExpr();
       }
       case '\\right': {
-        // Encountered stray \right — just skip the delimiter and return empty
-        this.next(); // delimiter token
-        return '0.0';
+        this.next();
+        return { type: 'number', value: 0 };
       }
-      case '\\sin':    return `sin(${this.parseFuncArg()})`;
-      case '\\cos':    return `cos(${this.parseFuncArg()})`;
-      case '\\tan':    return `tan(${this.parseFuncArg()})`;
-      case '\\arcsin': return `asin(${this.parseFuncArg()})`;
-      case '\\arccos': return `acos(${this.parseFuncArg()})`;
-      case '\\arctan': return `atan(${this.parseFuncArg()})`;
-      case '\\ln':     return `log(${this.parseFuncArg()})`;
+      case '\\sin':    return { type: 'call', name: 'sin', args: [this.parseFuncArg()] };
+      case '\\cos':    return { type: 'call', name: 'cos', args: [this.parseFuncArg()] };
+      case '\\tan':    return { type: 'call', name: 'tan', args: [this.parseFuncArg()] };
+      case '\\arcsin': return { type: 'call', name: 'asin', args: [this.parseFuncArg()] };
+      case '\\arccos': return { type: 'call', name: 'acos', args: [this.parseFuncArg()] };
+      case '\\arctan': return { type: 'call', name: 'atan', args: [this.parseFuncArg()] };
+      case '\\ln':     return { type: 'call', name: 'ln', args: [this.parseFuncArg()] };
       case '\\log': {
         const arg = this.parseFuncArg();
-        return `(log(${arg})/log(10.0))`;
+        return { type: 'call', name: 'div', args: [
+          { type: 'call', name: 'ln', args: [arg] },
+          { type: 'call', name: 'ln', args: [{ type: 'number', value: 10 }] }
+        ]};
       }
-      case '\\exp':    return `exp(${this.parseFuncArg()})`;
-      case '\\abs':    return `abs(${this.parseBracedArg()})`;
-      case '\\pi':     return '3.141592653589793';
+      case '\\exp':    return { type: 'call', name: 'exp', args: [this.parseFuncArg()] };
+      case '\\abs':    return { type: 'call', name: 'abs', args: [this.parseBracedArg()] };
+      case '\\pi':     return { type: 'number', value: Math.PI };
       case '\\cdot':
-      case '\\times':  throw new CompileError('unexpected multiply operator'); // handled in parseProduct
+      case '\\times':  throw new CompileError('unexpected multiply operator');
       case '\\,':
       case '\\;':
       case '\\!':
-      case '\\:':      return ''; // spacing commands — ignore
-      case '\\infty':  return '1e30';
+      case '\\:': {
+        // Spacing commands — skip. If more tokens follow, parse the next atom.
+        if (this.atExprEnd()) return { type: 'number', value: 0 };
+        return this.parseAtom();
+      }
+      case '\\infty':  return { type: 'number', value: 1e30 };
 
-      // Greek letters → variable names (GLSL doesn't know them, but user can use x,y freely;
-      // we pass through so shader code uses the same names as uniforms when needed)
-      case '\\alpha':  return 'alpha';
-      case '\\beta':   return 'beta';
-      case '\\gamma':  return 'gamma';
-      case '\\delta':  return 'delta';
-      case '\\theta':  return 'theta';
-      case '\\lambda': return 'lambda';
-      case '\\mu':     return 'mu';
-      case '\\sigma':  return 'sigma';
-      case '\\omega':  return 'omega';
+      // Greek letters → variables
+      case '\\alpha':  return { type: 'variable', name: 'alpha' };
+      case '\\beta':   return { type: 'variable', name: 'beta' };
+      case '\\gamma':  return { type: 'variable', name: 'gamma' };
+      case '\\delta':  return { type: 'variable', name: 'delta' };
+      case '\\theta':  return { type: 'variable', name: 'theta' };
+      case '\\lambda': return { type: 'variable', name: 'lambda' };
+      case '\\mu':     return { type: 'variable', name: 'mu' };
+      case '\\sigma':  return { type: 'variable', name: 'sigma' };
+      case '\\omega':  return { type: 'variable', name: 'omega' };
 
       default:
         throw new CompileError(`Unknown command: ${cmd}`);
     }
   }
 
-  // Parse a trig/function argument: braced {x}, parenthesised (x), \left(x\right), or single atom
   parseFuncArg() {
     if (this.peek().type === TK.LBRACE) return this.parseBracedArg();
     if (this.peek().type === TK.LPAREN) {
       this.next();
       const inner = this.parseExpr();
       if (this.peek().type === TK.RPAREN) this.next();
-      return `(${inner})`;
+      return inner;
     }
     if (this.peek().type === TK.CMD && this.peek().val === '\\left') {
-      return this.parseAtom(); // delegate to parseCommand's \left handler
+      return this.parseAtom();
     }
     return this.parseAtom();
   }
 }
 
-// ── Sum parser fix ─────────────────────────────────────────────────────────────
-// The parseSum method above has a subtle bug because we advance then re-read.
-// Rewrite with a cleaner loop.
+// ── AST utilities ────────────────────────────────────────────────────────────
 
-Parser.prototype.parseSum = function() {
-  let left = this.parseProduct();
-  while (this.peek().type === TK.PLUS || this.peek().type === TK.MINUS) {
-    const op = this.next().type; // TK.PLUS or TK.MINUS — already advanced
-    const sign = (this.tokens[this.pos - 1].type === TK.PLUS) ? '+' : '-';
-    left = `(${left}${sign}${this.parseProduct()})`;
-  }
-  return left;
-};
-
-// Fix: parseSum reads this.next().type which returns the type of the consumed token directly.
-// Rewrite to be simple and correct:
-Parser.prototype.parseSum = function() {
-  let left = this.parseProduct();
-  for (;;) {
-    const t = this.peek();
-    if (t.type === TK.PLUS) {
-      this.next();
-      left = `(${left}+${this.parseProduct()})`;
-    } else if (t.type === TK.MINUS) {
-      this.next();
-      left = `(${left}-${this.parseProduct()})`;
-    } else {
-      break;
-    }
-  }
-  return left;
-};
-
-function glslExpr(latex) {
+/** Parse a LaTeX string into an AST. Throws CompileError on failure. */
+function parseLatexToAst(latex) {
   const tokens = tokenize(latex);
   const parser = new Parser(tokens);
   const result = parser.parseExpr();
   if (parser.peek().type !== TK.EOF) {
-    throw new CompileError(`Unexpected content after expression: ${parser.peek().type}`);
+    throw new CompileError(`Unexpected content after expression`);
   }
   return result;
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+/** Collect all variable names referenced in an AST. Returns a Set<string>. */
+function collectVariables(ast) {
+  const vars = new Set();
+  const stack = [ast];
+  while (stack.length) {
+    const node = stack.pop();
+    if (node.type === 'variable') vars.add(node.name);
+    else if (node.type === 'call') for (const a of node.args) stack.push(a);
+  }
+  return vars;
+}
+
+// Known built-in names that are not user-defined variables
+const BUILTIN_VARS = new Set(['x', 'y']);
+
+// ── Expression parsing & classification ─────────────────────────────────────
 
 /**
- * Convert a MathQuill LaTeX string to a GLSL float expression F(x,y).
- * Returns { glsl: string } on success or { error: string } on failure.
+ * Parse one LaTeX expression containing '='.
+ * Returns { lhs: AST, rhs: AST } or { error: string }.
  */
-function compileLatexToGlsl(latex) {
+function parseExpression(latex) {
   const trimmed = latex.trim();
   if (!trimmed) return { error: 'empty' };
+  const eqIdx = findEqAtDepth0(trimmed);
+  if (eqIdx === -1) return { error: 'Expression must contain =' };
   try {
-    const glsl = latexToGlslF(trimmed);
-    return { glsl };
+    const lhs = parseLatexToAst(trimmed.slice(0, eqIdx).trim());
+    const rhs = parseLatexToAst(trimmed.slice(eqIdx + 1).trim());
+    return { lhs, rhs };
   } catch (e) {
     return { error: e.message };
   }
 }
+
+/**
+ * Classify a parsed expression as a definition or implicit equation.
+ * A definition has a single variable (not x or y) on the LHS.
+ */
+function classifyExpression(parsed) {
+  const { lhs, rhs } = parsed;
+  // Definition: LHS is a single variable not x or y
+  if (lhs.type === 'variable' && !BUILTIN_VARS.has(lhs.name)) {
+    const deps = collectVariables(rhs);
+    deps.delete('x');
+    deps.delete('y');
+    const allVars = collectVariables(rhs);
+    const dependsOnXY = allVars.has('x') || allVars.has('y');
+    return { kind: 'definition', name: lhs.name, rhs, deps, dependsOnXY };
+  }
+  // Implicit equation
+  const allVars = new Set([...collectVariables(lhs), ...collectVariables(rhs)]);
+  const deps = new Set(allVars);
+  deps.delete('x');
+  deps.delete('y');
+  return { kind: 'implicit', lhs, rhs, deps, allVars };
+}
+
+/**
+ * Analyze all expressions in a graph box: resolve dependencies, detect errors,
+ * classify definitions as constants vs xy-dependent.
+ *
+ * @param {Array} classifiedList - Array of { kind, exprId, ... } objects
+ * @returns {Object} Analysis result
+ */
+function analyzeExpressions(classifiedList) {
+  const errors = new Map();       // exprId → error string
+  const defsMap = new Map();      // variable name → { rhs, deps, dependsOnXY, exprId }
+
+  // Build definitions map. If a variable is defined more than once,
+  // the first definition wins and subsequent ones are reclassified as implicit.
+  const reclassified = [];
+  for (const expr of classifiedList) {
+    if (expr.kind === 'error') {
+      errors.set(expr.exprId, expr.error);
+      continue;
+    }
+    if (expr.kind === 'definition') {
+      if (defsMap.has(expr.name)) {
+        // Reclassify as implicit: treat "f = 1" as the equation f - 1 = 0
+        const lhs = { type: 'variable', name: expr.name };
+        const allVars = new Set([...collectVariables(lhs), ...collectVariables(expr.rhs)]);
+        const deps = new Set(allVars);
+        deps.delete('x');
+        deps.delete('y');
+        reclassified.push({ kind: 'implicit', lhs, rhs: expr.rhs, deps, allVars, exprId: expr.exprId });
+        continue;
+      }
+      defsMap.set(expr.name, {
+        rhs: expr.rhs,
+        deps: expr.deps,
+        dependsOnXY: expr.dependsOnXY,
+        exprId: expr.exprId,
+      });
+    }
+  }
+  // Add reclassified expressions back so they're processed as implicits
+  classifiedList = [...classifiedList, ...reclassified];
+
+  // Resolve dependencies: detect circular refs, undefined vars, compute depth,
+  // and propagate xy-dependency
+  const resolved = new Map();  // name → { depth, dependsOnXY, error }
+  const resolving = new Set(); // currently on the path (for cycle detection)
+
+  function resolve(name) {
+    if (resolved.has(name)) return resolved.get(name);
+    if (BUILTIN_VARS.has(name)) {
+      const r = { depth: 0, dependsOnXY: true, error: null };
+      resolved.set(name, r);
+      return r;
+    }
+    if (!defsMap.has(name)) {
+      return { depth: 0, dependsOnXY: false, error: `Undefined variable '${name}'` };
+    }
+    if (resolving.has(name)) {
+      return { depth: 0, dependsOnXY: false, error: `Circular dependency on '${name}'` };
+    }
+
+    resolving.add(name);
+    const def = defsMap.get(name);
+    let maxDepth = 0;
+    let depOnXY = def.dependsOnXY;
+    let error = null;
+
+    for (const dep of def.deps) {
+      const r = resolve(dep);
+      if (r.error) {
+        error = r.error;
+        break;
+      }
+      if (r.dependsOnXY) depOnXY = true;
+      maxDepth = Math.max(maxDepth, r.depth + 1);
+    }
+
+    resolving.delete(name);
+    const result = { depth: maxDepth, dependsOnXY: depOnXY, error };
+    resolved.set(name, result);
+    return result;
+  }
+
+  // Resolve all definitions
+  for (const [name, def] of defsMap) {
+    const r = resolve(name);
+    if (r.error) {
+      errors.set(def.exprId, r.error);
+    }
+  }
+
+  // Separate definitions into constants and xy-dependent
+  const constants = [];
+  const xyDefs = [];
+  for (const [name, def] of defsMap) {
+    if (errors.has(def.exprId)) continue;
+    const r = resolved.get(name);
+    if (r.dependsOnXY) {
+      xyDefs.push({ name, rhs: def.rhs, deps: def.deps, depth: r.depth, exprId: def.exprId });
+    } else {
+      constants.push({ name, rhs: def.rhs, depth: r.depth, exprId: def.exprId });
+    }
+  }
+
+  // Sort constants by depth (ascending) so dependencies are evaluated first
+  constants.sort((a, b) => a.depth - b.depth);
+  // Sort xyDefs by depth too for proper ordering in shader
+  xyDefs.sort((a, b) => a.depth - b.depth);
+
+  // Validate implicit expressions
+  const implicits = [];
+  for (const expr of classifiedList) {
+    if (expr.kind !== 'implicit') continue;
+    if (errors.has(expr.exprId)) continue;
+
+    // Check for undefined variables and propagate xy-dependency
+    let depOnXY = expr.allVars.has('x') || expr.allVars.has('y');
+    let exprError = null;
+    for (const dep of expr.deps) {
+      const r = resolve(dep);
+      if (r.error) { exprError = r.error; break; }
+      if (r.dependsOnXY) depOnXY = true;
+    }
+    if (exprError) {
+      errors.set(expr.exprId, exprError);
+      continue;
+    }
+    if (!depOnXY) {
+      errors.set(expr.exprId, 'Expression does not depend on x or y');
+      continue;
+    }
+    implicits.push({ lhs: expr.lhs, rhs: expr.rhs, deps: expr.deps, exprId: expr.exprId });
+  }
+
+  return {
+    constants,
+    xyDefs,
+    implicits,
+    errors,
+    constantValues: new Map(),
+    defsMap,
+    resolved,
+  };
+}
+
+// ── Constant evaluation (CPU) ───────────────────────────────────────────────
+
+/** Evaluate an AST node to a numeric value, given a map of known values. */
+function evaluateAst(ast, values) {
+  switch (ast.type) {
+    case 'number': return ast.value;
+    case 'variable': {
+      if (values.has(ast.name)) return values.get(ast.name);
+      throw new Error(`Undefined variable '${ast.name}' during evaluation`);
+    }
+    case 'call': {
+      const args = ast.args.map(a => evaluateAst(a, values));
+      switch (ast.name) {
+        case 'add': return args[0] + args[1];
+        case 'sub': return args[0] - args[1];
+        case 'mul': return args[0] * args[1];
+        case 'div': return args[0] / args[1];
+        case 'pow': return Math.pow(args[0], args[1]);
+        case 'neg': return -args[0];
+        case 'sin': return Math.sin(args[0]);
+        case 'cos': return Math.cos(args[0]);
+        case 'tan': return Math.tan(args[0]);
+        case 'asin': return Math.asin(args[0]);
+        case 'acos': return Math.acos(args[0]);
+        case 'atan': return Math.atan(args[0]);
+        case 'ln':  return Math.log(args[0]);
+        case 'exp': return Math.exp(args[0]);
+        case 'abs': return Math.abs(args[0]);
+        case 'sqrt': return Math.sqrt(args[0]);
+        default: throw new Error(`Unknown function '${ast.name}'`);
+      }
+    }
+    default: throw new Error(`Unknown AST node type '${ast.type}'`);
+  }
+}
+
+/**
+ * Evaluate all constant definitions in the analysis.
+ * Iterates in dependency-depth order so all deps are available.
+ * Stores results in analysis.constantValues.
+ */
+function evaluateConstants(analysis) {
+  analysis.constantValues.clear();
+  for (const c of analysis.constants) {
+    try {
+      const val = evaluateAst(c.rhs, analysis.constantValues);
+      analysis.constantValues.set(c.name, val);
+    } catch (e) {
+      analysis.errors.set(c.exprId, e.message);
+    }
+  }
+}
+
+// ── AST → GLSL code generation ──────────────────────────────────────────────
+
+/** Convert an AST to a GLSL float expression string. */
+function astToGlsl(ast, constantNames, xyDefNames) {
+  switch (ast.type) {
+    case 'number': {
+      const s = ast.value.toString();
+      return s.includes('.') || s.includes('e') ? s : s + '.0';
+    }
+    case 'variable': {
+      if (ast.name === 'x' || ast.name === 'y') return ast.name;
+      if (constantNames.has(ast.name)) return 'u_' + ast.name;
+      if (xyDefNames.has(ast.name)) return 'v_' + ast.name;
+      return ast.name; // fallback — should be caught by analysis
+    }
+    case 'call': {
+      const args = ast.args.map(a => astToGlsl(a, constantNames, xyDefNames));
+      switch (ast.name) {
+        case 'add': return `(${args[0]}+${args[1]})`;
+        case 'sub': return `(${args[0]}-${args[1]})`;
+        case 'mul': return `(${args[0]}*${args[1]})`;
+        case 'div': return `(${args[0]}/${args[1]})`;
+        case 'pow': return `pow(${args[0]},${args[1]})`;
+        case 'neg': return `(-(${args[0]}))`;
+        case 'sin': return `sin(${args[0]})`;
+        case 'cos': return `cos(${args[0]})`;
+        case 'tan': return `tan(${args[0]})`;
+        case 'asin': return `asin(${args[0]})`;
+        case 'acos': return `acos(${args[0]})`;
+        case 'atan': return `atan(${args[0]})`;
+        case 'ln':  return `log(${args[0]})`;
+        case 'exp': return `exp(${args[0]})`;
+        case 'abs': return `abs(${args[0]})`;
+        case 'sqrt': return `sqrt(${args[0]})`;
+        default: return `${ast.name}(${args.join(',')})`;
+      }
+    }
+    default: return '0.0';
+  }
+}
+
+/** Build an AST → JS evaluator function(x, y) with constant values baked in. */
+function astToJsFunction(ast, constantValues) {
+  function gen(node) {
+    switch (node.type) {
+      case 'number': return String(node.value);
+      case 'variable': {
+        if (node.name === 'x') return 'x';
+        if (node.name === 'y') return 'y';
+        if (constantValues.has(node.name)) return String(constantValues.get(node.name));
+        return '0'; // fallback
+      }
+      case 'call': {
+        const args = node.args.map(gen);
+        switch (node.name) {
+          case 'add': return `(${args[0]}+${args[1]})`;
+          case 'sub': return `(${args[0]}-${args[1]})`;
+          case 'mul': return `(${args[0]}*${args[1]})`;
+          case 'div': return `(${args[0]}/${args[1]})`;
+          case 'pow': return `Math.pow(${args[0]},${args[1]})`;
+          case 'neg': return `(-(${args[0]}))`;
+          case 'sin': return `Math.sin(${args[0]})`;
+          case 'cos': return `Math.cos(${args[0]})`;
+          case 'tan': return `Math.tan(${args[0]})`;
+          case 'asin': return `Math.asin(${args[0]})`;
+          case 'acos': return `Math.acos(${args[0]})`;
+          case 'atan': return `Math.atan(${args[0]})`;
+          case 'ln':  return `Math.log(${args[0]})`;
+          case 'exp': return `Math.exp(${args[0]})`;
+          case 'abs': return `Math.abs(${args[0]})`;
+          case 'sqrt': return `Math.sqrt(${args[0]})`;
+          default: return '0';
+        }
+      }
+      default: return '0';
+    }
+  }
+  const body = gen(ast);
+  try {
+    return new Function('x', 'y', `"use strict"; return (${body});`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate shader code for an implicit expression, given the analysis context.
+ * Returns { shaderKey, uniformDecls, bodyCode, fExpr, constantUniforms }
+ * where constantUniforms is an array of { name, glslName } for uniform uploading.
+ */
+function generateShaderCode(implicitExpr, analysis) {
+  // Collect which constants and xy-defs this expression needs
+  const neededConstants = new Set();
+  const neededXYDefs = new Set();
+
+  function collectNeeds(deps) {
+    for (const dep of deps) {
+      if (analysis.constantValues.has(dep)) {
+        neededConstants.add(dep);
+      } else {
+        // It's an xy-dependent definition — collect it and its own needs
+        const xyDef = analysis.xyDefs.find(d => d.name === dep);
+        if (xyDef && !neededXYDefs.has(dep)) {
+          neededXYDefs.add(dep);
+          collectNeeds(xyDef.deps);
+        }
+      }
+    }
+  }
+
+  collectNeeds(implicitExpr.deps);
+
+  const constantNames = neededConstants;
+  const xyDefNames = neededXYDefs;
+
+  // Build uniform declarations
+  const uniformDecls = [...neededConstants].map(name => `uniform float u_${name};`).join('\n');
+
+  // Build xy-dependent variable definitions (sorted by depth)
+  const sortedXYDefs = analysis.xyDefs
+    .filter(d => neededXYDefs.has(d.name))
+    .sort((a, b) => a.depth - b.depth);
+
+  const bodyLines = sortedXYDefs.map(d => {
+    const glsl = astToGlsl(d.rhs, constantNames, xyDefNames);
+    return `float v_${d.name} = ${glsl};`;
+  });
+  const bodyCode = bodyLines.join('\n    ');
+
+  // Generate the F = LHS - RHS expression
+  const lhsGlsl = astToGlsl(implicitExpr.lhs, constantNames, xyDefNames);
+  const rhsGlsl = astToGlsl(implicitExpr.rhs, constantNames, xyDefNames);
+  const fExpr = `(${lhsGlsl})-(${rhsGlsl})`;
+
+  // Shader cache key: full shader content determines uniqueness
+  const shaderKey = uniformDecls + '|' + bodyCode + '|' + fExpr;
+
+  const constantUniforms = [...neededConstants].map(name => ({ name, glslName: 'u_' + name }));
+
+  return { shaderKey, uniformDecls, bodyCode, fExpr, constantUniforms };
+}
+
+// ── Public API: batch analysis of all expressions in a graph box ────────────
+
+/**
+ * Analyze all expressions in a graph box and prepare for rendering.
+ * Returns { analysis, renderExprs } where renderExprs is an array of
+ * { exprId, shaderInfo, enabled, color, thickness } ready for the renderer,
+ * or null if the expression has an error.
+ *
+ * Also returns jsEvaluators: Map<exprId, Function(x,y)> for snap-to-curve.
+ */
+function compileGraphExpressions(expressions) {
+  // 1. Parse all expressions
+  const parsed = expressions.map(e => {
+    if (!e.enabled) return { kind: 'disabled', exprId: e.id };
+    const p = parseExpression(e.latex);
+    if (p.error) return { kind: 'error', error: p.error, exprId: e.id };
+    const classified = classifyExpression(p);
+    classified.exprId = e.id;
+    return classified;
+  });
+
+  // 2. Analyze dependencies
+  const active = parsed.filter(p => p.kind !== 'disabled');
+  const analysis = analyzeExpressions(active);
+
+  // 3. Evaluate constants
+  evaluateConstants(analysis);
+
+  // 4. Generate shader code for each implicit expression
+  const renderExprs = [];
+  const jsEvaluators = new Map();
+
+  for (const impl of analysis.implicits) {
+    const expr = expressions.find(e => e.id === impl.exprId);
+    if (!expr) continue;
+
+    const shaderInfo = generateShaderCode(impl, analysis);
+
+    // Build JS evaluator for snap-to-curve (inline xy-defs and constants)
+    const fAst = { type: 'call', name: 'sub', args: [impl.lhs, impl.rhs] };
+    // For JS evaluation, we need to inline xy-dependent defs too
+    // We build an evaluator that computes xy-defs then F
+    const jsFunc = buildImplicitJsEvaluator(impl, analysis);
+    if (jsFunc) jsEvaluators.set(impl.exprId, jsFunc);
+
+    renderExprs.push({
+      exprId: impl.exprId,
+      shaderInfo,
+      color: expr.color,
+      enabled: true,
+      thickness: expr.thickness != null ? expr.thickness : 2.0,
+    });
+  }
+
+  return { analysis, renderExprs, jsEvaluators };
+}
+
+/**
+ * Build a JS function(x,y) that evaluates an implicit expression,
+ * including all its xy-dependent definitions and constants.
+ */
+function buildImplicitJsEvaluator(implicitExpr, analysis) {
+  const constantValues = analysis.constantValues;
+
+  // Collect needed xy-defs in depth order
+  const neededXYDefs = [];
+  const visited = new Set();
+  function collectXYDeps(deps) {
+    for (const dep of deps) {
+      if (visited.has(dep) || constantValues.has(dep) || BUILTIN_VARS.has(dep)) continue;
+      const xyDef = analysis.xyDefs.find(d => d.name === dep);
+      if (xyDef) {
+        visited.add(dep);
+        collectXYDeps(xyDef.deps);
+        neededXYDefs.push(xyDef);
+      }
+    }
+  }
+  collectXYDeps(implicitExpr.deps);
+
+  // Build JS function body: define xy-dep vars then return LHS - RHS
+  function genJs(node) {
+    switch (node.type) {
+      case 'number': return String(node.value);
+      case 'variable': {
+        if (node.name === 'x') return 'x';
+        if (node.name === 'y') return 'y';
+        if (constantValues.has(node.name)) return String(constantValues.get(node.name));
+        // xy-dependent def — use local var
+        return 'v_' + node.name;
+      }
+      case 'call': {
+        const args = node.args.map(genJs);
+        switch (node.name) {
+          case 'add': return `(${args[0]}+${args[1]})`;
+          case 'sub': return `(${args[0]}-${args[1]})`;
+          case 'mul': return `(${args[0]}*${args[1]})`;
+          case 'div': return `(${args[0]}/${args[1]})`;
+          case 'pow': return `Math.pow(${args[0]},${args[1]})`;
+          case 'neg': return `(-(${args[0]}))`;
+          case 'sin': return `Math.sin(${args[0]})`;
+          case 'cos': return `Math.cos(${args[0]})`;
+          case 'tan': return `Math.tan(${args[0]})`;
+          case 'asin': return `Math.asin(${args[0]})`;
+          case 'acos': return `Math.acos(${args[0]})`;
+          case 'atan': return `Math.atan(${args[0]})`;
+          case 'ln':  return `Math.log(${args[0]})`;
+          case 'exp': return `Math.exp(${args[0]})`;
+          case 'abs': return `Math.abs(${args[0]})`;
+          case 'sqrt': return `Math.sqrt(${args[0]})`;
+          default: return '0';
+        }
+      }
+      default: return '0';
+    }
+  }
+
+  let body = '';
+  for (const d of neededXYDefs) {
+    body += `var v_${d.name} = ${genJs(d.rhs)};\n`;
+  }
+  body += `return (${genJs(implicitExpr.lhs)})-(${genJs(implicitExpr.rhs)});`;
+
+  try {
+    return new Function('x', 'y', `"use strict";\n${body}`);
+  } catch {
+    return null;
+  }
+}
+
 
 // ── GraphRenderer ────────────────────────────────────────────────────────────
 //
@@ -614,10 +1091,17 @@ class GraphRenderer {
 
   // ── Snap-to-curve ─────────────────────────────────────────────────────
 
-  /** Convert a GLSL float expression string to a JS Function(x, y). Cached. */
-  _glslToJsEvaluator(glslExpr) {
-    if (this._jsEvaluators.has(glslExpr)) return this._jsEvaluators.get(glslExpr);
-    const js = glslExpr
+  /**
+   * Get a JS Function(x, y) evaluator for an expression. Supports both:
+   * - New format: expr._jsEval is a pre-built function from the analysis pipeline
+   * - Legacy format: expr.glsl is a GLSL string that gets regex-converted to JS
+   */
+  _getJsEvaluator(expr) {
+    if (expr._jsEval) return expr._jsEval;
+    if (!expr.glsl) return null;
+
+    if (this._jsEvaluators.has(expr.glsl)) return this._jsEvaluators.get(expr.glsl);
+    const js = expr.glsl
       .replace(/\bsqrt\b/g,  'Math.sqrt')
       .replace(/\basin\b/g,  'Math.asin')
       .replace(/\bacos\b/g,  'Math.acos')
@@ -637,10 +1121,10 @@ class GraphRenderer {
       const fn = new Function('x', 'y', '_mod', `"use strict"; return (${js});`);
       const _mod = (a, b) => a - b * Math.floor(a / b);
       const bound = (x, y) => fn(x, y, _mod);
-      this._jsEvaluators.set(glslExpr, bound);
+      this._jsEvaluators.set(expr.glsl, bound);
       return bound;
     } catch {
-      this._jsEvaluators.set(glslExpr, null);
+      this._jsEvaluators.set(expr.glsl, null);
       return null;
     }
   }
@@ -668,7 +1152,7 @@ class GraphRenderer {
     let F;
     for (const expr of this._lastActive) {
       if (this._snapExprId !== null && expr._exprId !== this._snapExprId) continue;
-      F = this._glslToJsEvaluator(expr.glsl);
+      F = this._getJsEvaluator(expr);
       if (!F) continue;
     }
 
@@ -903,7 +1387,24 @@ class GraphRenderer {
 
   // ── Shader generation ──────────────────────────────────────────────────
 
-  _buildThinLineFS(glslExpr) {
+  /**
+   * Build the fragment shader for a thin-line pass.
+   * Accepts either a plain GLSL expression string (legacy) or a shaderInfo
+   * object { uniformDecls, bodyCode, fExpr } from the new analysis pipeline.
+   */
+  _buildThinLineFS(shaderInfoOrGlsl) {
+    let uniformDecls = '';
+    let bodyCode = '';
+    let fExpr;
+
+    if (typeof shaderInfoOrGlsl === 'string') {
+      fExpr = shaderInfoOrGlsl;
+    } else {
+      uniformDecls = shaderInfoOrGlsl.uniformDecls || '';
+      bodyCode = shaderInfoOrGlsl.bodyCode || '';
+      fExpr = shaderInfoOrGlsl.fExpr;
+    }
+
     return `#version 300 es
 precision highp float;
 in vec2 v_position;
@@ -913,11 +1414,13 @@ uniform vec2 u_rangeMax;   // (xMax, yMax)
 uniform vec2 u_resolution; // (width, height)
 uniform float u_graphId;
 uniform sampler2D u_prevTex;
+${uniformDecls}
 
 out vec4 FragColor;
 
 float F(float x, float y) {
-    return ${glslExpr};
+    ${bodyCode}
+    return ${fExpr};
 }
 
 void main() {
@@ -965,21 +1468,25 @@ void main() {
   }
 
   /**
-   * Return the cached thin-line shader entry for glslExpr, or null if it is
-   * still compiling. On first call for a new expression, kicks off async GPU
-   * compilation and returns null; a re-render is triggered automatically once
-   * the shader is ready.
+   * Return the cached thin-line shader entry for a shader key, or null if it is
+   * still compiling. On first call for a new key, kicks off async GPU compilation.
+   *
+   * @param {string} shaderKey - Cache key (either GLSL string or shaderInfo.shaderKey)
+   * @param {string|Object} shaderInfoOrGlsl - GLSL string or { uniformDecls, bodyCode, fExpr, constantUniforms }
    */
-  _getThinLineProgram(glslExpr) {
-    if (this.thinLineShaders.has(glslExpr)) return this.thinLineShaders.get(glslExpr);
-    if (this._pendingShaders.has(glslExpr)) return null; // compiling
+  _getThinLineProgram(shaderKey, shaderInfoOrGlsl) {
+    if (this.thinLineShaders.has(shaderKey)) return this.thinLineShaders.get(shaderKey);
+    if (this._pendingShaders.has(shaderKey)) return null; // compiling
+
+    // Store the shaderInfo alongside the handle so _checkPending can query custom uniforms
+    const shaderInfo = typeof shaderInfoOrGlsl === 'string' ? null : shaderInfoOrGlsl;
 
     try {
-      const handle = GL.beginShaderProgram(this.gl, GL.GENERIC_VS, this._buildThinLineFS(glslExpr));
-      this._pendingShaders.set(glslExpr, handle);
+      const handle = GL.beginShaderProgram(this.gl, GL.GENERIC_VS, this._buildThinLineFS(shaderInfoOrGlsl));
+      this._pendingShaders.set(shaderKey, { handle, shaderInfo });
     } catch (e) {
       console.warn('[GraphRenderer] shader init failed:', e.message);
-      this._pendingShaders.set(glslExpr, null); // mark failed so we don't retry
+      this._pendingShaders.set(shaderKey, null);
     }
     this._schedulePoll();
     return null;
@@ -1001,13 +1508,11 @@ void main() {
     let anyStillPending = false;
     let anyCompleted = false;
 
-    for (const [glslExpr, handle] of this._pendingShaders) {
-      if (!handle) { this._pendingShaders.delete(glslExpr); continue; }
+    for (const [shaderKey, pending] of this._pendingShaders) {
+      if (!pending) { this._pendingShaders.delete(shaderKey); continue; }
 
-      // With KHR_parallel_shader_compile, COMPLETION_STATUS_KHR returns false
-      // without blocking if still compiling. Without the extension, we just
-      // finalize immediately (getProgramParameter will block, but the GPU has
-      // had at least one rAF to compile in parallel).
+      const { handle, shaderInfo } = pending;
+
       const ready = ext
         ? gl.getProgramParameter(handle.program, ext.COMPLETION_STATUS_KHR)
         : true;
@@ -1024,13 +1529,20 @@ void main() {
           u_resolution: gl.getUniformLocation(prog, 'u_resolution'),
           u_graphId:    gl.getUniformLocation(prog, 'u_graphId'),
           u_prevTex:    gl.getUniformLocation(prog, 'u_prevTex'),
+          customUniforms: {},
         };
-        this.thinLineShaders.set(glslExpr, entry);
+        // Query locations for custom constant uniforms
+        if (shaderInfo && shaderInfo.constantUniforms) {
+          for (const { name, glslName } of shaderInfo.constantUniforms) {
+            entry.customUniforms[name] = gl.getUniformLocation(prog, glslName);
+          }
+        }
+        this.thinLineShaders.set(shaderKey, entry);
         anyCompleted = true;
       } catch (e) {
         console.warn('[GraphRenderer] shader compile failed:', e.message);
       }
-      this._pendingShaders.delete(glslExpr);
+      this._pendingShaders.delete(shaderKey);
     }
 
     if (anyStillPending) this._schedulePoll();
@@ -1225,14 +1737,27 @@ void main() {
     // Collect enabled expressions and their colors
     const active = [];
     for (const expr of expressions) {
-      if (!expr.enabled || !expr.glsl) continue;
+      if (!expr.enabled) continue;
+      // Support both legacy { glsl } and new { shaderInfo } formats
+      if (!expr.glsl && !expr.shaderInfo) continue;
       active.push(expr);
     }
 
     // Pass 1: Thin-line pass for each graph, stacking into one buffer
     gl.bindVertexArray(this.vao);
     for (let i = 0; i < active.length; i++) {
-      const entry = this._getThinLineProgram(active[i].glsl);
+      const expr = active[i];
+      let shaderKey, shaderArg;
+
+      if (expr.shaderInfo) {
+        shaderKey = expr.shaderInfo.shaderKey;
+        shaderArg = expr.shaderInfo;
+      } else {
+        shaderKey = expr.glsl;
+        shaderArg = expr.glsl;
+      }
+
+      const entry = this._getThinLineProgram(shaderKey, shaderArg);
       if (!entry) continue;
 
       gl.useProgram(entry.program);
@@ -1243,6 +1768,15 @@ void main() {
       gl.uniform2f(entry.u_resolution, width, height);
       gl.uniform1f(entry.u_graphId, i);
       gl.uniform1i(entry.u_prevTex, 0);
+
+      // Upload custom constant uniforms
+      if (entry.customUniforms && expr.constantValues) {
+        for (const [name, loc] of Object.entries(entry.customUniforms)) {
+          if (loc !== null && expr.constantValues.has(name)) {
+            gl.uniform1f(loc, expr.constantValues.get(name));
+          }
+        }
+      }
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, img.frontTex);
@@ -1337,11 +1871,12 @@ void main() {
     this.thinLineShaders.clear();
     this._jsEvaluators.clear();
     // Cancel any in-flight async compilations
-    for (const handle of this._pendingShaders.values()) {
-      if (handle) {
-        gl.deleteProgram(handle.program);
-        gl.deleteShader(handle.vs);
-        gl.deleteShader(handle.fs);
+    for (const pending of this._pendingShaders.values()) {
+      if (pending) {
+        const h = pending.handle || pending; // support new { handle, shaderInfo } and legacy
+        if (h.program) gl.deleteProgram(h.program);
+        if (h.vs) gl.deleteShader(h.vs);
+        if (h.fs) gl.deleteShader(h.fs);
       }
     }
     this._pendingShaders.clear();
