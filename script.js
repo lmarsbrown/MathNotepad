@@ -39,9 +39,17 @@ let graphMqFields = new Map();    // expr id → MathQuill field
 let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that row's badges
 let graphCommitTimer = null;
 
+const GRAPH_RENDER_DEBOUNCE_MS = 300; // debounce delay (ms) between typing in a graph expression and re-rendering
+
 const GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4'];
 let graphColorIdx = 0;
 function nextGraphColor() { return GRAPH_COLORS[graphColorIdx++ % GRAPH_COLORS.length]; }
+
+// ── Highlight fill colors ─────────────────────────────────────────────────────
+// Add new default colors here, or extend the list per-project via custom colors.
+const HIGHLIGHT_FILL_COLORS = ['#fff9bf', '#ffbfbf', '#ceffbf', '#c3bfff', '#ffbff3'];
+let _activeFillColorPopup = null;
+let _activeFillColorPopupOutside = null;
 
 function formatConstantValue(v) {
   if (!isFinite(v)) return null;
@@ -59,55 +67,20 @@ function getGraphRenderer() {
 }
 
 /** Compile all expressions for the active graph box and re-render. */
-let _lastGraphExprsKey = '';
-let _lastGraphAnalysis = null;
 function renderGraphPreview() {
   if (!graphModeBoxId) return;
   const box = boxes.find(b => b.id === graphModeBoxId);
   if (!box) return;
 
   const renderer = getGraphRenderer();
-
-  // Use the new expression analysis pipeline
-  const { analysis, renderExprs, jsEvaluators } = compileGraphExpressions(box.expressions || []);
-  _lastGraphAnalysis = analysis;
-
-  // Update error indicators on expression rows
-  updateGraphExprErrors(analysis.errors);
-
-  // Build the expression array for the renderer
-  const baseExprs = renderExprs.map(re => ({
-    shaderInfo: re.shaderInfo,
-    constantValues: analysis.constantValues,
-    color: re.color,
-    enabled: re.enabled,
-    thickness: re.thickness,
-    _exprId: re.exprId,
-    _jsEval: jsEvaluators.get(re.exprId) || null,
-  }));
-
-  // Cache key uses shader keys so focus changes never trigger shader recompile
-  const exprsKey = baseExprs.map(e => e.shaderInfo ? e.shaderInfo.shaderKey : '').join('|');
-  if (exprsKey !== _lastGraphExprsKey) {
-    renderer.clearShaderCache();
-    _lastGraphExprsKey = exprsKey;
-  }
-
-  // Move focused expression last (renders on top) with a temporary thickness boost
-  let exprs = baseExprs;
-  if (focusedGraphExprId) {
-    const fi = exprs.findIndex(e => e._exprId === focusedGraphExprId);
-    if (fi !== -1) {
-      const focused = { ...exprs[fi], thickness: exprs[fi].thickness + 0.5 };
-      exprs = [...exprs.slice(0, fi), ...exprs.slice(fi + 1), focused];
-    }
-  }
+  const errors = renderer.updateExpressions(box.expressions || []);
+  updateGraphExprErrors(errors);
 
   const container = document.getElementById('preview-content');
   const w = container.clientWidth  || box.width  || 600;
   const h = container.clientHeight || box.height || 400;
 
-  renderer.render(exprs, w, h, !!box.lightTheme);
+  renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
   updateGraphCropOverlay();
 
   // Refresh all expression row badges now that constants may have changed
@@ -270,6 +243,8 @@ const downloadPdfBtn    = document.getElementById('download-pdf-btn');
 const previewZoomInBtn  = document.getElementById('preview-zoom-in-btn');
 const previewZoomOutBtn = document.getElementById('preview-zoom-out-btn');
 const previewZoomLabel  = document.getElementById('preview-zoom-label');
+const highlightBtn      = document.getElementById('highlight-btn');
+const fillColorBtn      = document.getElementById('fill-color-btn');
 
 // ── ID generation ─────────────────────────────────────────────────────────────
 function genId() { return 'b' + (nextId++); }
@@ -305,6 +280,10 @@ function serializeToLatex(boxArray) {
       serialized = `\\begin{graph}{${b.width}}{${b.height}}${themeFlag}\n${exprLines.join('\n')}\n\\end{graph}`;
     }
     else serialized = b.content.split('\n').map(line => '% ' + line).join('\n');
+    if (b.highlighted) {
+      const hlFlags = b.fillColor ? ` ${b.fillColor}` : '';
+      serialized = `%@hl${hlFlags}\n${serialized}`;
+    }
     if (b.commented) return serialized.split('\n').map(line => '%% ' + line).join('\n');
     return serialized;
   }).join('\n\n');
@@ -315,8 +294,28 @@ function parseFromLatex(src) {
   // We'll scan line-by-line, collecting \[...\] blocks as math and % lines as text
   const lines = src.split('\n');
   let i = 0;
+  let pendingHighlight = null; // set by %@hl lines, applied to the next box
+
+  // Apply any pending highlight metadata to a box object, then clear it.
+  const applyPending = (obj) => {
+    if (pendingHighlight) { Object.assign(obj, pendingHighlight); pendingHighlight = null; }
+    return obj;
+  };
+
   while (i < lines.length) {
     const line = lines[i].trimEnd();
+
+    // Highlight metadata: %@hl [#color]  (old: %@hl filled [#color])
+    if (line.startsWith('%@hl')) {
+      const flags = line.slice(4).trim().split(/\s+/).filter(Boolean);
+      const colorFlag = flags.find(f => f.startsWith('#'));
+      // Backwards compat: old format had 'filled' keyword; if present and has color, use it
+      const oldFilled = flags.includes('filled');
+      const fillColor = colorFlag || (oldFilled ? HIGHLIGHT_FILL_COLORS[0] : null);
+      pendingHighlight = { highlighted: true, fillColor };
+      i++;
+      continue;
+    }
 
     // Commented box: lines starting with '%% '
     if (line.startsWith('%% ') || line.trimEnd() === '%%') {
@@ -327,7 +326,7 @@ function parseFromLatex(src) {
         i++;
       }
       const inner = parseFromLatex(commentedLines.join('\n'));
-      if (inner.length > 0) result.push({ ...inner[0], id: genId(), commented: true });
+      if (inner.length > 0) result.push(applyPending({ ...inner[0], id: genId(), commented: true }));
       continue;
     }
 
@@ -340,7 +339,7 @@ function parseFromLatex(src) {
     let matchedHeading = false;
     for (const { prefix, type, len } of headingPatterns) {
       if (line.startsWith(prefix) && line.endsWith('}')) {
-        result.push({ id: genId(), type, content: line.slice(len, -1) });
+        result.push(applyPending({ id: genId(), type, content: line.slice(len, -1) }));
         i++;
         matchedHeading = true;
         break;
@@ -352,7 +351,7 @@ function parseFromLatex(src) {
     if (line.startsWith('\\[')) {
       const inner = collectMathBlock(lines, i);
       if (inner !== null) {
-        result.push({ id: genId(), type: 'math', content: inner.content });
+        result.push(applyPending({ id: genId(), type: 'math', content: inner.content }));
         i = inner.nextLine;
         continue;
       }
@@ -368,7 +367,7 @@ function parseFromLatex(src) {
         textLines.push(lines[i].startsWith('% ') ? lines[i].slice(2) : '');
         i++;
       }
-      result.push({ id: genId(), type: 'text', content: textLines.join('\n') });
+      result.push(applyPending({ id: genId(), type: 'text', content: textLines.join('\n') }));
       continue;
     }
 
@@ -410,13 +409,13 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{graph}
-      result.push({ id: genId(), type: 'graph', content: '', width, height, lightTheme, expressions });
+      result.push(applyPending({ id: genId(), type: 'graph', content: '', width, height, lightTheme, expressions }));
       continue;
     }
 
     // Pagebreak: \newpage
     if (line.trimEnd() === '\\newpage') {
-      result.push({ id: genId(), type: 'pagebreak', content: '' });
+      result.push(applyPending({ id: genId(), type: 'pagebreak', content: '' }));
       i++;
       continue;
     }
@@ -425,7 +424,7 @@ function parseFromLatex(src) {
     if (line.trim() === '') { i++; continue; }
 
     // Unrecognized non-empty line → treat as text box
-    result.push({ id: genId(), type: 'text', content: line });
+    result.push(applyPending({ id: genId(), type: 'text', content: line }));
     i++;
   }
   return result;
@@ -472,7 +471,7 @@ function collectMathBlock(lines, startLine) {
 // ── Box → DOM ─────────────────────────────────────────────────────────────────
 function createBoxElement(box) {
   const div = document.createElement('div');
-  div.className = 'box' + (box.commented ? ' commented' : '');
+  div.className = 'box' + (box.commented ? ' commented' : '') + (box.highlighted ? ' box-is-highlighted' : '');
   div.dataset.id = box.id;
 
   // Drag handle
@@ -553,7 +552,7 @@ function createBoxElement(box) {
 
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
-      autoCommands: 'sqrt sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus '+greekLetters,
+      autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec '+greekLetters,
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -627,6 +626,10 @@ function createBoxElement(box) {
         e.preventDefault();
         e.stopPropagation();
         applyRedo();
+      }
+      // Ctrl+H: suppress browser default (toggle logic handled by global keydown listener)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+        e.preventDefault();
       }
     }, true); // capture phase: fires before MathQuill's inner textarea handler
 
@@ -907,12 +910,33 @@ function setFocused(id, el) {
   // Clear source-panel box outline (source panel takes over when textarea is focused)
   boxList.querySelectorAll('.box-source-active').forEach(b => b.classList.remove('box-source-active'));
   highlightSourceForBox(id);
+  updateHighlightToolbar();
 }
 
 function clearFocused(id, el) {
   if (focusedBoxId === id) focusedBoxId = null;
   el.classList.remove('focused');
   updateSourceHighlight(-1, -1);
+  updateHighlightToolbar();
+}
+
+/** Sync highlight/fill-color toolbar buttons to the currently focused box. */
+function updateHighlightToolbar() {
+  const box = focusedBoxId ? boxes.find(b => b.id === focusedBoxId) : null;
+  const hl  = !!(box && box.highlighted);
+
+  highlightBtn.disabled = !box;
+  highlightBtn.classList.toggle('hl-active', hl);
+  fillColorBtn.style.display = hl ? '' : 'none';
+  if (hl) {
+    if (box.fillColor) {
+      fillColorBtn.style.background = box.fillColor;
+      fillColorBtn.classList.remove('no-fill');
+    } else {
+      fillColorBtn.style.background = '';
+      fillColorBtn.classList.add('no-fill');
+    }
+  }
 }
 
 // ── Render all boxes ──────────────────────────────────────────────────────────
@@ -1219,8 +1243,9 @@ function diffAndApply(newBoxes) {
     const existingEl = boxList.children[i];
 
     if (existingEl && existingEl.dataset.id === box.id) {
-      // Sync commented state
+      // Sync commented and highlighted state
       existingEl.classList.toggle('commented', !!box.commented);
+      existingEl.classList.toggle('box-is-highlighted', !!box.highlighted);
       // Update content of existing box
       const field = mqFields.get(box.id);
       if (field) {
@@ -1531,25 +1556,31 @@ async function updatePreview() {
   let inner = '';
   for (const box of boxes) {
     if (box.commented) continue;
+    let boxHtml;
     if (box.type === 'math') {
-      inner += `<div class="preview-math" data-box-id="${box.id}">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
+      boxHtml = `<div class="preview-math" data-box-id="${box.id}">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
     } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
       const tag = box.type;
-      inner += `<${tag} class="preview-${tag}" data-box-id="${box.id}">${processTextContent(box.content)}</${tag}>`;
+      boxHtml = `<${tag} class="preview-${tag}" data-box-id="${box.id}">${processTextContent(box.content)}</${tag}>`;
     } else if (box.type === 'pagebreak') {
-      inner += `<div class="preview-pagebreak" data-box-id="${box.id}"></div>`;
+      boxHtml = `<div class="preview-pagebreak" data-box-id="${box.id}"></div>`;
     } else if (box.type === 'graph') {
       if (box._snapshotDataUrl) {
-        inner += `<div class="preview-graph-image" data-box-id="${box.id}" style="text-align:center;margin:8px 0">
+        boxHtml = `<div class="preview-graph-image" data-box-id="${box.id}" style="text-align:center;margin:8px 0">
           <img src="${box._snapshotDataUrl}" style="max-width:100%;width:${box.width||600}px;height:auto;border-radius:4px"></div>`;
       } else {
         const n = (box.expressions || []).filter(e => e.enabled).length;
-        inner += `<div class="preview-graph-placeholder" data-box-id="${box.id}" style="width:${box.width || 600}px;height:${box.height || 400}px">
+        boxHtml = `<div class="preview-graph-placeholder" data-box-id="${box.id}" style="width:${box.width || 600}px;height:${box.height || 400}px">
           <span>${n} expression${n !== 1 ? 's' : ''}</span></div>`;
       }
     } else {
-      inner += `<p class="preview-text" data-box-id="${box.id}">${processTextContent(box.content)}</p>`;
+      boxHtml = `<p class="preview-text" data-box-id="${box.id}">${processTextContent(box.content)}</p>`;
     }
+    if (box.highlighted) {
+      const bgStyle = box.fillColor ? `background:${box.fillColor};` : '';
+      boxHtml = `<div class="preview-highlight-box" style="${bgStyle}">${boxHtml}</div>`;
+    }
+    inner += boxHtml;
   }
 
   const savedScroll = previewContent.scrollTop;
@@ -1747,7 +1778,7 @@ function scrollAndHighlightBox(boxId) {
   const elRect   = el.getBoundingClientRect();
   const offset   = elRect.top - listRect.top - (listRect.height / 2) + (elRect.height / 2);
   boxList.scrollBy({ top: offset, behavior: 'smooth' });
-  // Blink yellow
+  // Blink green
   el.classList.remove('box-highlight-blink');
   // Force reflow so removing+re-adding restarts the animation
   void el.offsetWidth;
@@ -1815,6 +1846,25 @@ document.addEventListener('keydown', e => {
   if (key === 'v' && boxClipboard && focusedBoxId) {
     e.preventDefault();
     pasteBox();
+    return;
+  }
+
+  if (key === 'h') {
+    e.preventDefault();
+    if (focusedBoxId) {
+      const idx = boxes.findIndex(b => b.id === focusedBoxId);
+      if (idx !== -1) {
+        const wasHighlighted = !!boxes[idx].highlighted;
+        boxes[idx].highlighted = !wasHighlighted;
+        if (boxes[idx].highlighted) {
+          if (!boxes[idx].fillColor) boxes[idx].fillColor = HIGHLIGHT_FILL_COLORS[0];
+        }
+        const hlEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
+        if (hlEl) hlEl.classList.toggle('box-is-highlighted', !!boxes[idx].highlighted);
+        updateHighlightToolbar();
+        syncToText();
+      }
+    }
     return;
   }
 });
@@ -2176,8 +2226,6 @@ function enterGraphMode(boxId) {
   const box = boxes.find(b => b.id === boxId);
   if (!box || box.type !== 'graph') return;
 
-  _lastGraphExprsKey = '';
-
   // Open preview first (while graphModeBoxId is still null so updatePreview runs)
   if (!isPreviewOpen) togglePreview();
 
@@ -2242,6 +2290,7 @@ function _teardownGraphModeUI() {
   graphMqFields.clear();
   graphExprUpdateFns.clear();
   focusedGraphExprId = null;
+  closeColorPopup();
   document.getElementById('graph-expr-list').innerHTML = '';
   boxList.style.display = '';
   document.getElementById('graph-editor-content').style.display = 'none';
@@ -2274,16 +2323,8 @@ function exitGraphMode() {
       graphRenderer.xMin = crop.worldXMin; graphRenderer.xMax = crop.worldXMax;
       graphRenderer.yMin = crop.worldYMin; graphRenderer.yMax = crop.worldYMax;
 
-      const { analysis, renderExprs } = compileGraphExpressions(box.expressions || []);
-      const exprs = renderExprs.map(re => ({
-        shaderInfo: re.shaderInfo,
-        constantValues: analysis.constantValues,
-        color: re.color,
-        enabled: re.enabled,
-        thickness: re.thickness,
-        _exprId: re.exprId,
-      }));
-      graphRenderer.render(exprs, box.width || 600, box.height || 400, !!box.lightTheme);
+      graphRenderer.updateExpressions(box.expressions || []);
+      graphRenderer.render(box.width || 600, box.height || 400, !!box.lightTheme);
       box._snapshotDataUrl = graphRenderer.canvas.toDataURL('image/png');
 
       // Restore canvas-view bounds and save them for re-entry
@@ -2363,6 +2404,8 @@ function createGraphExprRow(expr) {
   row.dataset.exprId = expr.id;
   row.dataset.sliderMin = expr.sliderMin != null ? expr.sliderMin : 0;
   row.dataset.sliderMax = expr.sliderMax != null ? expr.sliderMax : 10;
+  row.dataset.color = expr.color || '#3b82f6';
+  row.dataset.thickness = expr.thickness != null ? expr.thickness : 2.0;
   wrapper.appendChild(row);
 
   // Slider row (shown only for numeric constant expressions)
@@ -2445,25 +2488,16 @@ function createGraphExprRow(expr) {
   toggle.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
   row.appendChild(toggle);
 
-  // Color picker (hidden for non-graphing expressions)
-  const colorInput = document.createElement('input');
-  colorInput.type = 'color';
-  colorInput.className = 'graph-expr-color';
-  colorInput.value = expr.color || '#3b82f6';
-  colorInput.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
-  row.appendChild(colorInput);
-
-  // Thickness input (hidden for non-graphing expressions)
-  const thicknessInput = document.createElement('input');
-  thicknessInput.type = 'range';
-  thicknessInput.className = 'graph-expr-thickness';
-  thicknessInput.min = '0.5';
-  thicknessInput.max = '7';
-  thicknessInput.step = '0.5';
-  thicknessInput.value = expr.thickness != null ? expr.thickness : 2.0;
-  thicknessInput.title = 'Line thickness';
-  thicknessInput.addEventListener('input', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
-  row.appendChild(thicknessInput);
+  // Color swatch — clicking opens the color/thickness popup
+  const colorSwatch = document.createElement('div');
+  colorSwatch.className = 'graph-expr-color-swatch';
+  colorSwatch.style.background = expr.color || '#3b82f6';
+  colorSwatch.title = 'Color & thickness';
+  colorSwatch.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openColorPopup(colorSwatch, expr.id);
+  });
+  row.appendChild(colorSwatch);
 
   // Constant value badge — declared here so updateGraphingControls can reference it
   const constValueSpan = document.createElement('span');
@@ -2524,8 +2558,7 @@ function createGraphExprRow(expr) {
         }
       }
     }
-    colorInput.style.display = graphing ? '' : 'none';
-    thicknessInput.style.display = graphing ? '' : 'none';
+    colorSwatch.style.display = graphing ? '' : 'none';
     toggle.style.display = graphing ? '' : 'none';
     if (!graphing) toggle.checked = true;
     sliderRow.style.display = isNumericConst ? '' : 'none';
@@ -2561,7 +2594,7 @@ function createGraphExprRow(expr) {
         graphCommitTimer = setTimeout(() => {
           commitGraphEditorToBox(graphModeBoxId);
           scheduleGraphRender();
-        }, 300);
+        }, GRAPH_RENDER_DEBOUNCE_MS);
       },
       enter: () => {
         addGraphExpressionAfter(expr.id);
@@ -2720,6 +2753,244 @@ function createGraphExprRow(expr) {
   return wrapper;
 }
 
+let _activeColorPopup = null;
+let _activeColorPopupOutside = null;
+
+function closeColorPopup() {
+  if (_activeColorPopupOutside) {
+    document.removeEventListener('mousedown', _activeColorPopupOutside, true);
+    _activeColorPopupOutside = null;
+  }
+  if (_activeColorPopup) {
+    _activeColorPopup.remove();
+    _activeColorPopup = null;
+  }
+}
+
+function closeFillColorPopup() {
+  if (_activeFillColorPopup) {
+    _activeFillColorPopup.remove();
+    _activeFillColorPopup = null;
+  }
+  if (_activeFillColorPopupOutside) {
+    document.removeEventListener('click', _activeFillColorPopupOutside, true);
+    _activeFillColorPopupOutside = null;
+  }
+}
+
+function openFillColorPopup(anchorEl, boxId) {
+  closeFillColorPopup();
+
+  const idx = boxes.findIndex(b => b.id === boxId);
+  if (idx === -1) return;
+  const currentColor = boxes[idx].fillColor || null;
+
+  const popup = document.createElement('div');
+  popup.className = 'fill-color-popup';
+  _activeFillColorPopup = popup;
+
+  const applyColor = (c) => {
+    boxes[idx].fillColor = c;
+    if (c) {
+      fillColorBtn.style.background = c;
+      fillColorBtn.classList.remove('no-fill');
+    } else {
+      fillColorBtn.style.background = '';
+      fillColorBtn.classList.add('no-fill');
+    }
+    // Update active chip highlights within this popup
+    popup.querySelectorAll('.graph-color-chip').forEach(ch => {
+      ch.classList.toggle('active', ch.dataset.value === (c || ''));
+    });
+    syncToText();
+  };
+
+  // Default presets
+  const defaultLabel = document.createElement('div');
+  defaultLabel.className = 'fill-color-popup-section-label';
+  defaultLabel.textContent = 'Presets';
+  popup.appendChild(defaultLabel);
+
+  const defaultPalette = document.createElement('div');
+  defaultPalette.className = 'graph-color-palette';
+
+  // Transparent / no-fill chip
+  const transparentChip = document.createElement('div');
+  transparentChip.className = 'graph-color-chip' + (currentColor === null ? ' active' : '');
+  transparentChip.style.cssText = 'background: repeating-conic-gradient(#585b70 0% 25%, #313244 0% 50%) 0 0 / 8px 8px;';
+  transparentChip.title = 'No fill';
+  transparentChip.dataset.value = '';
+  transparentChip.addEventListener('click', () => { applyColor(null); closeFillColorPopup(); });
+  defaultPalette.appendChild(transparentChip);
+
+  for (const c of HIGHLIGHT_FILL_COLORS) {
+    const chip = document.createElement('div');
+    chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
+    chip.style.background = c;
+    chip.title = c;
+    chip.dataset.value = c;
+    chip.addEventListener('click', () => { applyColor(c); closeFillColorPopup(); });
+    defaultPalette.appendChild(chip);
+  }
+  popup.appendChild(defaultPalette);
+
+  // Project custom colors: any fillColor in use across boxes that isn't a default preset
+  const customColors = [...new Set(
+    boxes.filter(b => b.fillColor && !HIGHLIGHT_FILL_COLORS.includes(b.fillColor)).map(b => b.fillColor)
+  )];
+  if (customColors.length > 0) {
+    const customLabel = document.createElement('div');
+    customLabel.className = 'fill-color-popup-section-label';
+    customLabel.textContent = 'Project colors';
+    popup.appendChild(customLabel);
+
+    const customPalette = document.createElement('div');
+    customPalette.className = 'graph-color-palette';
+    for (const c of customColors) {
+      const chip = document.createElement('div');
+      chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
+      chip.style.background = c;
+      chip.title = c;
+      chip.dataset.value = c;
+      chip.addEventListener('click', () => { applyColor(c); closeFillColorPopup(); });
+      customPalette.appendChild(chip);
+    }
+    popup.appendChild(customPalette);
+  }
+
+  // Custom color picker row
+  const pickerRow = document.createElement('div');
+  pickerRow.className = 'graph-color-custom';
+  const pickerLabel = document.createElement('span');
+  pickerLabel.textContent = 'Custom:';
+  const pickerInput = document.createElement('input');
+  pickerInput.type = 'color';
+  pickerInput.value = currentColor || HIGHLIGHT_FILL_COLORS[0];
+  pickerInput.addEventListener('input', () => applyColor(pickerInput.value));
+  pickerRow.appendChild(pickerLabel);
+  pickerRow.appendChild(pickerInput);
+  popup.appendChild(pickerRow);
+
+  // Prevent all clicks within the popup from stealing focus away from the box
+  popup.addEventListener('mousedown', e => e.preventDefault());
+
+  document.body.appendChild(popup);
+
+  // Position below the anchor
+  const rect = anchorEl.getBoundingClientRect();
+  const popupW = 210;
+  let left = rect.left;
+  let top  = rect.bottom + 4;
+  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
+  if (top + 180 > window.innerHeight - 8) top = rect.top - 180 - 4;
+  popup.style.left = left + 'px';
+  popup.style.top  = top + 'px';
+
+  // Use 'click' (not 'mousedown') so the browser's internal color picker panel
+  // — which fires mousedown on non-DOM elements — doesn't trigger a close.
+  const onOutside = (e) => {
+    if (!popup.contains(e.target) && e.target !== anchorEl) closeFillColorPopup();
+  };
+  _activeFillColorPopupOutside = onOutside;
+  setTimeout(() => document.addEventListener('click', onOutside, true), 0);
+}
+
+function openColorPopup(anchorEl, exprId) {
+  closeColorPopup();
+
+  const row = anchorEl.closest('.graph-expr-row');
+  const currentColor = row.dataset.color || '#3b82f6';
+  const currentThickness = parseFloat(row.dataset.thickness) || 2.0;
+
+  const popup = document.createElement('div');
+  popup.className = 'graph-color-popup';
+  _activeColorPopup = popup;
+
+  // Preset palette
+  const palette = document.createElement('div');
+  palette.className = 'graph-color-palette';
+  for (const c of GRAPH_COLORS) {
+    const chip = document.createElement('div');
+    chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
+    chip.style.background = c;
+    chip.title = c;
+    chip.addEventListener('click', () => {
+      row.dataset.color = c;
+      anchorEl.style.background = c;
+      commitGraphEditorToBox(graphModeBoxId);
+      scheduleGraphRender();
+      closeColorPopup();
+    });
+    palette.appendChild(chip);
+  }
+  popup.appendChild(palette);
+
+  // Custom color picker row
+  const customRow = document.createElement('div');
+  customRow.className = 'graph-color-custom';
+  const customLabel = document.createElement('span');
+  customLabel.textContent = 'Custom:';
+  const customInput = document.createElement('input');
+  customInput.type = 'color';
+  customInput.value = currentColor;
+  customInput.addEventListener('input', () => {
+    row.dataset.color = customInput.value;
+    anchorEl.style.background = customInput.value;
+    // Update active chip highlights
+    popup.querySelectorAll('.graph-color-chip').forEach(ch => {
+      ch.classList.toggle('active', ch.title === customInput.value);
+    });
+    commitGraphEditorToBox(graphModeBoxId);
+    scheduleGraphRender();
+  });
+  customRow.appendChild(customLabel);
+  customRow.appendChild(customInput);
+  popup.appendChild(customRow);
+
+  // Thickness number input row
+  const thickRow = document.createElement('div');
+  thickRow.className = 'graph-color-thickness';
+  const thickLabel = document.createElement('span');
+  thickLabel.textContent = 'Thickness:';
+  const thickInput = document.createElement('input');
+  thickInput.type = 'number';
+  thickInput.min = '0.5';
+  thickInput.max = '7';
+  thickInput.step = '0.5';
+  thickInput.value = currentThickness;
+  thickInput.addEventListener('change', () => {
+    const val = Math.min(7, Math.max(0.5, parseFloat(thickInput.value) || 2.0));
+    thickInput.value = val;
+    row.dataset.thickness = val;
+    commitGraphEditorToBox(graphModeBoxId);
+    scheduleGraphRender();
+  });
+  thickRow.appendChild(thickLabel);
+  thickRow.appendChild(thickInput);
+  popup.appendChild(thickRow);
+
+  document.body.appendChild(popup);
+
+  // Position below the anchor
+  const rect = anchorEl.getBoundingClientRect();
+  const popupW = 196; // min-width + padding estimate
+  let left = rect.left;
+  let top = rect.bottom + 4;
+  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
+  if (top + 160 > window.innerHeight - 8) top = rect.top - 160 - 4;
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+
+  // Close on outside click
+  const onOutside = (e) => {
+    if (!popup.contains(e.target) && e.target !== anchorEl) {
+      closeColorPopup();
+    }
+  };
+  _activeColorPopupOutside = onOutside;
+  setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
+}
+
 function commitGraphEditorToBox(boxId) {
   if (!boxId) return;
   const idx = boxes.findIndex(b => b.id === boxId);
@@ -2730,8 +3001,8 @@ function commitGraphEditorToBox(boxId) {
   for (const row of rows) {
     const exprId  = row.dataset.exprId;
     const enabled   = row.querySelector('.graph-expr-toggle').checked;
-    const color     = row.querySelector('.graph-expr-color').value;
-    const thickness = parseFloat(row.querySelector('.graph-expr-thickness').value) || 2.0;
+    const color     = row.dataset.color || '#3b82f6';
+    const thickness = parseFloat(row.dataset.thickness) || 2.0;
     const sliderMin = parseFloat(row.dataset.sliderMin) || 0;
     const sliderMax = parseFloat(row.dataset.sliderMax) || 10;
     const field     = graphMqFields.get(exprId);
@@ -2800,6 +3071,32 @@ function addGraphExpressionAfter(afterId) {
   if (field) setTimeout(() => field.focus(), 0);
 }
 
+// ── Highlight toolbar button handlers ────────────────────────────────────────
+[highlightBtn, fillColorBtn].forEach(btn => {
+  btn.addEventListener('mousedown', e => e.preventDefault());
+});
+
+highlightBtn.addEventListener('click', () => {
+  if (!focusedBoxId) return;
+  const idx = boxes.findIndex(b => b.id === focusedBoxId);
+  if (idx === -1) return;
+  const wasHighlighted = !!boxes[idx].highlighted;
+  boxes[idx].highlighted = !wasHighlighted;
+  if (boxes[idx].highlighted) {
+    if (!boxes[idx].fillColor) boxes[idx].fillColor = HIGHLIGHT_FILL_COLORS[0];
+  }
+  const hlEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
+  if (hlEl) hlEl.classList.toggle('box-is-highlighted', !!boxes[idx].highlighted);
+  updateHighlightToolbar();
+  syncToText();
+});
+
+fillColorBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!focusedBoxId) return;
+  openFillColorPopup(fillColorBtn, focusedBoxId);
+});
+
 // Wire up graph editor panel buttons
 document.getElementById('graph-done-btn').addEventListener('click', exitGraphMode);
 document.getElementById('graph-add-expr-btn').addEventListener('mousedown', e => e.preventDefault());
@@ -2845,6 +3142,7 @@ new ResizeObserver(() => {
 // ── Initialize ────────────────────────────────────────────────────────────────
 (function init() {
   applyFontSize();
+  updateHighlightToolbar();
 
   // Restore UI layout (panel visibility + divider positions)
   const uiState = JSON.parse(localStorage.getItem(UI_STATE_KEY) || 'null');

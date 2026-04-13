@@ -31,6 +31,28 @@ Three boolean flags prevent feedback loops between the two panels:
 \subsubsection{heading}    ← H3
 ```
 
+### Highlight feature
+
+Boxes can be "highlighted" — this is a user-facing annotation feature (toggled via the **Highlight** toolbar button or the `h` key shortcut) that is distinct from focus/selection. A highlighted box has `box.highlighted = true` on the data object, and optionally `box.filled` and `box.fillColor` for a background fill color shown in the preview.
+
+**Data fields on a highlighted box:**
+```js
+{ highlighted: true, filled: true, fillColor: '#ffe066' }
+```
+
+**Serialization** — a `%@hl` prefix line is prepended before the box's serialized content:
+```
+%@hl filled #ffe066    ← filled + color flags (optional)
+\[LaTeX content\]
+```
+`pendingHighlight` in `parseFromLatex` captures this and applies it to the next box via `applyPending()`.
+
+**Preview rendering** — highlighted boxes are wrapped in a `<div class="preview-highlight-box">` with an inline background style driven by `fillColor`.
+
+**Box editor rendering** — highlighted boxes get the CSS class `box-is-highlighted` (dark yellow background `#2a2600`, border `#6b5900`) so they are visually distinct in the right panel. This class is set in `createBoxElement` and synced in `diffAndApply`; the two toggle sites (button click and `h` key) also update the class directly on the DOM element for immediate feedback without waiting for a debounce cycle.
+
+**Preview-click blink** — when a box is scrolled-to via a preview click, it flashes with a green animation (`box-blink-green` / `.box.box-highlight-blink`). This is unrelated to the highlight feature; do not confuse the two.
+
 ### Undo history
 `history[]` stores `{ latex, focusId }` snapshots. `pushHistory()` is called from `syncToText()` and the latexSource input handler. `restoreSnapshot()` parses the snapshot back into `boxes`, rebuilds the DOM, and calls `updateLineNumbers()` + `updatePreview()`.
 

@@ -382,10 +382,69 @@ html, body {
   cursor: pointer;
 }
 
-.graph-expr-color {
+.graph-expr-color-swatch {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: border-color 0.1s;
+  box-sizing: border-box;
+}
+.graph-expr-color-swatch:hover {
+  border-color: #585b70;
+}
+
+.graph-color-popup {
+  position: fixed;
+  z-index: 9999;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  min-width: 196px;
+}
+
+.graph-color-palette {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.graph-color-chip {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  box-sizing: border-box;
+  transition: border-color 0.1s, transform 0.1s;
+}
+.graph-color-chip:hover {
+  border-color: #cdd6f4;
+  transform: scale(1.15);
+}
+.graph-color-chip.active {
+  border-color: #cdd6f4;
+}
+
+.graph-color-custom,
+.graph-color-thickness {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #a6adc8;
+}
+
+.graph-color-custom input[type="color"] {
+  width: 32px;
+  height: 24px;
   border: none;
   border-radius: 4px;
   background: none;
@@ -393,12 +452,18 @@ html, body {
   padding: 0;
 }
 
-.graph-expr-thickness {
-  flex-shrink: 0;
-  width: 50px;
-  height: 4px;
-  cursor: pointer;
-  accent-color: #89b4fa;
+.graph-color-thickness input[type="number"] {
+  width: 56px;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.graph-color-thickness input[type="number"]:focus {
+  outline: none;
+  border-color: #89b4fa;
 }
 
 .graph-expr-mq {
@@ -839,20 +904,25 @@ html, body {
   border-color: #89b4fa;
 }
 
+.box.box-is-highlighted {
+  background: #2a2600;
+  border-color: #6b5900;
+}
+
 .box.drag-over {
   border-color: #89b4fa;
   background: #1e1e3a;
 }
 
-@keyframes box-blink-yellow {
+@keyframes box-blink-green {
   0%   { background: #181825; }
-  20%  { background: #4a4400; border-color: #f5c400; }
-  60%  { background: #4a4400; border-color: #f5c400; }
+  20%  { background: #003a1a; border-color: #22c55e; }
+  60%  { background: #003a1a; border-color: #22c55e; }
   100% { background: #181825; }
 }
 
 .box.box-highlight-blink {
-  animation: box-blink-yellow 0.7s ease-out;
+  animation: box-blink-green 0.7s ease-out;
 }
 
 .box-drag-handle {
@@ -1027,6 +1097,83 @@ html, body {
 #line-numbers::-webkit-scrollbar-thumb {
   background: #45475a;
   border-radius: 3px;
+}
+
+/* ── Highlight toolbar button ── */
+#highlight-btn {
+  background: #c0392b;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+#highlight-btn.hl-active {
+  background: #27ae60;
+}
+
+#highlight-btn:disabled {
+  background: #313244;
+  color: #585b70;
+  cursor: default;
+}
+
+#highlight-btn:hover:not(:disabled) { background: #a93226; }
+#highlight-btn.hl-active:hover { background: #229954; }
+
+/* Fill color swatch button */
+.fill-color-swatch-btn {
+  width: 26px;
+  height: 22px;
+  border: 2px solid #45475a;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.1s;
+  flex-shrink: 0;
+}
+
+.fill-color-swatch-btn:hover {
+  border-color: #cdd6f4;
+}
+
+.fill-color-swatch-btn.no-fill {
+  background: repeating-conic-gradient(#585b70 0% 25%, #313244 0% 50%) 0 0 / 8px 8px !important;
+}
+
+/* Fill color popup (shares structure with .graph-color-popup) */
+.fill-color-popup {
+  position: fixed;
+  z-index: 9999;
+  background: #1e1e2e;
+  border: 1px solid #45475a;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  min-width: 196px;
+}
+
+.fill-color-popup-section-label {
+  font-size: 10px;
+  color: #585b70;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: -4px;
+}
+
+/* Preview highlight box */
+.preview-highlight-box {
+  border: 2px solid black;
+  padding: 4px 8px;
+  margin: 4px 0;
+  display: block;
+  box-sizing: border-box;
 }
 
 /* ── Preview panel ── */

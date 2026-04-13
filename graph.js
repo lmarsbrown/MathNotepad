@@ -925,20 +925,78 @@ class GraphRenderer {
     this._onRender = null; // callback to re-render on pan/zoom
     this._onPick = null;   // callback(exprId) when user clicks a curve
 
-    // Maps graphId (index in active[]) → expr._exprId, updated each render
+    // Maps graphId (index in active[]) → expr.exprId, updated each render
     this._lastActiveExprIds = [];
 
     // Snap-to-curve state
     this._holding      = false;
-    this._snapExprId   = null;   // _exprId of the focused expression, or null
+    this._snapExprId   = null;   // exprId of the focused expression, or null
     this._snapPoint    = null;   // { wx, wy } in world coords, or null
     this._lastActive   = [];     // active expressions from last render()
     this._effYMin      = 0;
     this._effYMax      = 0;
-    this._jsEvaluators = new Map(); // glslExpr → Function(x,y) | null
+    this._jsEvaluators = new Map(); // glslExpr → Function(x,y) | null (legacy only)
+
+    // Compiled expression cache — populated by updateExpressions()
+    this._compiledExprs  = [];          // Array<{ exprId, shaderInfo, jsEval, color, thickness, enabled }>
+    this._constantValues = new Map();   // analysis.constantValues shared across all exprs
+    this._compiledErrors = new Map();   // exprId → error string
+    this._compiledKey    = '';          // LaTeX-based change-detection key
+    this._lastShaderKey  = '';          // shader-key string; drives clearShaderCache()
 
     this._initThickenShader();
     this._setupInteraction();
+  }
+
+  /**
+   * Update the compiled expression cache from raw box expressions.
+   * Runs compileGraphExpressions() only when LaTeX/enabled state changes;
+   * otherwise just patches color/thickness on the existing cache entries.
+   *
+   * @param {Array<{id, latex, color, thickness, enabled}>} boxExpressions
+   * @returns {Map<string, string>} errors — exprId → error message
+   */
+  updateExpressions(boxExpressions) {
+    const latexKey = boxExpressions
+      .map(e => `${e.id}:${e.latex}:${e.enabled ? '1' : '0'}`)
+      .join('|');
+
+    if (latexKey !== this._compiledKey) {
+      // Expressions changed — full recompile
+      const { analysis, renderExprs, jsEvaluators } = compileGraphExpressions(boxExpressions);
+
+      this._compiledExprs = renderExprs.map(re => ({
+        exprId:     re.exprId,
+        shaderInfo: re.shaderInfo,
+        jsEval:     jsEvaluators.get(re.exprId) || null,
+        color:      re.color,
+        thickness:  re.thickness,
+        enabled:    re.enabled,
+      }));
+      this._constantValues = analysis.constantValues;
+      this._compiledErrors = analysis.errors;
+
+      const newShaderKey = this._compiledExprs
+        .map(e => e.shaderInfo ? e.shaderInfo.shaderKey : '')
+        .join('|');
+      if (newShaderKey !== this._lastShaderKey) {
+        this.clearShaderCache();
+        this._lastShaderKey = newShaderKey;
+      }
+
+      this._compiledKey = latexKey;
+    } else {
+      // Only mutable display properties may have changed — no recompile needed
+      for (const src of boxExpressions) {
+        const compiled = this._compiledExprs.find(e => e.exprId === src.id);
+        if (compiled) {
+          compiled.color     = src.color;
+          compiled.thickness = src.thickness != null ? src.thickness : 2.0;
+        }
+      }
+    }
+
+    return this._compiledErrors;
   }
 
   // ── Interaction: pan & zoom ──────────────────────────────────────────────
@@ -1093,11 +1151,11 @@ class GraphRenderer {
 
   /**
    * Get a JS Function(x, y) evaluator for an expression. Supports both:
-   * - New format: expr._jsEval is a pre-built function from the analysis pipeline
+   * - New format: expr.jsEval is a pre-built function from the analysis pipeline
    * - Legacy format: expr.glsl is a GLSL string that gets regex-converted to JS
    */
   _getJsEvaluator(expr) {
-    if (expr._jsEval) return expr._jsEval;
+    if (expr.jsEval) return expr.jsEval;
     if (!expr.glsl) return null;
 
     if (this._jsEvaluators.has(expr.glsl)) return this._jsEvaluators.get(expr.glsl);
@@ -1151,7 +1209,7 @@ class GraphRenderer {
 
     let F;
     for (const expr of this._lastActive) {
-      if (this._snapExprId !== null && expr._exprId !== this._snapExprId) continue;
+      if (this._snapExprId !== null && expr.exprId !== this._snapExprId) continue;
       F = this._getJsEvaluator(expr);
       if (!F) continue;
     }
@@ -1700,12 +1758,13 @@ void main() {
   // ── Main render entry ──────────────────────────────────────────────────
 
   /**
-   * Render a set of graph expressions.
-   * @param {Array<{glsl: string, color: string, enabled: boolean}>} expressions
-   * @param {number} width   Canvas pixel width
-   * @param {number} height  Canvas pixel height
+   * Render using the compiled expression cache (populated by updateExpressions()).
+   * @param {number} width          Canvas pixel width
+   * @param {number} height         Canvas pixel height
+   * @param {boolean} lightTheme
+   * @param {string|null} focusedExprId  If set, that expression renders last (on top) with +0.5 thickness
    */
-  render(expressions, width, height, lightTheme) {
+  render(width, height, lightTheme, focusedExprId = null) {
     const gl = this.gl;
     width  = Math.max(1, Math.round(width));
     height = Math.max(1, Math.round(height));
@@ -1734,9 +1793,19 @@ void main() {
     const effYMin = yCenterStored - yHalf;
     const effYMax = yCenterStored + yHalf;
 
-    // Collect enabled expressions and their colors
+    // Build rendering list from cache, attaching shared constantValues, then apply focus order
+    let exprs = this._compiledExprs.map(e => ({ ...e, constantValues: this._constantValues }));
+    if (focusedExprId) {
+      const fi = exprs.findIndex(e => e.exprId === focusedExprId);
+      if (fi !== -1) {
+        const focused = { ...exprs[fi], thickness: exprs[fi].thickness + 0.5 };
+        exprs = [...exprs.slice(0, fi), ...exprs.slice(fi + 1), focused];
+      }
+    }
+
+    // Collect enabled expressions
     const active = [];
-    for (const expr of expressions) {
+    for (const expr of exprs) {
       if (!expr.enabled) continue;
       // Support both legacy { glsl } and new { shaderInfo } formats
       if (!expr.glsl && !expr.shaderInfo) continue;
@@ -1785,8 +1854,8 @@ void main() {
       img.swapBuffers();
     }
 
-    // Store expr id mapping for pick queries (graphId → _exprId)
-    this._lastActiveExprIds = active.map(e => e._exprId || null);
+    // Store expr id mapping for pick queries (graphId → exprId)
+    this._lastActiveExprIds = active.map(e => e.exprId || null);
 
     // Cache active expressions and Y bounds for CPU snap queries
     this._lastActive = active;
