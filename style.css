@@ -374,13 +374,7 @@ html, body {
   cursor: grabbing;
 }
 
-.graph-expr-toggle {
-  flex-shrink: 0;
-  width: 15px;
-  height: 15px;
-  accent-color: #89b4fa;
-  cursor: pointer;
-}
+/* .graph-expr-toggle is now a pill button (.expr-toggle) — no extra styles needed */
 
 .graph-expr-color-swatch {
   flex-shrink: 0;
@@ -564,7 +558,8 @@ html, body {
   text-overflow: ellipsis;
 }
 
-.graph-expr-row.has-error .mq-editable-field {
+.graph-expr-row.has-error .mq-editable-field,
+.calc-expr-row.has-error .mq-editable-field {
   border-color: #f38ba8;
 }
 
@@ -1167,6 +1162,18 @@ html, body {
   margin-bottom: -4px;
 }
 
+/* Preview blink — triggered when double-clicking a box in the editor */
+@keyframes preview-blink {
+  0%   { outline: 2px solid transparent; }
+  20%  { outline: 2px solid #22c55e; background: rgba(34, 197, 94, 0.12); }
+  60%  { outline: 2px solid #22c55e; background: rgba(34, 197, 94, 0.12); }
+  100% { outline: 2px solid transparent; background: transparent; }
+}
+.preview-blink {
+  animation: preview-blink 0.8s ease-out;
+  border-radius: 3px;
+}
+
 /* Preview highlight box */
 .preview-highlight-box {
   border: 2px solid black;
@@ -1341,4 +1348,224 @@ html, body {
   .preview-page + .preview-page {
     margin-top: 0; /* no gap between pages in print */
   }
+}
+
+/* ── Pill toggle button (shared by graph editor + calc box) ── */
+.expr-toggle {
+  flex-shrink: 0;
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  background: #45475a;
+  transition: background 0.15s;
+  outline: none;
+}
+
+.expr-toggle::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #a6adc8;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.expr-toggle[aria-pressed="true"] {
+  background: #27ae60;
+}
+
+.expr-toggle[aria-pressed="true"]::after {
+  transform: translateX(14px);
+  background: #fff;
+}
+
+.expr-toggle[aria-pressed="false"]::after {
+  background: #585b70;
+}
+
+.expr-toggle:hover[aria-pressed="true"] { background: #229954; }
+.expr-toggle:hover[aria-pressed="false"] { background: #585b70; }
+
+/* ── Calc box ── */
+.box-calc {
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  padding-bottom: 6px;
+}
+
+.calc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 10px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  border-radius: 6px 6px 0 0;
+  flex-shrink: 0;
+}
+
+/* Reposition CALC badge inline inside the toolbar (not absolutely on border) */
+.box-calc .box-type-label {
+  position: static;
+  transform: none;
+  top: auto;
+  left: auto;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.calc-show-results-btn {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  background: #c0392b;
+  color: #fff;
+  transition: background 0.15s;
+}
+
+.calc-show-results-btn.active {
+  background: #27ae60;
+}
+
+.calc-show-results-btn:hover:not(.active) { background: #a93226; }
+.calc-show-results-btn.active:hover { background: #229954; }
+
+.calc-expr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px 4px;
+  width: 100%;
+}
+
+.calc-expr-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 5px 8px;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.calc-expr-row.calc-expr-disabled {
+  opacity: 0.45;
+}
+
+.calc-expr-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.calc-expr-error {
+  font-size: 11px;
+  font-family: monospace;
+  color: #f38ba8;
+  padding: 2px 2px 0;
+  word-break: break-word;
+}
+
+.calc-expr-mq {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.calc-expr-mq .mq-editable-field {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  display: block !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  font-size: 14px;
+}
+
+.calc-expr-mq .mq-editable-field.mq-focused {
+  background: transparent !important;
+}
+
+.calc-expr-result {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: monospace;
+  color: #6c7086;
+  white-space: nowrap;
+  user-select: none;
+  border-radius: 3px;
+  padding: 1px 3px;
+  transition: background 0.1s;
+}
+.calc-expr-result:hover {
+  background: rgba(255,255,255,0.07);
+  color: #cdd6f4;
+}
+
+.calc-expr-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #585b70;
+  cursor: pointer;
+  font-size: 16px;
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+  padding: 0;
+  line-height: 22px;
+  text-align: center;
+  transition: color 0.1s, background 0.1s;
+}
+
+.calc-expr-delete:hover {
+  color: #f38ba8;
+  background: #313244;
+}
+
+.calc-add-btn {
+  margin: 4px 10px 2px;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: none;
+  border: 1px dashed #45475a;
+  border-radius: 4px;
+  color: #585b70;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.calc-add-btn:hover {
+  color: #a6adc8;
+  border-color: #a6adc8;
+}
+
+/* Preview calc box */
+.preview-calc-box {
+  margin: 4px 0;
+}
+
+.preview-calc-box .preview-math {
+  margin: 0;
 }
