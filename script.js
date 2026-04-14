@@ -21,6 +21,12 @@ let defaultBoxType = 'math';
 
 // ── Preview state ────────────────────────────────────────────────────────────
 let isPreviewOpen = false;
+let previewScrollTop = 0; // cached scroll position, updated via scroll event (avoids forced reflow at render time)
+// Cache of already-MathJax-rendered elements, keyed by box id.
+// Each entry: { key: string, el: HTMLElement } where key encodes the box
+// state that affects rendering. A cache hit means we can reuse the element
+// as-is without calling typesetPromise again.
+const previewBoxCache = new Map();
 const ZOOM_STEPS = [50, 67, 75, 90, 100, 110, 125, 150, 175, 200];
 let previewZoomIndex = 4; // 100%
 
@@ -38,8 +44,11 @@ let graphExprNextId = 1;
 let graphMqFields = new Map();    // expr id → MathQuill field
 let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that row's badges
 let graphCommitTimer = null;
+let draftSaveTimer = null;
 
 const GRAPH_RENDER_DEBOUNCE_MS = 300; // debounce delay (ms) between typing in a graph expression and re-rendering
+const PREVIEW_DEBOUNCE_MS = 400;      // debounce delay (ms) between editing a box and re-rendering the preview
+const DRAFT_SAVE_DEBOUNCE_MS = 1000;  // debounce delay (ms) for auto-saving the draft to localStorage
 
 const GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4'];
 let graphColorIdx = 0;
@@ -1538,13 +1547,67 @@ function processTextContent(text) {
   }).join('');
 }
 
-function schedulePreview(delay = 400) {
+function schedulePreview(delay = PREVIEW_DEBOUNCE_MS) {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(() => updatePreview(), delay);
 }
 
 let previewRunning = false;
 let previewPending = false;
+
+// Build the inner preview DOM element for a single box with raw (un-typeset)
+// content. Graph and pagebreak boxes never go through MathJax; math/text/heading
+// boxes will be passed to typesetPromise after this returns.
+function createPreviewElement(box) {
+  if (box.type === 'math') {
+    const div = document.createElement('div');
+    div.className = 'preview-math';
+    div.dataset.boxId = box.id;
+    // Use textContent so the backslashes are literal characters in the text node,
+    // which is what MathJax's input scanner expects to find.
+    div.textContent = `\\[${applyBBSubs(box.content)}\\]`;
+    return div;
+  }
+  if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
+    const el = document.createElement(box.type);
+    el.className = `preview-${box.type}`;
+    el.dataset.boxId = box.id;
+    el.innerHTML = processTextContent(box.content);
+    return el;
+  }
+  if (box.type === 'pagebreak') {
+    const div = document.createElement('div');
+    div.className = 'preview-pagebreak';
+    div.dataset.boxId = box.id;
+    return div;
+  }
+  if (box.type === 'graph') {
+    const div = document.createElement('div');
+    div.dataset.boxId = box.id;
+    if (box._snapshotDataUrl) {
+      div.className = 'preview-graph-image';
+      div.style.cssText = 'text-align:center;margin:8px 0';
+      const img = document.createElement('img');
+      img.src = box._snapshotDataUrl;
+      img.style.cssText = `max-width:100%;width:${box.width || 600}px;height:auto;border-radius:4px`;
+      div.appendChild(img);
+    } else {
+      const n = (box.expressions || []).filter(e => e.enabled).length;
+      div.className = 'preview-graph-placeholder';
+      div.style.cssText = `width:${box.width || 600}px;height:${box.height || 400}px`;
+      const span = document.createElement('span');
+      span.textContent = `${n} expression${n !== 1 ? 's' : ''}`;
+      div.appendChild(span);
+    }
+    return div;
+  }
+  // text box (default)
+  const p = document.createElement('p');
+  p.className = 'preview-text';
+  p.dataset.boxId = box.id;
+  p.innerHTML = processTextContent(box.content);
+  return p;
+}
 
 async function updatePreview() {
   if (!isPreviewOpen) return;
@@ -1553,49 +1616,107 @@ async function updatePreview() {
   previewRunning = true;
   previewPending = false;
 
-  let inner = '';
+  // Build a new page div from cached + fresh elements. Graph and pagebreak boxes
+  // are always recreated (no MathJax cost). Math/text/heading elements are reused
+  // from cache when their content hasn't changed, so typesetPromise only runs on
+  // the subset that actually changed.
+  const pageDiv = document.createElement('div');
+  pageDiv.className = 'preview-page';
+
+  const toTypeset = []; // elements that need MathJax this cycle
+  const activeIds = new Set();
+
+
+  
+  const innerEls = [];
+  
   for (const box of boxes) {
     if (box.commented) continue;
-    let boxHtml;
-    if (box.type === 'math') {
-      boxHtml = `<div class="preview-math" data-box-id="${box.id}">\\[${escapeHtml(applyBBSubs(box.content))}\\]</div>`;
-    } else if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
-      const tag = box.type;
-      boxHtml = `<${tag} class="preview-${tag}" data-box-id="${box.id}">${processTextContent(box.content)}</${tag}>`;
-    } else if (box.type === 'pagebreak') {
-      boxHtml = `<div class="preview-pagebreak" data-box-id="${box.id}"></div>`;
-    } else if (box.type === 'graph') {
-      if (box._snapshotDataUrl) {
-        boxHtml = `<div class="preview-graph-image" data-box-id="${box.id}" style="text-align:center;margin:8px 0">
-          <img src="${box._snapshotDataUrl}" style="max-width:100%;width:${box.width||600}px;height:auto;border-radius:4px"></div>`;
-      } else {
-        const n = (box.expressions || []).filter(e => e.enabled).length;
-        boxHtml = `<div class="preview-graph-placeholder" data-box-id="${box.id}" style="width:${box.width || 600}px;height:${box.height || 400}px">
-          <span>${n} expression${n !== 1 ? 's' : ''}</span></div>`;
-      }
+    activeIds.add(box.id);
+
+    // Cache key encodes everything that affects the rendered output.
+    // Graph boxes always bypass the cache (snapshot url changes independently).
+    const needsCache = box.type !== 'graph' && box.type !== 'pagebreak';
+    const cacheKey = `${box.type}|${box.content}`;
+    const cached = needsCache ? previewBoxCache.get(box.id) : null;
+
+    let innerEl;
+    if (cached && cached.key === cacheKey) {
+      innerEl = cached.el; // reuse the already-typeset DOM node
     } else {
-      boxHtml = `<p class="preview-text" data-box-id="${box.id}">${processTextContent(box.content)}</p>`;
+      // Content changed — discard the old rendered element and tell MathJax to
+      // release its internal state for it, preventing unbounded list growth.
+      if (cached) window.MathJax?.typesetClear?.([cached.el]);
+      innerEl = createPreviewElement(box);
+      if (needsCache) {
+        previewBoxCache.set(box.id, { key: cacheKey, el: innerEl });
+        toTypeset.push(innerEl);
+      }
     }
-    if (box.highlighted) {
-      const bgStyle = box.fillColor ? `background:${box.fillColor};` : '';
-      boxHtml = `<div class="preview-highlight-box" style="${bgStyle}">${boxHtml}</div>`;
+    innerEls.push(innerEl);
+  }
+  let cachedMissed = !metricsCache;
+
+  //If there are no cached metrics add the divs to the DOM before running mathjax on them so that the metrics can be cached.
+  if(cachedMissed){
+    for(let box in boxes){
+      if (boxes[box].highlighted) {
+        const wrap = document.createElement('div');
+        wrap.className = 'preview-highlight-box';
+        if (boxes[box].fillColor) wrap.style.background = boxes[box].fillColor;
+        wrap.appendChild(innerEls[box]);
+        pageDiv.appendChild(wrap);
+      } else {
+        pageDiv.appendChild(innerEls[box]);
+      }
     }
-    inner += boxHtml;
+  }
+  
+
+  // Evict cache entries for boxes that no longer exist, and release their
+  // MathJax state so the internal MathDocument list doesn't grow unboundedly.
+  // Without this, Firefox degrades severely after many create/delete cycles.
+  for (const [id, entry] of previewBoxCache) {
+    if (!activeIds.has(id)) {
+      window.MathJax?.typesetClear?.([entry.el]);
+      previewBoxCache.delete(id);
+    }
   }
 
-  const savedScroll = previewContent.scrollTop;
+  // Swap in the new page. Cached elements are already in pageDiv so they
+  // survive the innerHTML clear as detached (but still JS-referenced) nodes.
+  previewContent.innerHTML = '';
+  previewContent.appendChild(pageDiv);
 
-  if (window.MathJax?.typesetClear) MathJax.typesetClear([previewContent]);
-  previewContent.innerHTML = `<div class="preview-page">${inner}</div>`;
-  if (window.MathJax?.typesetPromise) await MathJax.typesetPromise([previewContent]);
-  // Eliminate SVG stroke rendering that causes artefacts in printed PDFs.
-  // Must set stroke="none" on every element individually — PDF renderers don't
-  // reliably cascade SVG attributes, and child stroke-width="0" can reintroduce strokes.
-  previewContent.querySelectorAll('svg, svg *').forEach(el => el.setAttribute('stroke', 'none'));
+  if (toTypeset.length > 0 && window.MathJax?.typesetPromise) {
+    await MathJax.typesetPromise(toTypeset);
+    // Eliminate SVG stroke rendering that causes artefacts in printed PDFs.
+    // Must set stroke="none" on every element individually — PDF renderers don't
+    // reliably cascade SVG attributes, and child stroke-width="0" can reintroduce strokes.
+    for (const el of toTypeset) {
+      el.querySelectorAll('svg, svg *').forEach(e => e.setAttribute('stroke', 'none'));
+    }
+  }
+
+  //If there are cached metrics add the divs after mathjax has rendered to avoid reflowing the entire page
+  if(!cachedMissed){
+    for(let box in boxes){
+      if (boxes[box].highlighted) {
+        const wrap = document.createElement('div');
+        wrap.className = 'preview-highlight-box';
+        if (boxes[box].fillColor) wrap.style.background = boxes[box].fillColor;
+        wrap.appendChild(innerEls[box]);
+        pageDiv.appendChild(wrap);
+      } else {
+        pageDiv.appendChild(innerEls[box]);
+      }
+    }
+  }
+
   paginatePreview();  // split content across separate page divs
   applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
 
-  previewContent.scrollTop = savedScroll;
+  previewContent.scrollTop = previewScrollTop;
   previewRunning = false;
   if (previewPending) schedulePreview(0);
 }
@@ -1656,6 +1777,7 @@ function paginatePreview() {
     const mb = parseFloat(getComputedStyle(el).marginBottom) || 0;
     return tops[i] + el.offsetHeight + mb;
   });
+
 
   // Hidden off-screen ruler with the same CSS as a real page — used to measure
   // split fragment heights without affecting the visible layout.
@@ -1746,6 +1868,8 @@ function stepPreviewZoom(delta) {
 
 previewZoomInBtn.addEventListener('click',  () => stepPreviewZoom(+1));
 previewZoomOutBtn.addEventListener('click', () => stepPreviewZoom(-1));
+
+previewContent.addEventListener('scroll', () => { previewScrollTop = previewContent.scrollTop; }, { passive: true });
 
 previewContent.addEventListener('wheel', e => {
   if (e.ctrlKey) {
@@ -1950,11 +2074,20 @@ function saveProjects(list) {
   localStorage.setItem(PROJ_KEY, JSON.stringify(list));
 }
 
-function saveDraft() {
+function saveDraftNow() {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = null;
   localStorage.setItem(DRAFT_KEY, JSON.stringify({
     latex: latexSource.value,
     projectId: currentProjectId,
   }));
+}
+
+// Debounced version used during editing — avoids blocking the main thread on
+// every keystroke/box-creation with a synchronous localStorage write.
+function saveDraft() {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(saveDraftNow, DRAFT_SAVE_DEBOUNCE_MS);
 }
 
 function saveUiState() {
@@ -2004,7 +2137,7 @@ function saveCurrentProject() {
       projects[idx].latex = latex;
       saveProjects(projects);
       markClean();
-      saveDraft();
+      saveDraftNow();
       renderProjectsList();
     }
   } else {
@@ -2041,7 +2174,7 @@ function openProject(id) {
   currentProjectId = id;
   projectTitleLabel.textContent = proj.title;
   markClean();
-  saveDraft();
+  saveDraftNow();
   closeProjectsPanel();
   if (boxes.length > 0) focusBox(boxes[0].id);
   renderProjectsList();
@@ -2184,7 +2317,7 @@ function newProject() {
   historyIndex = 0;
   updateLineNumbers();
   markClean();
-  saveDraft();
+  saveDraftNow();
   closeProjectsPanel();
   renderProjectsList();
   focusBox(boxes[0].id);
@@ -3181,3 +3314,45 @@ new ResizeObserver(() => {
   markClean();
   updateLineNumbers();
 })();
+
+// ── MathJax metrics cache ─────────────────────────────────────────────────────
+// getMetrics() reads em/ex from the DOM via getComputedStyle, which forces a
+// reflow after every DOM mutation. Font metrics are stable for the entire
+// editing session (they only change on browser zoom), so we measure once and
+// return the cached value on all subsequent calls. The cache is invalidated on
+// window resize so a browser-zoom change is picked up on the next typeset.
+//
+// We patch the prototype (not the instance) so the override intercepts all
+// calls regardless of when MathJax internally captured the method reference.
+
+
+var metricsCache = null;
+window.addEventListener('load', () => {
+  window.MathJax?.startup?.promise?.then(() => {
+    const output = MathJax.startup.output;
+    if (!output) return;
+
+    // Walk up the prototype chain to find where getMetrics is actually defined.
+    let proto = output;
+    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'getMetrics')) {
+      proto = Object.getPrototypeOf(proto);
+    }
+    if (!proto?.getMetrics) {
+      console.warn('[MathJax patch] getMetrics not found on prototype chain');
+      return;
+    }
+
+    const _measureMetrics = proto.measureMetrics;
+    
+    window.addEventListener('resize', () => { metricsCache = null; });
+    proto.measureMetrics = function (node,e) {
+
+      if (!metricsCache) {
+        console.log("cacheMiss:", metricsCache);
+        metricsCache = _measureMetrics.call(this,node,e);
+      }
+
+      return metricsCache;
+    };
+  });
+});

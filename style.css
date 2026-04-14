@@ -1242,6 +1242,7 @@ html, body {
   color: #1a1a1a;
   overflow-x: auto;
   max-width: 100%;
+  contain:layout;
 }
 
 /* MathJax injects margin:1em 0 on display containers by default — override to a
