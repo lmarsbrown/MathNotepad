@@ -18,6 +18,34 @@ class CompileError extends Error {
   constructor(msg) { super(msg); this.name = 'CompileError'; }
 }
 
+// ── Physics constants ─────────────────────────────────────────────────────────
+// Each entry: { varName, value, label, description }
+//   varName     — normalized internal name used in the evaluator's values map.
+//                 Must match what parseLatexToAst returns for the corresponding
+//                 LaTeX (e.g. 'q_e' for MQ latex 'q_e', 'hbar' for '\hbar').
+//   value       — SI numeric value
+//   label       — short human-readable name shown in tooltips
+//   description — units / full name shown in tooltips
+//
+// To add a new constant: append an entry here. No other changes required.
+const PHYSICS_CONSTANTS = [
+  { varName: 'c',         value: 2.99792458e8,   label: 'c',         description: 'Speed of light (2.998×10⁸ m/s)' },
+  { varName: 'g',         value: 9.80665,         label: 'g',         description: 'Standard gravity (9.807 m/s²)' },
+  { varName: 'G',         value: 6.67430e-11,     label: 'G',         description: 'Gravitational constant (6.674×10⁻¹¹ N·m²/kg²)' },
+  { varName: 'h',         value: 6.62607015e-34,  label: 'h',         description: 'Planck constant (6.626×10⁻³⁴ J·s)' },
+  { varName: 'hbar',      value: 1.054571817e-34, label: 'ℏ',         description: 'Reduced Planck constant (1.055×10⁻³⁴ J·s)' },
+  { varName: 'R',         value: 8.314462618,     label: 'R',         description: 'Ideal gas constant (8.314 J/(mol·K))' },
+  { varName: 'k_B',       value: 1.380649e-23,    label: 'k_B',       description: 'Boltzmann constant (1.381×10⁻²³ J/K)' },
+  { varName: 'N_A',       value: 6.02214076e23,   label: 'N_A',       description: 'Avogadro\'s number (6.022×10²³ mol⁻¹)' },
+  { varName: 'q_e',       value: 1.602176634e-19, label: 'q_e',       description: 'Elementary charge (1.602×10⁻¹⁹ C)' },
+  { varName: 'epsilon_0', value: 8.8541878128e-12,label: 'ε₀',        description: 'Permittivity of free space (8.854×10⁻¹² F/m)' },
+  { varName: 'mu_0',      value: 1.25663706212e-6,label: 'μ₀',        description: 'Permeability of free space (1.257×10⁻⁶ H/m)' },
+  { varName: 'm_e',       value: 9.1093837015e-31,label: 'm_e',       description: 'Electron mass (9.109×10⁻³¹ kg)' },
+  { varName: 'm_p',       value: 1.67262192369e-27,label:'m_p',       description: 'Proton mass (1.673×10⁻²⁷ kg)' },
+  { varName: 'sigma',     value: 5.670374419e-8,  label: 'σ',         description: 'Stefan–Boltzmann constant (5.670×10⁻⁸ W/(m²·K⁴))' },
+  { varName: 'alpha',     value: 7.2973525693e-3, label: 'α',         description: 'Fine-structure constant (≈ 1/137)' },
+];
+
 function findEqAtDepth0(s) {
   let depth = 0;
   for (let i = 0; i < s.length; i++) {
@@ -27,6 +55,44 @@ function findEqAtDepth0(s) {
     else if (c === '=' && depth === 0) return i;
   }
   return -1;
+}
+
+/**
+ * Find the first comparison or equality operator at brace-depth 0.
+ * Handles: =  <  >  \leq (\le)  \geq (\ge)  \neq (\ne)
+ * Returns { idx, len, op } where op is '=', '<', '>', '<=', '>=', or '!='
+ * or null if no operator found. Used by evaluateCalcExpressions.
+ */
+function findCalcOperatorAtDepth0(s) {
+  let depth = 0;
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '{' || c === '(') { depth++; i++; continue; }
+    if (c === '}' || c === ')') { depth--; i++; continue; }
+    if (depth !== 0) { i++; continue; }
+    if (c === '\\') {
+      // Check for LaTeX inequality commands (both full and short forms)
+      const rest = s.slice(i);
+      const m = rest.match(/^\\(leq?|geq?|neq|ne|le|ge)(?![a-zA-Z])/);
+      if (m) {
+        const cmd = m[1];
+        const op = (cmd === 'le' || cmd === 'leq') ? '<='
+                 : (cmd === 'ge' || cmd === 'geq') ? '>='
+                 : '!=';
+        return { idx: i, len: m[0].length, op };
+      }
+      // Skip other LaTeX commands
+      i++;
+      while (i < s.length && /[a-zA-Z]/.test(s[i])) i++;
+      continue;
+    }
+    if (c === '=') return { idx: i, len: 1, op: '=' };
+    if (c === '<') return { idx: i, len: 1, op: '<' };
+    if (c === '>') return { idx: i, len: 1, op: '>' };
+    i++;
+  }
+  return null;
 }
 
 // ── Tokenizer ─────────────────────────────────────────────────────────────────
@@ -127,6 +193,25 @@ class Parser {
 
   parseExpr() { return this.parseSum(); }
 
+  /** After parsing a variable base name, consume an optional subscript (_x, _{...}). */
+  tryParseSubscript(base) {
+    if (this.peek().type !== TK.UNDERSCORE) return base;
+    this.next(); // consume _
+    if (this.peek().type === TK.LBRACE) {
+      this.next(); // consume {
+      let sub = '';
+      while (this.peek().type !== TK.RBRACE && this.peek().type !== TK.EOF) {
+        const tok = this.next();
+        sub += (tok.val !== undefined ? tok.val : '');
+      }
+      if (this.peek().type === TK.RBRACE) this.next(); // consume }
+      return base + '_' + sub;
+    } else if (this.peek().type === TK.IDENT || this.peek().type === TK.NUM) {
+      return base + '_' + this.next().val;
+    }
+    return base; // lone _ with nothing after — ignore
+  }
+
   parseSum() {
     let left = this.parseProduct();
     for (;;) {
@@ -217,9 +302,9 @@ class Parser {
     // Identifier (single letter variable or constant)
     if (t.type === TK.IDENT) {
       this.next();
-      const v = t.val;
-      if (v === 'e') return { type: 'number', value: Math.E };
-      return { type: 'variable', name: v };
+      const name = this.tryParseSubscript(t.val);
+      if (name === 'e') return { type: 'number', value: Math.E };
+      return { type: 'variable', name };
     }
 
     throw new CompileError(`Unexpected token: ${t.type} (${t.val || ''})`);
@@ -307,16 +392,18 @@ class Parser {
       }
       case '\\infty':  return { type: 'number', value: 1e30 };
 
-      // Greek letters → variables
-      case '\\alpha':  return { type: 'variable', name: 'alpha' };
-      case '\\beta':   return { type: 'variable', name: 'beta' };
-      case '\\gamma':  return { type: 'variable', name: 'gamma' };
-      case '\\delta':  return { type: 'variable', name: 'delta' };
-      case '\\theta':  return { type: 'variable', name: 'theta' };
-      case '\\lambda': return { type: 'variable', name: 'lambda' };
-      case '\\mu':     return { type: 'variable', name: 'mu' };
-      case '\\sigma':  return { type: 'variable', name: 'sigma' };
-      case '\\omega':  return { type: 'variable', name: 'omega' };
+      // Greek letters → variables (subscript allowed: \alpha_{1} → 'alpha_1')
+      case '\\alpha':   return { type: 'variable', name: this.tryParseSubscript('alpha') };
+      case '\\beta':    return { type: 'variable', name: this.tryParseSubscript('beta') };
+      case '\\gamma':   return { type: 'variable', name: this.tryParseSubscript('gamma') };
+      case '\\delta':   return { type: 'variable', name: this.tryParseSubscript('delta') };
+      case '\\epsilon': return { type: 'variable', name: this.tryParseSubscript('epsilon') };
+      case '\\theta':   return { type: 'variable', name: this.tryParseSubscript('theta') };
+      case '\\lambda':  return { type: 'variable', name: this.tryParseSubscript('lambda') };
+      case '\\mu':      return { type: 'variable', name: this.tryParseSubscript('mu') };
+      case '\\sigma':   return { type: 'variable', name: this.tryParseSubscript('sigma') };
+      case '\\omega':   return { type: 'variable', name: this.tryParseSubscript('omega') };
+      case '\\hbar':    return { type: 'variable', name: this.tryParseSubscript('hbar') };
 
       default:
         throw new CompileError(`Unknown command: ${cmd}`);
@@ -763,7 +850,19 @@ function compileGraphExpressions(expressions) {
   const parsed = expressions.map(e => {
     if (!e.enabled) return { kind: 'disabled', exprId: e.id };
     const p = parseExpression(e.latex);
-    if (p.error) return { kind: 'error', error: p.error, exprId: e.id };
+    if (p.error) {
+      // Bare expressions with no x/y are valid constants evaluated elsewhere — don't flag as errors
+      if (p.error === 'Expression must contain =') {
+        try {
+          const ast = parseLatexToAst(e.latex.trim());
+          const vars = collectVariables(ast);
+          if (!vars.has('x') && !vars.has('y')) {
+            return { kind: 'disabled', exprId: e.id };
+          }
+        } catch (_) {}
+      }
+      return { kind: 'error', error: p.error, exprId: e.id };
+    }
     const classified = classifyExpression(p);
     classified.exprId = e.id;
     return classified;
@@ -878,6 +977,153 @@ function buildImplicitJsEvaluator(implicitExpr, analysis) {
   }
 }
 
+
+// ── Calculator expression evaluation ────────────────────────────────────────
+
+/**
+ * Evaluate all expressions in a calculator box.
+ * Returns Map<exprId, { value, boolValue, error }>.
+ *
+ * Key differences from graph mode:
+ * - x and y are treated as regular user-definable variables
+ * - Bare expressions (no operator) are evaluated as anonymous values
+ * - Disabled expressions that are definitions still contribute their values to
+ *   later enabled expressions (they act as hidden constants)
+ * - Inequalities (< > <= >= !=) produce { boolValue: true|false }
+ * - Equalities where LHS is not a single identifier produce
+ *   { boolValue: true|false } using epsilon=1e-9 for floating-point tolerance
+ */
+function evaluateCalcExpressions(expressions, { usePhysicsConstants = false } = {}) {
+  const results  = new Map();   // exprId → { value } | { boolValue } | { error }
+  const allValues = new Map();  // variable name → number (includes disabled defs)
+
+  // Pre-populate with physics constants so user expressions can reference them.
+  // User definitions evaluated in Step 2 take priority and will overwrite any
+  // physics constant whose name the user explicitly redefines.
+  if (usePhysicsConstants) {
+    for (const pc of PHYSICS_CONSTANTS) allValues.set(pc.varName, pc.value);
+  }
+
+  // Track which names have been resolved from *user* definitions (not just
+  // pre-populated from physics constants), so Step 2 can override a physics
+  // constant when the user explicitly defines a variable with the same name.
+  const userResolved = new Set();
+
+  // ── Step 1: Collect all definitions (enabled AND disabled) ──────────────────
+  // First definition for a name wins; subsequent redefinitions are ignored for
+  // value resolution (they'll be treated as equations when enabled).
+  const allDefs = new Map(); // parsed variable name → { rhsStr, exprId, enabled }
+  for (const e of expressions) {
+    const trimmed = e.latex.trim();
+    if (!trimmed) continue;
+    const op = findCalcOperatorAtDepth0(trimmed);
+    if (!op || op.op !== '=') continue;
+    const lhs = trimmed.slice(0, op.idx).trim();
+    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
+    try {
+      const lhsAst = parseLatexToAst(lhs);
+      if (lhsAst.type !== 'variable') continue;
+      const varName = lhsAst.name; // normalized: 'x_1' for both 'x_1' and 'x_{1}'
+      if (!allDefs.has(varName)) {
+        allDefs.set(varName, { rhsStr: trimmed.slice(op.idx + 1).trim(), exprId: e.id, enabled: e.enabled });
+      }
+    } catch (_) { continue; }
+  }
+
+  // ── Step 2: Evaluate definitions in dependency order ────────────────────────
+  // Iterative resolution: each pass evaluates definitions whose dependencies are
+  // now known. Stops when no new values are added or max iterations reached.
+  const evalErrors = new Map(); // name → last error message
+  const maxIter = allDefs.size + 1;
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    for (const [name, def] of allDefs) {
+      if (userResolved.has(name)) continue; // already resolved from user definition
+      try {
+        const rhs = parseLatexToAst(def.rhsStr);
+        const val = evaluateAst(rhs, allValues);
+        allValues.set(name, val); // overrides any pre-populated physics constant
+        userResolved.add(name);
+        changed = true;
+        evalErrors.delete(name);
+      } catch (err) {
+        evalErrors.set(name, err.message);
+      }
+    }
+    if (!changed) break;
+  }
+
+  // ── Step 3: Evaluate all expressions (enabled and disabled) and record results
+  for (const e of expressions) {
+    const trimmed = e.latex.trim();
+    if (!trimmed) continue;
+
+    const op = findCalcOperatorAtDepth0(trimmed);
+
+    if (!op) {
+      // ── Bare expression: evaluate to a number ───────────────────────────────
+      try {
+        const ast = parseLatexToAst(trimmed);
+        const val = evaluateAst(ast, allValues);
+        if (isFinite(val)) results.set(e.id, { value: val });
+        else results.set(e.id, { error: 'Result is not finite' });
+      } catch (err) {
+        results.set(e.id, { error: err.message });
+      }
+
+    } else if (op.op === '=') {
+      const lhsStr = trimmed.slice(0, op.idx).trim();
+      const rhsStr = trimmed.slice(op.idx + 1).trim();
+
+      const lhsVarName = (() => {
+        if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhsStr)) return null;
+        try { const a = parseLatexToAst(lhsStr); return a.type === 'variable' ? a.name : null; } catch (_) { return null; }
+      })();
+      const isDefiningExpr = lhsVarName !== null && allDefs.has(lhsVarName) && allDefs.get(lhsVarName).exprId === e.id;
+      if (isDefiningExpr) {
+        // ── Definition (name = expr): show the computed value ────────────────
+        if (allValues.has(lhsVarName)) {
+          results.set(e.id, { value: allValues.get(lhsVarName) });
+        } else {
+          const errMsg = evalErrors.get(lhsVarName) || `Could not evaluate '${lhsStr}'`;
+          results.set(e.id, { error: errMsg });
+        }
+      } else {
+        // ── Equation (non-name lhs = rhs): evaluate both sides and compare ───
+        try {
+          const lhsVal = evaluateAst(parseLatexToAst(lhsStr), allValues);
+          const rhsVal = evaluateAst(parseLatexToAst(rhsStr), allValues);
+          results.set(e.id, { boolValue: Math.abs(lhsVal - rhsVal) < 1e-9 });
+        } catch (err) {
+          results.set(e.id, { error: err.message });
+        }
+      }
+
+    } else {
+      // ── Inequality: evaluate both sides and compare ──────────────────────
+      try {
+        const lhsStr = trimmed.slice(0, op.idx).trim();
+        const rhsStr = trimmed.slice(op.idx + op.len).trim();
+        const lhsVal = evaluateAst(parseLatexToAst(lhsStr), allValues);
+        const rhsVal = evaluateAst(parseLatexToAst(rhsStr), allValues);
+        let boolValue;
+        switch (op.op) {
+          case '<':  boolValue = lhsVal < rhsVal; break;
+          case '>':  boolValue = lhsVal > rhsVal; break;
+          case '<=': boolValue = lhsVal <= rhsVal; break;
+          case '>=': boolValue = lhsVal >= rhsVal; break;
+          case '!=': boolValue = Math.abs(lhsVal - rhsVal) > 1e-9; break;
+          default:   boolValue = false;
+        }
+        results.set(e.id, { boolValue });
+      } catch (err) {
+        results.set(e.id, { error: err.message });
+      }
+    }
+  }
+
+  return results;
+}
 
 // ── GraphRenderer ────────────────────────────────────────────────────────────
 //

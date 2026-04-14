@@ -46,6 +46,13 @@ let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that ro
 let graphCommitTimer = null;
 let draftSaveTimer = null;
 
+// ── Calc box state ────────────────────────────────────────────────────────────
+let calcExprNextId = 1;
+let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
+let calcUpdateFnsMap = new Map();   // boxId → Map<exprId, (resultMap) => void>
+let calcAddExprFns = new Map();     // boxId → (afterExprId?: string) => void
+let calcPendingUpdate = new Set();  // boxIds with a pending rAF update
+
 const GRAPH_RENDER_DEBOUNCE_MS = 300; // debounce delay (ms) between typing in a graph expression and re-rendering
 const PREVIEW_DEBOUNCE_MS = 400;      // debounce delay (ms) between editing a box and re-rendering the preview
 const DRAFT_SAVE_DEBOUNCE_MS = 1000;  // debounce delay (ms) for auto-saving the draft to localStorage
@@ -65,6 +72,12 @@ function formatConstantValue(v) {
   if (Number.isInteger(v) && Math.abs(v) < 1e15) return '= ' + v;
   const s = parseFloat(v.toPrecision(6)).toString();
   return '≈ ' + s;
+}
+
+/** Build a tooltip string listing all available physics constants. */
+function buildPhysicsTooltip() {
+  const lines = PHYSICS_CONSTANTS.map(pc => `${pc.label}: ${pc.description}`);
+  return 'Toggle physics constants (off by default)\n\n' + lines.join('\n');
 }
 
 let graphRenderer = null; // lazily created GraphRenderer
@@ -272,6 +285,90 @@ function makeGraphBox(id) {
   };
 }
 
+function makeCalcBox(id) {
+  return {
+    id: id || genId(),
+    type: 'calc',
+    content: '',
+    showResultsDefs: true,
+    showResultsBare: true,
+    physicsConstants: false,
+    expressions: [
+      { id: 'ce' + (calcExprNextId++), latex: '', enabled: true },
+    ],
+  };
+}
+
+// ── Calc box helpers ──────────────────────────────────────────────────────────
+
+function formatCalcResult(result) {
+  if (!result) return null;
+  if (result.error) return null;
+  if (result.boolValue !== undefined) return result.boolValue ? 'true' : 'false';
+  if (result.value !== undefined) return formatConstantValue(result.value);
+  return null;
+}
+
+// Returns 'def' (assignment with identifier LHS), 'bare' (no operator), or 'equation' (complex LHS or inequality)
+function classifyCalcExpr(latex) {
+  const trimmed = (latex || '').trim();
+  if (!trimmed) return 'bare';
+  const op = findCalcOperatorAtDepth0(trimmed);
+  if (!op) return 'bare';
+  if (op.op !== '=') return 'equation';
+  const lhs = trimmed.slice(0, op.idx).trim();
+  return /^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|theta|lambda|mu|sigma|omega))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs) ? 'def' : 'equation';
+}
+
+// Returns true if the latex string is a plain numeric literal (e.g. "5", "3.14", "-2")
+function isNumericLiteralLatex(latex) {
+  return /^-?\d+(\.\d+)?$/.test((latex || '').trim());
+}
+
+function scheduleCalcUpdate(boxId) {
+  if (calcPendingUpdate.has(boxId)) return;
+  calcPendingUpdate.add(boxId);
+  requestAnimationFrame(() => {
+    calcPendingUpdate.delete(boxId);
+    updateCalcResults(boxId);
+  });
+}
+
+function updateCalcResults(boxId) {
+  const box = boxes.find(b => b.id === boxId);
+  if (!box || box.type !== 'calc') return;
+  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants });
+  const updateFns = calcUpdateFnsMap.get(boxId);
+  if (!updateFns) return;
+  for (const fn of updateFns.values()) fn(results);
+}
+
+function commitCalcBox(boxId) {
+  const idx = boxes.findIndex(b => b.id === boxId);
+  if (idx === -1) return;
+  const fieldMap = calcMqFields.get(boxId);
+  if (!fieldMap) return;
+  const rows = boxList.querySelectorAll(`[data-id="${boxId}"] .calc-expr-row`);
+  const expressions = [];
+  for (const row of rows) {
+    const exprId = row.dataset.exprId;
+    const toggle = row.querySelector('.expr-toggle');
+    const enabled = toggle ? toggle.getAttribute('aria-pressed') === 'true' : true;
+    const field = fieldMap.get(exprId);
+    const latex = field ? field.latex() : '';
+    expressions.push({ id: exprId, latex, enabled });
+  }
+  boxes[idx].expressions = expressions;
+  syncToText();
+}
+
+function cleanupCalcBox(boxId) {
+  calcMqFields.delete(boxId);
+  calcUpdateFnsMap.delete(boxId);
+  calcAddExprFns.delete(boxId);
+  calcPendingUpdate.delete(boxId);
+}
+
 // ── Serialization ─────────────────────────────────────────────────────────────
 function serializeToLatex(boxArray) {
   return boxArray.map(b => {
@@ -281,6 +378,15 @@ function serializeToLatex(boxArray) {
     else if (b.type === 'h2') serialized = `\\subsection{${b.content}}`;
     else if (b.type === 'h3') serialized = `\\subsubsection{${b.content}}`;
     else if (b.type === 'pagebreak') serialized = '\\newpage';
+    else if (b.type === 'calc') {
+      const exprLines = (b.expressions || []).map(e =>
+        `% ${e.id} ${e.enabled ? 'on' : 'off'} ${e.latex}`
+      );
+      const defsFlag    = b.showResultsDefs !== false ? '{showdefs}' : '';
+      const bareFlag    = b.showResultsBare !== false ? '{showbare}' : '';
+      const physicsFlag = b.physicsConstants ? '{physics}' : '';
+      serialized = `\\begin{calc}${defsFlag}${bareFlag}${physicsFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+    }
     else if (b.type === 'graph') {
       const exprLines = (b.expressions || []).map(e =>
         `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.sliderMin != null ? e.sliderMin : 0} ${e.sliderMax != null ? e.sliderMax : 10} ${e.latex}`
@@ -377,6 +483,38 @@ function parseFromLatex(src) {
         i++;
       }
       result.push(applyPending({ id: genId(), type: 'text', content: textLines.join('\n') }));
+      continue;
+    }
+
+    // Calc block: \begin{calc} ... \end{calc}
+    if (line.startsWith('\\begin{calc}')) {
+      // Support legacy {showresults} (both on) and new separate {showdefs}/{showbare} flags
+      const legacyAll = line.includes('{showresults}');
+      const showResultsDefs = legacyAll || line.includes('{showdefs}');
+      const showResultsBare = legacyAll || line.includes('{showbare}');
+      const physicsConstants = line.includes('{physics}');
+      const expressions = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('\\end{calc}')) {
+        const el = lines[i].trim();
+        if (el.startsWith('% ')) {
+          // format: "<id> <on|off> <latex...>"
+          const rest = el.slice(2);
+          const parts = rest.split(' ');
+          if (parts.length >= 2) {
+            const exprId  = parts[0];
+            const enabled = parts[1] === 'on';
+            const latex   = parts.slice(2).join(' ');
+            expressions.push({ id: exprId, latex, enabled });
+            // Keep calcExprNextId above all parsed ids
+            const m = exprId.match(/^ce(\d+)$/);
+            if (m) calcExprNextId = Math.max(calcExprNextId, parseInt(m[1]) + 1);
+          }
+        }
+        i++;
+      }
+      i++; // consume \end{calc}
+      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsConstants, expressions }));
       continue;
     }
 
@@ -495,6 +633,12 @@ function createBoxElement(box) {
   });
   div.appendChild(dragHandle);
 
+  // Double-click → scroll the preview to this box and blink it
+  div.addEventListener('dblclick', e => {
+    if (!isPreviewOpen) return;
+    scrollAndHighlightPreview(box.id);
+  });
+
   // Click on box padding → focus the field
   div.addEventListener('click', e => {
     if (e.target.closest('.delete-btn') || e.target.closest('.box-drag-handle')) return;
@@ -504,6 +648,10 @@ function createBoxElement(box) {
       if (field) field.focus();
     } else if (box.type === 'pagebreak' || box.type === 'graph') {
       setFocused(box.id, div);
+    } else if (box.type === 'calc') {
+      // Focus first expression field
+      const firstField = calcMqFields.get(box.id)?.values().next().value;
+      if (firstField) firstField.focus();
     } else {
       const ta = div.querySelector('.text-input');
       if (ta) ta.focus();
@@ -561,7 +709,7 @@ function createBoxElement(box) {
 
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
-      autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec '+greekLetters,
+      autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec hbar '+greekLetters,
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -896,6 +1044,339 @@ function createBoxElement(box) {
     }
 
     div.appendChild(deleteBtn);
+  } else if (box.type === 'calc') {
+    div.classList.add('box-calc');
+
+    // ── Toolbar ──────────────────────────────────────────────────────────────
+    const toolbar = document.createElement('div');
+    toolbar.className = 'calc-toolbar';
+
+    const badge = document.createElement('span');
+    badge.className = 'box-type-label';
+    badge.textContent = 'CALC';
+    toolbar.appendChild(badge);
+
+    const makeResultsToggle = (label, title, getFlag, setFlag) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'calc-show-results-btn' + (getFlag() ? ' active' : '');
+      btn.title = title;
+      btn.textContent = label;
+      btn.addEventListener('mousedown', e => e.preventDefault());
+      btn.addEventListener('click', () => {
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (idx === -1) return;
+        setFlag(idx, !getFlag());
+        btn.classList.toggle('active', getFlag());
+        syncToText();
+        scheduleCalcUpdate(box.id);
+      });
+      return btn;
+    };
+    toolbar.appendChild(makeResultsToggle(
+      'Assignments',
+      'Show/hide results for assignment expressions (e.g. y = x²)',
+      () => boxes.find(b => b.id === box.id)?.showResultsDefs !== false,
+      (idx, val) => { boxes[idx].showResultsDefs = val; }
+    ));
+    toolbar.appendChild(makeResultsToggle(
+      'Bare',
+      'Show/hide results for bare expressions (e.g. √2)',
+      () => boxes.find(b => b.id === box.id)?.showResultsBare !== false,
+      (idx, val) => { boxes[idx].showResultsBare = val; }
+    ));
+
+    // Physics constants toggle
+    const physicsBtn = document.createElement('button');
+    physicsBtn.type = 'button';
+    physicsBtn.className = 'calc-show-results-btn' + (box.physicsConstants ? ' active' : '');
+    physicsBtn.title = buildPhysicsTooltip();
+    physicsBtn.textContent = 'Physics';
+    physicsBtn.addEventListener('mousedown', e => e.preventDefault());
+    physicsBtn.addEventListener('click', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      boxes[idx].physicsConstants = !boxes[idx].physicsConstants;
+      physicsBtn.classList.toggle('active', boxes[idx].physicsConstants);
+      syncToText();
+      scheduleCalcUpdate(box.id);
+    });
+    toolbar.appendChild(physicsBtn);
+
+    div.appendChild(toolbar);
+
+    // ── Expression list ───────────────────────────────────────────────────────
+    const exprList = document.createElement('div');
+    exprList.className = 'calc-expr-list';
+
+    const calcFieldMap = new Map();   // exprId → MQField
+    const calcUpdateFns = new Map();  // exprId → (resultMap) => void
+    calcMqFields.set(box.id, calcFieldMap);
+    calcUpdateFnsMap.set(box.id, calcUpdateFns);
+
+    // ── Helper: create one expression row ────────────────────────────────────
+    function createCalcExprRow(expr) {
+      const row = document.createElement('div');
+      row.className = 'calc-expr-row' + (expr.enabled ? '' : ' calc-expr-disabled');
+      row.dataset.exprId = expr.id;
+
+      // Inner row: toggle + MQ field + result + delete button
+      const mainRow = document.createElement('div');
+      mainRow.className = 'calc-expr-main';
+      row.appendChild(mainRow);
+
+      // Pill toggle (enable/disable)
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'expr-toggle';
+      toggle.setAttribute('aria-pressed', expr.enabled ? 'true' : 'false');
+      toggle.title = expr.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+      toggle.addEventListener('click', () => {
+        const isEnabled = toggle.getAttribute('aria-pressed') !== 'true';
+        toggle.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+        toggle.title = isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+        row.classList.toggle('calc-expr-disabled', !isEnabled);
+        commitCalcBox(box.id);
+        scheduleCalcUpdate(box.id);
+      });
+      mainRow.appendChild(toggle);
+
+      // MathQuill field
+      const mqSpan = document.createElement('span');
+      mqSpan.className = 'calc-expr-mq';
+      mainRow.appendChild(mqSpan);
+
+      // Result display
+      const resultSpan = document.createElement('span');
+      resultSpan.className = 'calc-expr-result';
+      resultSpan.style.display = 'none';
+      mainRow.appendChild(resultSpan);
+
+      // Delete button
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'calc-expr-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete expression';
+      delBtn.addEventListener('mousedown', e => e.preventDefault());
+      delBtn.addEventListener('click', () => {
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (idx === -1) return;
+        const exprIdx = boxes[idx].expressions.findIndex(e => e.id === expr.id);
+        if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+        calcFieldMap.delete(expr.id);
+        calcUpdateFns.delete(expr.id);
+        row.remove();
+        commitCalcBox(box.id);
+        scheduleCalcUpdate(box.id);
+      });
+      mainRow.appendChild(delBtn);
+
+      // Error line (shown below the main row when this expression has an error)
+      const errorLine = document.createElement('div');
+      errorLine.className = 'calc-expr-error';
+      errorLine.style.display = 'none';
+      row.appendChild(errorLine);
+
+      // Click-to-copy on result span
+      resultSpan.title = 'Click to copy';
+      resultSpan.style.cursor = 'pointer';
+      resultSpan.addEventListener('click', () => {
+        const val = resultSpan.textContent;
+        if (!val) return;
+        // Strip leading "= " or "≈ " prefix so only the number is copied
+        const num = val.replace(/^[=≈]\s*/, '');
+        navigator.clipboard.writeText(num).then(() => {
+          const prev = resultSpan.textContent;
+          const prevColor = resultSpan.style.color;
+          resultSpan.textContent = 'copied!';
+          resultSpan.style.color = '#4ec9b0';
+          setTimeout(() => {
+            resultSpan.textContent = prev;
+            resultSpan.style.color = prevColor;
+          }, 900);
+        });
+      });
+
+      // Result update function for this row — always shows in-box; toggles only affect preview
+      const updateResult = (resultMap) => {
+        const result = resultMap ? resultMap.get(expr.id) : null;
+        const currentExpr = boxes.find(b => b.id === box.id)?.expressions?.find(e => e.id === expr.id);
+        const currentLatex = currentExpr?.latex || '';
+        // For numeric-literal defs (x = 5), the result is redundant even in the box
+        const kind = classifyCalcExpr(currentLatex);
+        let suppress = false;
+        if (kind === 'def') {
+          const op = findCalcOperatorAtDepth0(currentLatex.trim());
+          const rhs = op ? currentLatex.trim().slice(op.idx + op.len).trim() : '';
+          // Only suppress for actual definitions (value result), not equality checks (boolValue)
+          suppress = isNumericLiteralLatex(rhs) && !(result && result.boolValue !== undefined);
+        }
+        const formatted = result ? formatCalcResult(result) : null;
+        if (result && result.error) {
+          errorLine.textContent = result.error;
+          errorLine.style.display = '';
+          resultSpan.style.display = 'none';
+          row.classList.add('has-error');
+        } else if (formatted !== null && !suppress) {
+          errorLine.style.display = 'none';
+          resultSpan.textContent = formatted;
+          resultSpan.style.display = '';
+          if (result.boolValue === true)  resultSpan.style.color = '#4ec9b0';
+          else if (result.boolValue === false) resultSpan.style.color = '#f44747';
+          else resultSpan.style.color = '';
+          row.classList.remove('has-error');
+        } else {
+          errorLine.style.display = 'none';
+          resultSpan.style.display = 'none';
+          row.classList.remove('has-error');
+        }
+      };
+      calcUpdateFns.set(expr.id, updateResult);
+
+      // MathQuill setup
+      //Claude: please do not touch the greek letters. There are some I dont want (like psi) because the interefere with others (you can spell epsilon without psi for example)
+      const greekLetters = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi omega';
+      const field = MQ.MathField(mqSpan, {
+        spaceBehavesLikeTab: false,
+        autoCommands: 'sqrt sum int prod infty partial leq geq neq ' + greekLetters,
+        autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp',
+        handlers: {
+          edit: () => {
+            commitCalcBox(box.id);
+            scheduleCalcUpdate(box.id);
+          },
+          enter: () => {
+            const addAfter = calcAddExprFns.get(box.id);
+            if (addAfter) addAfter(expr.id);
+          },
+          moveOutOf: (dir) => {
+            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
+            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+            if (dir === 1 && idx < rows.length - 1) {
+              calcFieldMap.get(rows[idx + 1].dataset.exprId)?.focus();
+            } else if (dir === -1 && idx > 0) {
+              calcFieldMap.get(rows[idx - 1].dataset.exprId)?.focus();
+            } else {
+              // At edge of calc box — navigate to adjacent box
+              const boxIdx = boxes.findIndex(b => b.id === box.id);
+              if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+              else if (dir === -1 && boxIdx > 0)          focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+            }
+          },
+          upOutOf: () => {
+            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
+            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+            if (idx > 0) {
+              calcFieldMap.get(rows[idx - 1].dataset.exprId)?.focus();
+            } else {
+              const boxIdx = boxes.findIndex(b => b.id === box.id);
+              if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+            }
+          },
+          downOutOf: () => {
+            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
+            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
+            if (idx < rows.length - 1) {
+              calcFieldMap.get(rows[idx + 1].dataset.exprId)?.focus();
+            } else {
+              const boxIdx = boxes.findIndex(b => b.id === box.id);
+              if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+            }
+          },
+        },
+      });
+      if (expr.latex) field.latex(expr.latex);
+      calcFieldMap.set(expr.id, field);
+
+      // Backspace on empty field → delete the expression row
+      mqSpan.addEventListener('keydown', e => {
+        if (e.key !== 'Backspace' || field.latex() !== '') return;
+        e.preventDefault();
+        const rows = [...exprList.querySelectorAll('.calc-expr-row')];
+        const rowIdx = rows.findIndex(r => r.dataset.exprId === expr.id);
+        // Focus the previous row (or next if this is the first), unless it's the only row
+        if (rows.length > 1) {
+          const focusTarget = rowIdx > 0 ? rows[rowIdx - 1].dataset.exprId : rows[rowIdx + 1].dataset.exprId;
+          calcFieldMap.get(focusTarget)?.focus();
+        }
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (idx !== -1) {
+          const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+          if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+        }
+        calcFieldMap.delete(expr.id);
+        calcUpdateFns.delete(expr.id);
+        row.remove();
+        commitCalcBox(box.id);
+        scheduleCalcUpdate(box.id);
+      });
+
+      mqSpan.addEventListener('focusin',  () => setFocused(box.id, div));
+      mqSpan.addEventListener('focusout', (e) => {
+        if (!div.contains(e.relatedTarget)) clearFocused(box.id, div);
+      });
+
+      return row;
+    }
+
+    // Populate expression list
+    for (const expr of (box.expressions || [])) {
+      exprList.appendChild(createCalcExprRow(expr));
+    }
+    div.appendChild(exprList);
+
+    // ── Add expression button ─────────────────────────────────────────────────
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'calc-add-btn';
+    addBtn.textContent = '+ Expression';
+    addBtn.addEventListener('mousedown', e => e.preventDefault());
+    addBtn.addEventListener('click', () => {
+      const addAfter = calcAddExprFns.get(box.id);
+      if (addAfter) addAfter(null); // null = append at end
+    });
+    div.appendChild(addBtn);
+
+    // ── Register the "add expression after" function ──────────────────────────
+    const addExprAfter = (afterExprId) => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      const newExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
+      if (afterExprId) {
+        const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+        if (exprIdx !== -1) {
+          boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+        } else {
+          boxes[idx].expressions.push(newExpr);
+        }
+        // Insert into DOM after the correct row
+        const afterRow = exprList.querySelector(`.calc-expr-row[data-expr-id="${afterExprId}"]`);
+        const newRow = createCalcExprRow(newExpr);
+        if (afterRow) {
+          exprList.insertBefore(newRow, afterRow.nextSibling);
+        } else {
+          exprList.appendChild(newRow);
+        }
+      } else {
+        boxes[idx].expressions.push(newExpr);
+        exprList.appendChild(createCalcExprRow(newExpr));
+      }
+      // Reflow + focus
+      const newField = calcFieldMap.get(newExpr.id);
+      if (newField) {
+        newField.reflow();
+        setTimeout(() => newField.focus(), 0);
+      }
+      commitCalcBox(box.id);
+      scheduleCalcUpdate(box.id);
+    };
+    calcAddExprFns.set(box.id, addExprAfter);
+
+    div.appendChild(deleteBtn);
+
+    // Initial result update after elements are in the DOM
+    requestAnimationFrame(() => scheduleCalcUpdate(box.id));
   }
 
   return div;
@@ -906,6 +1387,11 @@ function reflowBox(box){
   if(mqFields.get(box.id) != undefined){
     const field = mqFields.get(box.id) ;
     field.reflow();
+  }
+  // Reflow all MathQuill fields in a calc box
+  const calcMap = calcMqFields.get(box.id);
+  if (calcMap) {
+    for (const field of calcMap.values()) field.reflow();
   }
 }
 
@@ -955,6 +1441,9 @@ function renderBoxes() {
   for (const [id] of mqFields) {
     if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
   }
+  for (const [id] of calcMqFields) {
+    if (!currentIds.has(id)) cleanupCalcBox(id);
+  }
 
   boxList.innerHTML = '';
   for (const box of boxes) {
@@ -964,12 +1453,14 @@ function renderBoxes() {
     reflowBox(box);
   }
 
-  
+
 }
 
 // ── Insert / delete ───────────────────────────────────────────────────────────
 function insertBoxAfter(afterId, type = 'math') {
-  const newBox = type === 'graph' ? makeGraphBox() : { id: genId(), type, content: '' };
+  const newBox = type === 'graph' ? makeGraphBox()
+               : type === 'calc'  ? makeCalcBox()
+               : { id: genId(), type, content: '' };
   const idx = boxes.findIndex(b => b.id === afterId);
   if (idx === -1) {
     boxes.push(newBox);
@@ -987,8 +1478,8 @@ function appendBox(type = 'math') {
     if (idx !== -1) {
       // Check if focused box is empty
       const focused = boxes[idx];
-      // Pagebreaks and graphs have no editable content — always insert after, never convert
-      if (focused.type === 'pagebreak' || focused.type === 'graph') {
+      // Pagebreaks, graphs, and calc boxes have no simple editable content — always insert after, never convert
+      if (focused.type === 'pagebreak' || focused.type === 'graph' || focused.type === 'calc') {
         insertBoxAfter(focusedBoxId, type);
         return;
       }
@@ -1011,7 +1502,9 @@ function appendBox(type = 'math') {
         boxResizers.delete(focusedBoxId);
         const oldEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
         if (oldEl) oldEl.remove();
-        boxes[idx] = type === 'graph' ? makeGraphBox(focusedBoxId) : { id: focusedBoxId, type, content: '' };
+        boxes[idx] = type === 'graph' ? makeGraphBox(focusedBoxId)
+                   : type === 'calc'  ? makeCalcBox(focusedBoxId)
+                   : { id: focusedBoxId, type, content: '' };
         rebuildBoxList();
         syncToText();
         focusBox(focusedBoxId);
@@ -1020,7 +1513,9 @@ function appendBox(type = 'math') {
     }
     insertBoxAfter(focusedBoxId, type);
   } else {
-    const newBox = type === 'graph' ? makeGraphBox() : { id: genId(), type, content: '' };
+    const newBox = type === 'graph' ? makeGraphBox()
+               : type === 'calc'  ? makeCalcBox()
+               : { id: genId(), type, content: '' };
     boxes.push(newBox);
     rebuildBoxList();
     syncToText();
@@ -1038,6 +1533,7 @@ function deleteBox(id) {
 
   mqFields.delete(id);
   boxResizers.delete(id);
+  cleanupCalcBox(id);
   boxes.splice(idx, 1);
   rebuildBoxList();
   syncToText();
@@ -1070,6 +1566,7 @@ function rebuildBoxList() {
       boxList.removeChild(el);
       mqFields.delete(id);
       boxResizers.delete(id);
+      cleanupCalcBox(id);
       existing.delete(id);
     }
   }
@@ -1096,6 +1593,12 @@ function focusBox(id) {
     setTimeout(() => field.focus(), 0);
     return;
   }
+  // Calc box: focus the first expression field
+  const calcMap = calcMqFields.get(id);
+  if (calcMap) {
+    const firstField = calcMap.values().next().value;
+    if (firstField) { setTimeout(() => firstField.focus(), 0); return; }
+  }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
   if (el) setTimeout(() => el.focus(), 0);
 }
@@ -1106,6 +1609,14 @@ function focusBoxAtEdge(id, edge) {
   const field = mqFields.get(id);
   if (field) {
     setTimeout(() => field.focus(), 0);
+    return;
+  }
+  // Calc box: focus first or last expression field
+  const calcMap = calcMqFields.get(id);
+  if (calcMap && calcMap.size > 0) {
+    const fields = [...calcMap.values()];
+    const target = edge === 'start' ? fields[0] : fields[fields.length - 1];
+    setTimeout(() => target.focus(), 0);
     return;
   }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
@@ -1220,8 +1731,8 @@ function diffAndApply(newBoxes) {
   const result = newBoxes.map((nb, i) => {
     const existing = boxes[i];
     if (existing && existing.type === nb.type) {
-      if (existing.type === 'graph') {
-        // Preserve id but take all parsed fields (expressions, width, height)
+      if (existing.type === 'graph' || existing.type === 'calc') {
+        // Preserve id but take all parsed fields (expressions, width, height, etc.)
         return { ...nb, id: existing.id };
       }
       // Reuse id, update content and commented state
@@ -1243,6 +1754,7 @@ function diffAndApply(newBoxes) {
     const last = boxList.lastElementChild;
     mqFields.delete(last.dataset.id);
     boxResizers.delete(last.dataset.id);
+    cleanupCalcBox(last.dataset.id);
     boxList.removeChild(last);
   }
 
@@ -1255,16 +1767,26 @@ function diffAndApply(newBoxes) {
       // Sync commented and highlighted state
       existingEl.classList.toggle('commented', !!box.commented);
       existingEl.classList.toggle('box-is-highlighted', !!box.highlighted);
-      // Update content of existing box
-      const field = mqFields.get(box.id);
-      if (field) {
-        if (field.latex() !== box.content) field.latex(box.content);
+
+      if (box.type === 'calc') {
+        // Calc boxes always rebuild their DOM so the expression list stays in sync
+        // with any changes made via the LaTeX source panel.
+        cleanupCalcBox(box.id);
+        const newEl = createBoxElement(box);
+        boxList.replaceChild(newEl, existingEl);
+        reflowBox(box);
       } else {
-        const ta = existingEl.querySelector('.text-input');
-        if (ta && ta.value !== box.content) {
-          ta.value = box.content;
-          ta.style.height = '1px';
-          ta.style.height = ta.scrollHeight + 'px';
+        // Update content of existing box
+        const field = mqFields.get(box.id);
+        if (field) {
+          if (field.latex() !== box.content) field.latex(box.content);
+        } else {
+          const ta = existingEl.querySelector('.text-input');
+          if (ta && ta.value !== box.content) {
+            ta.value = box.content;
+            ta.style.height = '1px';
+            ta.style.height = ta.scrollHeight + 'px';
+          }
         }
       }
     } else {
@@ -1430,7 +1952,8 @@ defaultTextBtn.addEventListener('click', () => setDefaultBoxType('text'));
 // ── Toolbar buttons ───────────────────────────────────────────────────────────
 // Prevent mousedown from stealing focus (which would clear focusedBoxId before click fires)
 const addGraphBtn = document.getElementById('add-graph-btn');
-[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn, addGraphBtn].forEach(btn => {
+const addCalcBtn  = document.getElementById('add-calc-btn');
+[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn, addGraphBtn, addCalcBtn].forEach(btn => {
   btn.addEventListener('mousedown', e => e.preventDefault());
 });
 addMathBtn.addEventListener('click', () => appendBox('math'));
@@ -1440,6 +1963,7 @@ addH2Btn.addEventListener('click', () => appendBox('h2'));
 addH3Btn.addEventListener('click', () => appendBox('h3'));
 addBreakBtn.addEventListener('click', () => appendBox('pagebreak'));
 addGraphBtn.addEventListener('click', () => appendBox('graph'));
+addCalcBtn.addEventListener('click', () => appendBox('calc'));
 
 // ── Font size ─────────────────────────────────────────────────────────────────
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32];
@@ -1468,6 +1992,12 @@ function cutBox(id) {
   if (box.type === 'math') {
     const field = mqFields.get(id);
     if (field) content = field.latex();
+  } else if (box.type === 'calc') {
+    // For calc boxes, commit live state then copy expressions
+    commitCalcBox(id);
+    boxClipboard = { type: 'calc', content: '', expressions: JSON.parse(JSON.stringify(box.expressions || [])), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsConstants: !!box.physicsConstants };
+    deleteBox(id);
+    return;
   } else if (box.type !== 'pagebreak') {
     const ta = boxList.querySelector(`[data-id="${id}"] .text-input`);
     if (ta) content = ta.value;
@@ -1486,17 +2016,32 @@ function pasteBox() {
   if (boxes[idx].type === 'math') {
     const field = mqFields.get(focusedBoxId);
     isEmpty = !field || field.latex() === '';
+  } else if (boxes[idx].type === 'calc' || boxes[idx].type === 'graph' || boxes[idx].type === 'pagebreak') {
+    isEmpty = false; // these box types always insert after rather than replace
   } else {
     const ta = boxList.querySelector(`[data-id="${focusedBoxId}"] .text-input`);
     isEmpty = !ta || ta.value === '';
   }
 
-  const newBox = { id: genId(), type: boxClipboard.type, content: boxClipboard.content };
+  let newBox;
+  if (boxClipboard.type === 'calc') {
+    newBox = makeCalcBox();
+    // Reassign fresh ids to pasted expressions to avoid id collisions
+    newBox.expressions = (boxClipboard.expressions || []).map(e => ({
+      ...e, id: 'ce' + (calcExprNextId++)
+    }));
+    newBox.showResultsDefs = boxClipboard.showResultsDefs !== false;
+    newBox.showResultsBare = boxClipboard.showResultsBare !== false;
+    newBox.physicsConstants = !!boxClipboard.physicsConstants;
+  } else {
+    newBox = { id: genId(), type: boxClipboard.type, content: boxClipboard.content };
+  }
 
   if (isEmpty) {
     // Replace the empty box in-place
     mqFields.delete(focusedBoxId);
     boxResizers.delete(focusedBoxId);
+    cleanupCalcBox(focusedBoxId);
     boxes.splice(idx, 1, newBox);
   } else {
     // Insert a new box below the focused one
@@ -1581,6 +2126,36 @@ function createPreviewElement(box) {
     div.dataset.boxId = box.id;
     return div;
   }
+  if (box.type === 'calc') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'preview-calc-box';
+    wrapper.dataset.boxId = box.id;
+    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants });
+    for (const expr of (box.expressions || [])) {
+      if (!expr.enabled) continue;
+      const latex = (expr.latex || '').trim();
+      if (!latex) continue;
+      const result = results.get(expr.id);
+      const formatted = result ? formatCalcResult(result) : null;
+      const div = document.createElement('div');
+      div.className = 'preview-math';
+      let showResult = false;
+      if (formatted !== null && !result.hasOwnProperty('boolValue')) {
+        const kind = classifyCalcExpr(latex);
+        if (kind === 'def') {
+          const op = findCalcOperatorAtDepth0(latex);
+          const rhs = op ? latex.slice(op.idx + op.len).trim() : '';
+          showResult = !isNumericLiteralLatex(rhs) && box.showResultsDefs !== false;
+        } else if (kind === 'bare') {
+          showResult = box.showResultsBare !== false;
+        }
+        // equations (boolValue) are already excluded above
+      }
+      div.textContent = showResult ? `\\[${latex} \\text{ ${formatted}}\\]` : `\\[${latex}\\]`;
+      wrapper.appendChild(div);
+    }
+    return wrapper;
+  }
   if (box.type === 'graph') {
     const div = document.createElement('div');
     div.dataset.boxId = box.id;
@@ -1637,7 +2212,9 @@ async function updatePreview() {
     // Cache key encodes everything that affects the rendered output.
     // Graph boxes always bypass the cache (snapshot url changes independently).
     const needsCache = box.type !== 'graph' && box.type !== 'pagebreak';
-    const cacheKey = `${box.type}|${box.content}`;
+    const cacheKey = box.type === 'calc'
+      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsConstants ? '1' : '0'}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
+      : `${box.type}|${box.content}`;
     const cached = needsCache ? previewBoxCache.get(box.id) : null;
 
     let innerEl;
@@ -1653,21 +2230,21 @@ async function updatePreview() {
         toTypeset.push(innerEl);
       }
     }
-    innerEls.push(innerEl);
+    innerEls.push([innerEl,box]);
   }
   let cachedMissed = !metricsCache;
 
   //If there are no cached metrics add the divs to the DOM before running mathjax on them so that the metrics can be cached.
   if(cachedMissed){
-    for(let box in boxes){
-      if (boxes[box].highlighted) {
+    for(let innerEl of innerEls){
+      if (innerEl[1].highlighted) {
         const wrap = document.createElement('div');
         wrap.className = 'preview-highlight-box';
-        if (boxes[box].fillColor) wrap.style.background = boxes[box].fillColor;
-        wrap.appendChild(innerEls[box]);
+        if (innerEl[1].fillColor) wrap.style.background = innerEl[1].fillColor;
+        wrap.appendChild(innerEl[0]);
         pageDiv.appendChild(wrap);
       } else {
-        pageDiv.appendChild(innerEls[box]);
+        pageDiv.appendChild(innerEl[0]);
       }
     }
   }
@@ -1700,15 +2277,15 @@ async function updatePreview() {
 
   //If there are cached metrics add the divs after mathjax has rendered to avoid reflowing the entire page
   if(!cachedMissed){
-    for(let box in boxes){
-      if (boxes[box].highlighted) {
+    for(let innerEl of innerEls){
+      if (innerEl[1].highlighted) {
         const wrap = document.createElement('div');
         wrap.className = 'preview-highlight-box';
-        if (boxes[box].fillColor) wrap.style.background = boxes[box].fillColor;
-        wrap.appendChild(innerEls[box]);
+        if (innerEl[1].fillColor) wrap.style.background = innerEl[1].fillColor;
+        wrap.appendChild(innerEl[0]);
         pageDiv.appendChild(wrap);
       } else {
-        pageDiv.appendChild(innerEls[box]);
+        pageDiv.appendChild(innerEl[0]);
       }
     }
   }
@@ -1893,6 +2470,24 @@ previewContent.addEventListener('click', e => {
     target = target.parentElement;
   }
 });
+
+function scrollAndHighlightPreview(boxId) {
+  // Find the element in the preview that corresponds to this box.
+  // It may be wrapped in a .preview-highlight-box, so walk up one level.
+  let el = previewContent.querySelector(`[data-box-id="${boxId}"]`);
+  if (!el) return;
+  const target = el.parentElement?.classList.contains('preview-highlight-box') ? el.parentElement : el;
+  // Scroll target into the center of the preview panel
+  const contentRect = previewContent.getBoundingClientRect();
+  const targetRect  = target.getBoundingClientRect();
+  const offset = targetRect.top - contentRect.top - (contentRect.height / 2) + (targetRect.height / 2);
+  previewContent.scrollBy({ top: offset, behavior: 'smooth' });
+  // Blink animation
+  target.classList.remove('preview-blink');
+  void target.offsetWidth; // force reflow to restart animation
+  target.classList.add('preview-blink');
+  target.addEventListener('animationend', () => target.classList.remove('preview-blink'), { once: true });
+}
 
 function scrollAndHighlightBox(boxId) {
   const el = boxList.querySelector(`[data-id="${boxId}"]`);
@@ -2613,12 +3208,19 @@ function createGraphExprRow(expr) {
   handle.title = 'Drag to reorder';
   row.appendChild(handle);
 
-  // Enable/disable toggle
-  const toggle = document.createElement('input');
-  toggle.type = 'checkbox';
-  toggle.className = 'graph-expr-toggle';
-  toggle.checked = expr.enabled;
-  toggle.addEventListener('change', () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); });
+  // Enable/disable pill toggle
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'expr-toggle graph-expr-toggle';
+  toggle.setAttribute('aria-pressed', expr.enabled ? 'true' : 'false');
+  toggle.title = expr.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+  toggle.addEventListener('click', () => {
+    const isEnabled = toggle.getAttribute('aria-pressed') !== 'true';
+    toggle.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+    toggle.title = isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+    commitGraphEditorToBox(graphModeBoxId);
+    scheduleGraphRender();
+  });
   row.appendChild(toggle);
 
   // Color swatch — clicking opens the color/thickness popup
@@ -2639,20 +3241,25 @@ function createGraphExprRow(expr) {
 
   function updateGraphingControls(latex) {
     let graphing = false;
+    let isGraphable = false;
     let isNumericConst = false;
     let constValue = null;
     let constEvalValue = null;
     if (latex.trim() !== '' && graphModeBoxId) {
       const box = boxes.find(b => b.id === graphModeBoxId);
+      // Force this expression enabled to determine if it's graphable by nature
       const allExprs = (box ? box.expressions || [] : []).map(e =>
-        e.id === expr.id ? { ...e, latex } : e
+        e.id === expr.id ? { ...e, latex, enabled: true } : e
       );
       if (!allExprs.find(e => e.id === expr.id)) {
         allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
       }
       const { renderExprs, analysis } = compileGraphExpressions(allExprs);
-      graphing = renderExprs.some(re => re.exprId === expr.id);
-      if (!graphing) {
+      isGraphable = renderExprs.some(re => re.exprId === expr.id);
+      // graphing = actually rendering right now (respects enabled state)
+      const currentEnabled = toggle.getAttribute('aria-pressed') === 'true';
+      graphing = isGraphable && currentEnabled;
+      if (!isGraphable) {
         const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
         if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
           const constName = nameMatch[1];
@@ -2691,9 +3298,9 @@ function createGraphExprRow(expr) {
         }
       }
     }
-    colorSwatch.style.display = graphing ? '' : 'none';
-    toggle.style.display = graphing ? '' : 'none';
-    if (!graphing) toggle.checked = true;
+    colorSwatch.style.display = isGraphable ? '' : 'none';
+    toggle.style.display = isGraphable ? '' : 'none';
+    if (!isGraphable) toggle.setAttribute('aria-pressed', 'true');
     sliderRow.style.display = isNumericConst ? '' : 'none';
     if (isNumericConst && constValue !== null && !sliderDragging) {
       slider.value = constValue;
@@ -3133,7 +3740,8 @@ function commitGraphEditorToBox(boxId) {
   const expressions = [];
   for (const row of rows) {
     const exprId  = row.dataset.exprId;
-    const enabled   = row.querySelector('.graph-expr-toggle').checked;
+    const toggleEl  = row.querySelector('.graph-expr-toggle');
+    const enabled   = toggleEl ? toggleEl.getAttribute('aria-pressed') === 'true' : true;
     const color     = row.dataset.color || '#3b82f6';
     const thickness = parseFloat(row.dataset.thickness) || 2.0;
     const sliderMin = parseFloat(row.dataset.sliderMin) || 0;
