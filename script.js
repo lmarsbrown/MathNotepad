@@ -46,6 +46,10 @@ let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that ro
 let graphCommitTimer = null;
 let draftSaveTimer = null;
 
+// ── Image box state ───────────────────────────────────────────────────────────
+let imageDb = null;                       // IndexedDB handle
+const imageObjectUrls = new Map();        // boxId → blob object URL (revoke on box delete)
+
 // ── Calc box state ────────────────────────────────────────────────────────────
 let calcExprNextId = 1;
 let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
@@ -67,10 +71,10 @@ const HIGHLIGHT_FILL_COLORS = ['#fff9bf', '#ffbfbf', '#ceffbf', '#c3bfff', '#ffb
 let _activeFillColorPopup = null;
 let _activeFillColorPopupOutside = null;
 
-function formatConstantValue(v) {
+function formatConstantValue(v, sigFigs = 6) {
   if (!isFinite(v)) return null;
   if (Number.isInteger(v) && Math.abs(v) < 1e15) return '= ' + v;
-  const s = parseFloat(v.toPrecision(6)).toString();
+  const s = parseFloat(v.toPrecision(sigFigs)).toString();
   return '≈ ' + s;
 }
 
@@ -293,20 +297,211 @@ function makeCalcBox(id) {
     showResultsDefs: true,
     showResultsBare: true,
     physicsConstants: false,
+    useUnits: false,
+    useSymbolic: false,
+    sigFigs: 6,
     expressions: [
       { id: 'ce' + (calcExprNextId++), latex: '', enabled: true },
     ],
   };
 }
 
+function makeImageBox(id) {
+  return { id: id || genId(), type: 'image', mode: 'url', locked: false, src: '', filename: '', alt: '', width: 0, height: 0, fit: 'locked', align: 'left' };
+}
+
 // ── Calc box helpers ──────────────────────────────────────────────────────────
 
-function formatCalcResult(result) {
+function formatCalcResult(result, sigFigs = 6) {
   if (!result) return null;
   if (result.error) return null;
   if (result.boolValue !== undefined) return result.boolValue ? 'true' : 'false';
-  if (result.value !== undefined) return formatConstantValue(result.value);
+  if (result.value !== undefined) return formatConstantValue(result.value, sigFigs);
   return null;
+}
+
+// ── Unit result display helpers ───────────────────────────────────────────────
+
+const SUPERSCRIPT_CHARS = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','+':'⁺','-':'⁻' };
+function toSuperscript(n) {
+  return (n < 0 ? '⁻' : '') + String(Math.abs(n)).split('').map(c => SUPERSCRIPT_CHARS[c] || c).join('');
+}
+
+function _astNumStr(v, sigFigs = 6) {
+  if (!isFinite(v)) return String(v);
+  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
+  return String(parseFloat(v.toPrecision(sigFigs)));
+}
+
+/** Format a number as a LaTeX string, using \times 10^{n} for scientific notation. */
+function _numToLatex(v, sigFigs = 6) {
+  if (!isFinite(v)) return String(v);
+  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
+  const s = parseFloat(v.toPrecision(sigFigs)).toString();
+  const m = s.match(/^(-?\d+(?:\.\d+)?)[eE]([+-]?\d+)$/);
+  if (m) return `${m[1]} \\times 10^{${parseInt(m[2], 10)}}`;
+  return s;
+}
+
+/** Like formatCalcResult but returns a LaTeX string for use in the preview panel. */
+function formatCalcResultLatex(result, sigFigs = 6) {
+  if (!result || result.error) return null;
+  if (result.boolValue !== undefined) return `\\text{${result.boolValue ? 'true' : 'false'}}`;
+  if (result.value !== undefined) {
+    if (!isFinite(result.value)) return null;
+    if (Number.isInteger(result.value) && Math.abs(result.value) < 1e15)
+      return `= ${result.value}`;
+    return `\\approx ${_numToLatex(result.value, sigFigs)}`;
+  }
+  return null;
+}
+
+/** Returns true if the AST contains any 'div' call node (needs fraction bar). */
+function _astHasDiv(ast) {
+  if (!ast) return false;
+  if (ast.type === 'call' && ast.name === 'div') return true;
+  return !!(ast.args && ast.args.some(_astHasDiv)) || _astHasDiv(ast.arg);
+}
+
+/**
+ * Render an AST as a plain-text string using Unicode superscripts.
+ * Returns null if the AST contains a 'div' node (use buildAstHtml instead).
+ */
+function buildAstText(ast, sigFigs = 6) {
+  if (!ast) return '?';
+  if (ast.type === 'number') return _astNumStr(ast.value, sigFigs);
+  if (ast.type === 'variable') return ast.name;
+  if (ast.type !== 'call') return '?';
+  const [a, b] = ast.args || [];
+  switch (ast.name) {
+    case 'add': { const la = buildAstText(a, sigFigs), rb = buildAstText(b, sigFigs); return (la&&rb) ? `${la} + ${rb}` : null; }
+    case 'sub': { const la = buildAstText(a, sigFigs), rb = buildAstText(b, sigFigs); return (la&&rb) ? `${la} \u2212 ${rb}` : null; }
+    case 'mul': {
+      const la = buildAstText(a, sigFigs), rb = buildAstText(b, sigFigs);
+      if (!la || !rb) return null;
+      // number × unit: use space; unit × unit: use center dot
+      return a.type === 'number' ? `${la}\u2009${rb}` : `${la}\u00B7${rb}`;
+    }
+    case 'div':  return null; // signal: need HTML fraction
+    case 'pow': {
+      const base = buildAstText(a, sigFigs);
+      if (!base) return null;
+      if (b && b.type === 'number' && Number.isInteger(b.value))
+        return base + toSuperscript(b.value);
+      const expStr = buildAstText(b, sigFigs);
+      return expStr ? `${base}^(${expStr})` : null;
+    }
+    case 'neg':  { const s = buildAstText(a, sigFigs); return s ? `\u2212${s}` : null; }
+    case 'sin':  { const s = buildAstText(a, sigFigs); return s ? `sin(${s})` : null; }
+    case 'cos':  { const s = buildAstText(a, sigFigs); return s ? `cos(${s})` : null; }
+    case 'tan':  { const s = buildAstText(a, sigFigs); return s ? `tan(${s})` : null; }
+    case 'asin': { const s = buildAstText(a, sigFigs); return s ? `arcsin(${s})` : null; }
+    case 'acos': { const s = buildAstText(a, sigFigs); return s ? `arccos(${s})` : null; }
+    case 'atan': { const s = buildAstText(a, sigFigs); return s ? `arctan(${s})` : null; }
+    case 'ln':   { const s = buildAstText(a, sigFigs); return s ? `ln(${s})` : null; }
+    case 'exp':  { const s = buildAstText(a, sigFigs); return s ? `exp(${s})` : null; }
+    case 'abs':  { const s = buildAstText(a, sigFigs); return s ? `|${s}|` : null; }
+    case 'sqrt': { const s = buildAstText(a, sigFigs); return s ? `\u221A(${s})` : null; }
+    default: {
+      const args = (ast.args || []).map(n => buildAstText(n, sigFigs));
+      return args.every(Boolean) ? `${ast.name}(${args.join(', ')})` : null;
+    }
+  }
+}
+
+/** Recursively build DOM nodes for an AST, including CSS fraction bars for 'div'. */
+function buildAstHtml(ast, sigFigs = 6) {
+  const txt = s => document.createTextNode(s);
+  const span = (...kids) => {
+    const el = document.createElement('span');
+    for (const k of kids) el.appendChild(typeof k === 'string' ? txt(k) : k);
+    return el;
+  };
+  const rec = n => buildAstHtml(n, sigFigs);
+  if (!ast) return txt('?');
+  if (ast.type === 'number') return txt(_astNumStr(ast.value, sigFigs));
+  if (ast.type === 'variable') return txt(ast.name);
+  if (ast.type !== 'call') return txt('?');
+  const [a, b] = ast.args || [];
+  switch (ast.name) {
+    case 'add':  return span(rec(a), ' + ', rec(b));
+    case 'sub':  return span(rec(a), ' \u2212 ', rec(b));
+    case 'mul': {
+      const sep = a.type === 'number' ? '\u2009' : '\u00B7'; // thin space vs center dot
+      return span(rec(a), sep, rec(b));
+    }
+    case 'div': {
+      const frac = document.createElement('span');
+      frac.className = 'inline-frac';
+      const num = document.createElement('span');
+      num.className = 'frac-num';
+      num.appendChild(rec(a));
+      const den = document.createElement('span');
+      den.className = 'frac-den';
+      den.appendChild(rec(b));
+      frac.appendChild(num);
+      frac.appendChild(den);
+      return frac;
+    }
+    case 'pow': {
+      if (b && b.type === 'number' && Number.isInteger(b.value))
+        return span(rec(a), toSuperscript(b.value));
+      return span(rec(a), '^(', rec(b), ')');
+    }
+    case 'neg':  return span('\u2212', rec(a));
+    case 'sin':  return span('sin(', rec(a), ')');
+    case 'cos':  return span('cos(', rec(a), ')');
+    case 'tan':  return span('tan(', rec(a), ')');
+    case 'asin': return span('arcsin(', rec(a), ')');
+    case 'acos': return span('arccos(', rec(a), ')');
+    case 'atan': return span('arctan(', rec(a), ')');
+    case 'ln':   return span('ln(', rec(a), ')');
+    case 'exp':  return span('exp(', rec(a), ')');
+    case 'abs':  return span('|', rec(a), '|');
+    case 'sqrt': return span('\u221A(', rec(a), ')');
+    default: {
+      const el = span(`${ast.name}(`);
+      (ast.args || []).forEach((arg, i) => { if (i > 0) el.appendChild(txt(', ')); el.appendChild(rec(arg)); });
+      el.appendChild(txt(')'));
+      return el;
+    }
+  }
+}
+
+/**
+ * Given a { unitAst, warnings } result, populate a result span element.
+ * Uses plain text with Unicode superscripts where possible, CSS fractions otherwise.
+ */
+function renderUnitResult(resultSpan, unitAst, warnings, sigFigs = 6) {
+  resultSpan.innerHTML = '';
+  const match = matchDerivedUnit(astToUnitSignature(unitAst));
+  if (match) {
+    const { name, power, coeff } = match;
+    let text = '= ';
+    if (coeff === -1) text += '\u2212';
+    else if (coeff !== 1) text += _astNumStr(coeff, sigFigs) + '\u2009';
+    if (power !== 1 && name.includes('/')) {
+      text += `(${name})` + toSuperscript(power);
+    } else {
+      text += name;
+      if (power !== 1) text += toSuperscript(power);
+    }
+    resultSpan.textContent = text;
+    return;
+  }
+  if (_astHasDiv(unitAst)) {
+    resultSpan.appendChild(document.createTextNode('= '));
+    resultSpan.appendChild(buildAstHtml(unitAst, sigFigs));
+  } else {
+    const text = buildAstText(unitAst, sigFigs);
+    resultSpan.textContent = text !== null ? `= ${text}` : '= \u2026';
+  }
+}
+
+// Returns warning text for a list of warning objects, or '' if none.
+function formatUnitWarnings(warnings) {
+  if (!warnings || !warnings.length) return '';
+  return warnings.map(w => `\u26A0 ${w.funcName}([${w.units.join(', ')}]) \u2014 unit mismatch`).join('; ');
 }
 
 // Returns 'def' (assignment with identifier LHS), 'bare' (no operator), or 'equation' (complex LHS or inequality)
@@ -337,7 +532,7 @@ function scheduleCalcUpdate(boxId) {
 function updateCalcResults(boxId) {
   const box = boxes.find(b => b.id === boxId);
   if (!box || box.type !== 'calc') return;
-  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants });
+  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
   const updateFns = calcUpdateFnsMap.get(boxId);
   if (!updateFns) return;
   for (const fn of updateFns.values()) fn(results);
@@ -382,10 +577,25 @@ function serializeToLatex(boxArray) {
       const exprLines = (b.expressions || []).map(e =>
         `% ${e.id} ${e.enabled ? 'on' : 'off'} ${e.latex}`
       );
-      const defsFlag    = b.showResultsDefs !== false ? '{showdefs}' : '';
-      const bareFlag    = b.showResultsBare !== false ? '{showbare}' : '';
-      const physicsFlag = b.physicsConstants ? '{physics}' : '';
-      serialized = `\\begin{calc}${defsFlag}${bareFlag}${physicsFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+      const defsFlag     = b.showResultsDefs !== false ? '{showdefs}' : '';
+      const bareFlag     = b.showResultsBare !== false ? '{showbare}' : '';
+      const physicsFlag  = b.physicsConstants ? '{physics}' : '';
+      const unitsFlag    = b.useUnits    ? '{units}'    : '';
+      const symbolicFlag = b.useSymbolic ? '{symbolic}' : '';
+      const sfVal        = b.sigFigs ?? 6;
+      const sfFlag       = sfVal !== 6 ? `{sf=${sfVal}}` : '';
+      serialized = `\\begin{calc}${defsFlag}${bareFlag}${physicsFlag}${unitsFlag}${symbolicFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+    }
+    else if (b.type === 'image') {
+      const modeFlag   = `{${b.mode || 'url'}}`;
+      const lockedFlag = b.locked ? '{locked}' : '';
+      const lines      = [];
+      if (b.src) lines.push(`% ${b.src}`);
+      if (b.alt) lines.push(`% alt: ${b.alt}`);
+      if (b.width || b.height) lines.push(`% size: ${b.width || 0}x${b.height || 0}`);
+      if (b.fit && b.fit !== 'locked') lines.push(`% fit: ${b.fit}`);
+      if (b.align && b.align !== 'left') lines.push(`% align: ${b.align}`);
+      serialized = `\\begin{image}${modeFlag}${lockedFlag}\n${lines.join('\n')}\n\\end{image}`;
     }
     else if (b.type === 'graph') {
       const exprLines = (b.expressions || []).map(e =>
@@ -493,6 +703,10 @@ function parseFromLatex(src) {
       const showResultsDefs = legacyAll || line.includes('{showdefs}');
       const showResultsBare = legacyAll || line.includes('{showbare}');
       const physicsConstants = line.includes('{physics}');
+      const useUnits    = line.includes('{units}');
+      const useSymbolic = line.includes('{symbolic}');
+      const sfMatch     = line.match(/\{sf=(\d+)\}/);
+      const sigFigs     = sfMatch ? parseInt(sfMatch[1], 10) : 6;
       const expressions = [];
       i++;
       while (i < lines.length && !lines[i].startsWith('\\end{calc}')) {
@@ -514,7 +728,7 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{calc}
-      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsConstants, expressions }));
+      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsConstants, useUnits, useSymbolic, sigFigs, expressions }));
       continue;
     }
 
@@ -557,6 +771,33 @@ function parseFromLatex(src) {
       }
       i++; // consume \end{graph}
       result.push(applyPending({ id: genId(), type: 'graph', content: '', width, height, lightTheme, expressions }));
+      continue;
+    }
+
+    // Image block: \begin{image} ... \end{image}
+    if (line.startsWith('\\begin{image}')) {
+      const mode   = line.includes('{file}') ? 'file' : 'url';
+      const locked = line.includes('{locked}');
+      let src = '', alt = '', width = 0, height = 0, fit = 'locked', align = 'left';
+      i++;
+      while (i < lines.length && !lines[i].startsWith('\\end{image}')) {
+        const el = lines[i].trim();
+        if (el.startsWith('% alt: ')) {
+          alt = el.slice(7);
+        } else if (el.startsWith('% size: ')) {
+          const m = el.slice(8).match(/^(\d+)x(\d+)$/);
+          if (m) { width = parseInt(m[1]); height = parseInt(m[2]); }
+        } else if (el.startsWith('% fit: ')) {
+          fit = el.slice(7).trim();
+        } else if (el.startsWith('% align: ')) {
+          align = el.slice(9).trim();
+        } else if (el.startsWith('% ')) {
+          src = el.slice(2);
+        }
+        i++;
+      }
+      i++; // consume \end{image}
+      result.push(applyPending({ id: genId(), type: 'image', mode, locked, src, filename: '', alt, width, height, fit, align }));
       continue;
     }
 
@@ -615,6 +856,307 @@ function collectMathBlock(lines, startLine) {
   return null;
 }
 
+// ── Image box DOM ─────────────────────────────────────────────────────────────
+
+function cleanupImageBox(boxId) {
+  const url = imageObjectUrls.get(boxId);
+  if (url) { URL.revokeObjectURL(url); imageObjectUrls.delete(boxId); }
+}
+
+function createImageBoxElement(box, div) {
+  div.classList.add('box-image');
+
+  // ── Toolbar ──
+  const toolbar = document.createElement('div');
+  toolbar.className = 'image-toolbar';
+
+  const label = document.createElement('span');
+  label.className = 'box-type-label';
+  label.textContent = 'IMAGE';
+  toolbar.appendChild(label);
+
+  const modeToggle = document.createElement('div');
+  modeToggle.className = 'image-mode-toggle';
+
+  const urlBtn  = document.createElement('button');
+  urlBtn.className  = 'image-mode-btn' + (box.mode === 'url'  ? ' active' : '') + (box.locked ? ' locked-btn' : '');
+  urlBtn.dataset.mode = 'url';
+  urlBtn.textContent = 'URL';
+
+  const fileBtn = document.createElement('button');
+  fileBtn.className = 'image-mode-btn' + (box.mode === 'file' ? ' active' : '') + (box.locked ? ' locked-btn' : '');
+  fileBtn.dataset.mode = 'file';
+  fileBtn.textContent = 'File';
+
+  modeToggle.appendChild(urlBtn);
+  modeToggle.appendChild(fileBtn);
+  toolbar.appendChild(modeToggle);
+
+  const FIT_CYCLE = ['locked', 'crop', 'scale'];
+  const FIT_LABELS = { locked: '⇔ Lock', crop: '✂ Crop', scale: '⤢ Scale' };
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'image-fit-btn';
+  fitBtn.title = 'Cycle aspect ratio mode: locked → crop → scale';
+  fitBtn.textContent = FIT_LABELS[box.fit] || FIT_LABELS.locked;
+  fitBtn.addEventListener('click', () => {
+    const idx = FIT_CYCLE.indexOf(box.fit);
+    box.fit = FIT_CYCLE[(idx + 1) % FIT_CYCLE.length];
+    fitBtn.textContent = FIT_LABELS[box.fit];
+    fitBtn.dataset.fit = box.fit;
+    renderBody();
+    syncToText();
+  });
+  fitBtn.dataset.fit = box.fit || 'locked';
+  toolbar.appendChild(fitBtn);
+
+  const ALIGN_CYCLE = ['left', 'center', 'right'];
+  const ALIGN_LABELS = { left: '⬛ Left', center: '▣ Center', right: '⬛ Right' };
+  const ALIGN_ICONS  = { left: '⇤', center: '↔', right: '⇥' };
+  const alignBtn = document.createElement('button');
+  alignBtn.className = 'image-fit-btn';
+  alignBtn.title = 'Cycle image alignment: left → center → right';
+  alignBtn.textContent = ALIGN_ICONS[box.align || 'left'] + ' ' + (box.align || 'left').charAt(0).toUpperCase() + (box.align || 'left').slice(1);
+  alignBtn.dataset.align = box.align || 'left';
+  alignBtn.addEventListener('click', () => {
+    const idx = ALIGN_CYCLE.indexOf(box.align || 'left');
+    box.align = ALIGN_CYCLE[(idx + 1) % ALIGN_CYCLE.length];
+    alignBtn.textContent = ALIGN_ICONS[box.align] + ' ' + box.align.charAt(0).toUpperCase() + box.align.slice(1);
+    alignBtn.dataset.align = box.align;
+    applyBodyAlign();
+    syncToText();
+  });
+  toolbar.appendChild(alignBtn);
+
+  div.appendChild(toolbar);
+
+  // ── Body ──
+  const body = document.createElement('div');
+  body.className = 'image-body';
+  div.appendChild(body);
+
+  function applyBodyAlign() {
+    const a = box.align || 'left';
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.alignItems = a === 'center' ? 'center' : a === 'right' ? 'flex-end' : 'flex-start';
+  }
+
+  function applyImageSize(img) {
+    const w = box.width || 0;
+    const h = box.height || 0;
+    if (!w && !h) {
+      img.style.width = '';
+      img.style.height = '';
+      img.style.objectFit = '';
+    } else {
+      img.style.width  = w ? `${w}px` : 'auto';
+      img.style.height = h ? `${h}px` : 'auto';
+      img.style.objectFit = box.fit === 'crop' ? 'cover' : box.fit === 'scale' ? 'fill' : 'fill';
+    }
+  }
+
+  function makeSizeRow(img) {
+    const row = document.createElement('div');
+    row.className = 'image-size-row';
+
+    function makeDimInput(labelText, isW) {
+      const wrap = document.createElement('span');
+      wrap.className = 'image-size-field';
+      const lbl = document.createElement('label');
+      lbl.className = 'image-size-label';
+      lbl.textContent = labelText;
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.className = 'image-size-input';
+      inp.min = '1';
+      inp.placeholder = 'auto';
+      inp.value = (isW ? box.width : box.height) || '';
+      wrap.appendChild(lbl);
+      wrap.appendChild(inp);
+      row.appendChild(wrap);
+      return inp;
+    }
+
+    const wInp = makeDimInput('W', true);
+    const sep = document.createElement('span');
+    sep.className = 'image-size-sep';
+    sep.textContent = '×';
+    row.appendChild(sep);
+    const hInp = makeDimInput('H', false);
+
+    [wInp, hInp].forEach((inp, i) => {
+      const isW = i === 0;
+      const commit = () => {
+        const v = parseInt(inp.value) || 0;
+        if (isW) box.width = v; else box.height = v;
+        if (box.fit === 'locked' && v && img.naturalWidth && img.naturalHeight) {
+          const other = isW
+            ? Math.round(v * img.naturalHeight / img.naturalWidth)
+            : Math.round(v * img.naturalWidth  / img.naturalHeight);
+          if (isW) { box.height = other; hInp.value = other || ''; }
+          else     { box.width  = other; wInp.value = other || ''; }
+        }
+        syncToText();
+      };
+      inp.addEventListener('change', commit);
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+    });
+
+    return row;
+  }
+
+  function renderBody() {
+    body.innerHTML = '';
+    applyBodyAlign();
+
+    if (box.mode === 'url') {
+      // Always show the URL input; image appears below it when src is set
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'image-url-input';
+      input.placeholder = 'Paste image URL…';
+      input.value = box.src || '';
+
+      const commit = () => {
+        const val = input.value.trim();
+        const changed = val !== box.src;
+        box.src = val;
+        const shouldLock = !!val;
+        if (shouldLock !== box.locked) {
+          box.locked = shouldLock;
+          urlBtn.classList.toggle('locked-btn', shouldLock);
+          fileBtn.classList.toggle('locked-btn', shouldLock);
+        }
+        if (changed) {
+          // Re-render to update the preview image without wiping the input
+          renderBody();
+          syncToText();
+        }
+      };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+      input.style.alignSelf = 'stretch';
+      body.appendChild(input);
+
+      if (box.src) {
+        const img = document.createElement('img');
+        img.className = 'image-preview-img';
+        img.alt = box.alt || '';
+        img.src = box.src;
+        img.style.marginTop = '6px';
+        body.appendChild(img);
+        body.appendChild(makeSizeRow(img));
+      }
+    } else if (box.locked && box.src) {
+      // File mode — image is uploaded, show it with X button
+      const display = document.createElement('div');
+      display.className = 'image-display';
+
+      const img = document.createElement('img');
+      img.className = 'image-preview-img';
+      img.alt = box.alt || '';
+      display.appendChild(img);
+
+      const clearBtn = document.createElement('button');
+      clearBtn.className = 'image-clear-btn';
+      clearBtn.title = 'Clear image';
+      clearBtn.textContent = '×';
+      clearBtn.addEventListener('click', async () => {
+        await idbDeleteImage(box.src).catch(() => {});
+        cleanupImageBox(box.id);
+        box.src = ''; box.filename = ''; box.locked = false;
+        urlBtn.classList.remove('locked-btn');
+        fileBtn.classList.remove('locked-btn');
+        renderBody();
+        syncToText();
+      });
+      display.appendChild(clearBtn);
+      body.appendChild(display);
+      body.appendChild(makeSizeRow(img));
+
+      // Load from IDB
+      const existing = imageObjectUrls.get(box.id);
+      if (existing) {
+        img.src = existing;
+      } else {
+        idbLoadImageAsObjectURL(box.src).then(objUrl => {
+          if (objUrl) {
+            imageObjectUrls.set(box.id, objUrl);
+            img.src = objUrl;
+          } else {
+            // IDB entry missing — show error state
+            display.remove();
+            const missing = document.createElement('div');
+            missing.className = 'image-missing';
+            missing.textContent = 'Image file not found — click × to clear';
+            missing.appendChild(clearBtn);
+            body.appendChild(missing);
+          }
+        });
+      }
+    } else {
+      // File mode — no image yet, show drop zone
+      const dropzone = document.createElement('div');
+      dropzone.className = 'image-dropzone';
+      dropzone.textContent = 'Drop image here or click to browse';
+
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = 'image/*';
+      fileInput.style.display = 'none';
+      dropzone.appendChild(fileInput);
+
+      dropzone.addEventListener('click', () => fileInput.click());
+      dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+      dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+      dropzone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        const file = e.dataTransfer?.files?.[0];
+        if (file) handleFileUpload(file);
+      });
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files?.[0];
+        if (file) handleFileUpload(file);
+      });
+
+      body.appendChild(dropzone);
+    }
+  }
+
+  async function handleFileUpload(file) {
+    const projId = currentProjectId || 'draft';
+    const buf    = await file.arrayBuffer();
+    await idbSaveImage(projId, file.name, file.type, buf);
+    const key    = `${projId}/${file.name}`;
+    cleanupImageBox(box.id); // revoke any old URL
+    const objUrl = URL.createObjectURL(new Blob([buf], { type: file.type }));
+    imageObjectUrls.set(box.id, objUrl);
+    box.src      = key;
+    box.filename = file.name;
+    box.locked   = true;
+    urlBtn.classList.add('locked-btn');
+    fileBtn.classList.add('locked-btn');
+    renderBody();
+    syncToText();
+  }
+
+  // Mode toggle
+  [urlBtn, fileBtn].forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (box.locked) return;
+      box.mode = btn.dataset.mode;
+      box.src = '';
+      urlBtn.classList.toggle('active', box.mode === 'url');
+      fileBtn.classList.toggle('active', box.mode === 'file');
+      renderBody();
+      syncToText();
+    });
+  });
+
+  renderBody();
+}
+
 // ── Box → DOM ─────────────────────────────────────────────────────────────────
 function createBoxElement(box) {
   const div = document.createElement('div');
@@ -643,15 +1185,16 @@ function createBoxElement(box) {
   div.addEventListener('click', e => {
     if (e.target.closest('.delete-btn') || e.target.closest('.box-drag-handle')) return;
     if (e.target.closest('.mq-editable-field') || e.target.closest('.text-input')) return;
+    if (e.target.closest('.calc-toolbar') || e.target.closest('.calc-expr-result')) return;
     if (box.type === 'math') {
       const field = mqFields.get(box.id);
       if (field) field.focus();
     } else if (box.type === 'pagebreak' || box.type === 'graph') {
       setFocused(box.id, div);
     } else if (box.type === 'calc') {
-      // Focus first expression field
+      // Focus first expression field without scrolling (preventScroll bypasses MathQuill's native scroll-into-view)
       const firstField = calcMqFields.get(box.id)?.values().next().value;
-      if (firstField) firstField.focus();
+      if (firstField) firstField.el().querySelector('textarea')?.focus({ preventScroll: true });
     } else {
       const ta = div.querySelector('.text-input');
       if (ta) ta.focus();
@@ -1103,6 +1646,72 @@ function createBoxElement(box) {
     });
     toolbar.appendChild(physicsBtn);
 
+    // Units mode toggle
+    const unitsBtn = document.createElement('button');
+    unitsBtn.type = 'button';
+    unitsBtn.className = 'calc-show-results-btn' + (box.useUnits ? ' active' : '');
+    unitsBtn.title = 'SI units mode: treat unit symbols (m, kg, s, N, …) as dimensional quantities';
+    unitsBtn.textContent = 'Units';
+    unitsBtn.addEventListener('mousedown', e => e.preventDefault());
+    unitsBtn.addEventListener('click', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      boxes[idx].useUnits = !boxes[idx].useUnits;
+      unitsBtn.classList.toggle('active', boxes[idx].useUnits);
+      // Disable symbolic button when units mode is off
+      symbolicBtn.disabled = !boxes[idx].useUnits;
+      symbolicBtn.classList.toggle('btn-disabled', !boxes[idx].useUnits);
+      syncToText();
+      scheduleCalcUpdate(box.id);
+    });
+    toolbar.appendChild(unitsBtn);
+
+    // Symbolic mode toggle (only meaningful when units mode is on)
+    const symbolicBtn = document.createElement('button');
+    symbolicBtn.type = 'button';
+    const symActive = box.useUnits && box.useSymbolic;
+    symbolicBtn.className = 'calc-show-results-btn' + (symActive ? ' active' : '') + (!box.useUnits ? ' btn-disabled' : '');
+    symbolicBtn.disabled = !box.useUnits;
+    symbolicBtn.title = 'Symbolic mode: keep undefined variables symbolic rather than erroring';
+    symbolicBtn.textContent = 'Symbolic';
+    symbolicBtn.addEventListener('mousedown', e => e.preventDefault());
+    symbolicBtn.addEventListener('click', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1 || !boxes[idx].useUnits) return;
+      boxes[idx].useSymbolic = !boxes[idx].useSymbolic;
+      symbolicBtn.classList.toggle('active', boxes[idx].useSymbolic);
+      syncToText();
+      scheduleCalcUpdate(box.id);
+    });
+    toolbar.appendChild(symbolicBtn);
+
+    // Sig figs input
+    const sigFigsLabel = document.createElement('label');
+    sigFigsLabel.className = 'calc-sigfigs-label';
+    sigFigsLabel.textContent = 'sf:';
+    const sigFigsInput = document.createElement('input');
+    sigFigsInput.type = 'number';
+    sigFigsInput.className = 'calc-sigfigs-input';
+    sigFigsInput.min = 1;
+    sigFigsInput.max = 15;
+    sigFigsInput.value = box.sigFigs ?? 6;
+    sigFigsInput.title = 'Number of significant figures for numeric results';
+    sigFigsInput.addEventListener('mousedown', e => e.stopPropagation());
+    sigFigsInput.addEventListener('change', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      const v = parseInt(sigFigsInput.value, 10);
+      if (!isNaN(v) && v >= 1 && v <= 15) {
+        boxes[idx].sigFigs = v;
+        syncToText();
+        scheduleCalcUpdate(box.id);
+      } else {
+        sigFigsInput.value = boxes[idx].sigFigs ?? 6;
+      }
+    });
+    sigFigsLabel.appendChild(sigFigsInput);
+    toolbar.appendChild(sigFigsLabel);
+
     div.appendChild(toolbar);
 
     // ── Expression list ───────────────────────────────────────────────────────
@@ -1178,21 +1787,27 @@ function createBoxElement(box) {
       errorLine.style.display = 'none';
       row.appendChild(errorLine);
 
+      // Warning line (shown below when a unit mismatch is detected)
+      const warningLine = document.createElement('div');
+      warningLine.className = 'calc-unit-warning';
+      warningLine.style.display = 'none';
+      row.appendChild(warningLine);
+
       // Click-to-copy on result span
       resultSpan.title = 'Click to copy';
       resultSpan.style.cursor = 'pointer';
       resultSpan.addEventListener('click', () => {
         const val = resultSpan.textContent;
         if (!val) return;
-        // Strip leading "= " or "≈ " prefix so only the number is copied
+        // Strip leading "= " or "≈ " prefix so only the value is copied
         const num = val.replace(/^[=≈]\s*/, '');
         navigator.clipboard.writeText(num).then(() => {
-          const prev = resultSpan.textContent;
+          const prevHtml = resultSpan.innerHTML;
           const prevColor = resultSpan.style.color;
           resultSpan.textContent = 'copied!';
           resultSpan.style.color = '#4ec9b0';
           setTimeout(() => {
-            resultSpan.textContent = prev;
+            resultSpan.innerHTML = prevHtml;
             resultSpan.style.color = prevColor;
           }, 900);
         });
@@ -1212,24 +1827,45 @@ function createBoxElement(box) {
           // Only suppress for actual definitions (value result), not equality checks (boolValue)
           suppress = isNumericLiteralLatex(rhs) && !(result && result.boolValue !== undefined);
         }
-        const formatted = result ? formatCalcResult(result) : null;
+
+        // Clear warning line each update
+        warningLine.style.display = 'none';
+        warningLine.textContent = '';
+
         if (result && result.error) {
           errorLine.textContent = result.error;
           errorLine.style.display = '';
           resultSpan.style.display = 'none';
           row.classList.add('has-error');
-        } else if (formatted !== null && !suppress) {
+        } else if (result && result.unitAst !== undefined && !suppress) {
+          // Unit mode result
           errorLine.style.display = 'none';
-          resultSpan.textContent = formatted;
+          row.classList.remove('has-error');
+          renderUnitResult(resultSpan, result.unitAst, result.warnings, boxes.find(b => b.id === box.id)?.sigFigs ?? 6);
           resultSpan.style.display = '';
-          if (result.boolValue === true)  resultSpan.style.color = '#4ec9b0';
-          else if (result.boolValue === false) resultSpan.style.color = '#f44747';
-          else resultSpan.style.color = '';
-          row.classList.remove('has-error');
+          resultSpan.style.color = '';
+          // Show warnings if any
+          const warnText = formatUnitWarnings(result.warnings);
+          if (warnText) {
+            warningLine.textContent = warnText;
+            warningLine.style.display = '';
+          }
         } else {
-          errorLine.style.display = 'none';
-          resultSpan.style.display = 'none';
-          row.classList.remove('has-error');
+          const currentBox = boxes.find(b => b.id === box.id);
+          const formatted = result ? formatCalcResult(result, currentBox?.sigFigs ?? 6) : null;
+          if (formatted !== null && !suppress) {
+            errorLine.style.display = 'none';
+            resultSpan.textContent = formatted;
+            resultSpan.style.display = '';
+            if (result.boolValue === true)  resultSpan.style.color = '#4ec9b0';
+            else if (result.boolValue === false) resultSpan.style.color = '#f44747';
+            else resultSpan.style.color = '';
+            row.classList.remove('has-error');
+          } else {
+            errorLine.style.display = 'none';
+            resultSpan.style.display = 'none';
+            row.classList.remove('has-error');
+          }
         }
       };
       calcUpdateFns.set(expr.id, updateResult);
@@ -1310,7 +1946,7 @@ function createBoxElement(box) {
         row.remove();
         commitCalcBox(box.id);
         scheduleCalcUpdate(box.id);
-      });
+      }, true); // capture phase: fires before MathQuill's inner textarea handler
 
       mqSpan.addEventListener('focusin',  () => setFocused(box.id, div));
       mqSpan.addEventListener('focusout', (e) => {
@@ -1377,6 +2013,14 @@ function createBoxElement(box) {
 
     // Initial result update after elements are in the DOM
     requestAnimationFrame(() => scheduleCalcUpdate(box.id));
+  } else if (box.type === 'image') {
+    createImageBoxElement(box, div);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', () => deleteBox(box.id));
+    div.appendChild(deleteBtn);
   }
 
   return div;
@@ -1460,6 +2104,7 @@ function renderBoxes() {
 function insertBoxAfter(afterId, type = 'math') {
   const newBox = type === 'graph' ? makeGraphBox()
                : type === 'calc'  ? makeCalcBox()
+               : type === 'image' ? makeImageBox()
                : { id: genId(), type, content: '' };
   const idx = boxes.findIndex(b => b.id === afterId);
   if (idx === -1) {
@@ -1478,8 +2123,8 @@ function appendBox(type = 'math') {
     if (idx !== -1) {
       // Check if focused box is empty
       const focused = boxes[idx];
-      // Pagebreaks, graphs, and calc boxes have no simple editable content — always insert after, never convert
-      if (focused.type === 'pagebreak' || focused.type === 'graph' || focused.type === 'calc') {
+      // Pagebreaks, graphs, calc, and image boxes have no simple editable content — always insert after, never convert
+      if (focused.type === 'pagebreak' || focused.type === 'graph' || focused.type === 'calc' || focused.type === 'image') {
         insertBoxAfter(focusedBoxId, type);
         return;
       }
@@ -1504,6 +2149,7 @@ function appendBox(type = 'math') {
         if (oldEl) oldEl.remove();
         boxes[idx] = type === 'graph' ? makeGraphBox(focusedBoxId)
                    : type === 'calc'  ? makeCalcBox(focusedBoxId)
+                   : type === 'image' ? makeImageBox(focusedBoxId)
                    : { id: focusedBoxId, type, content: '' };
         rebuildBoxList();
         syncToText();
@@ -1515,6 +2161,7 @@ function appendBox(type = 'math') {
   } else {
     const newBox = type === 'graph' ? makeGraphBox()
                : type === 'calc'  ? makeCalcBox()
+               : type === 'image' ? makeImageBox()
                : { id: genId(), type, content: '' };
     boxes.push(newBox);
     rebuildBoxList();
@@ -1534,6 +2181,7 @@ function deleteBox(id) {
   mqFields.delete(id);
   boxResizers.delete(id);
   cleanupCalcBox(id);
+  cleanupImageBox(id);
   boxes.splice(idx, 1);
   rebuildBoxList();
   syncToText();
@@ -1567,6 +2215,7 @@ function rebuildBoxList() {
       mqFields.delete(id);
       boxResizers.delete(id);
       cleanupCalcBox(id);
+      cleanupImageBox(id);
       existing.delete(id);
     }
   }
@@ -1953,7 +2602,8 @@ defaultTextBtn.addEventListener('click', () => setDefaultBoxType('text'));
 // Prevent mousedown from stealing focus (which would clear focusedBoxId before click fires)
 const addGraphBtn = document.getElementById('add-graph-btn');
 const addCalcBtn  = document.getElementById('add-calc-btn');
-[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn, addGraphBtn, addCalcBtn].forEach(btn => {
+const addImageBtn = document.getElementById('add-image-btn');
+[addMathBtn, addTextBtn, addH1Btn, addH2Btn, addH3Btn, addBreakBtn, addGraphBtn, addCalcBtn, addImageBtn].forEach(btn => {
   btn.addEventListener('mousedown', e => e.preventDefault());
 });
 addMathBtn.addEventListener('click', () => appendBox('math'));
@@ -1964,6 +2614,7 @@ addH3Btn.addEventListener('click', () => appendBox('h3'));
 addBreakBtn.addEventListener('click', () => appendBox('pagebreak'));
 addGraphBtn.addEventListener('click', () => appendBox('graph'));
 addCalcBtn.addEventListener('click', () => appendBox('calc'));
+addImageBtn.addEventListener('click', () => appendBox('image'));
 
 // ── Font size ─────────────────────────────────────────────────────────────────
 const FONT_SIZES = [12, 14, 16, 18, 20, 24, 28, 32];
@@ -1998,6 +2649,10 @@ function cutBox(id) {
     boxClipboard = { type: 'calc', content: '', expressions: JSON.parse(JSON.stringify(box.expressions || [])), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsConstants: !!box.physicsConstants };
     deleteBox(id);
     return;
+  } else if (box.type === 'image') {
+    boxClipboard = { type: 'image', mode: box.mode, locked: box.locked, src: box.src, filename: box.filename, alt: box.alt, content: '' };
+    deleteBox(id);
+    return;
   } else if (box.type !== 'pagebreak') {
     const ta = boxList.querySelector(`[data-id="${id}"] .text-input`);
     if (ta) content = ta.value;
@@ -2016,7 +2671,7 @@ function pasteBox() {
   if (boxes[idx].type === 'math') {
     const field = mqFields.get(focusedBoxId);
     isEmpty = !field || field.latex() === '';
-  } else if (boxes[idx].type === 'calc' || boxes[idx].type === 'graph' || boxes[idx].type === 'pagebreak') {
+  } else if (boxes[idx].type === 'calc' || boxes[idx].type === 'graph' || boxes[idx].type === 'pagebreak' || boxes[idx].type === 'image') {
     isEmpty = false; // these box types always insert after rather than replace
   } else {
     const ta = boxList.querySelector(`[data-id="${focusedBoxId}"] .text-input`);
@@ -2033,6 +2688,17 @@ function pasteBox() {
     newBox.showResultsDefs = boxClipboard.showResultsDefs !== false;
     newBox.showResultsBare = boxClipboard.showResultsBare !== false;
     newBox.physicsConstants = !!boxClipboard.physicsConstants;
+  } else if (boxClipboard.type === 'image') {
+    newBox = makeImageBox();
+    newBox.mode     = boxClipboard.mode;
+    newBox.locked   = boxClipboard.locked;
+    newBox.src      = boxClipboard.src;
+    newBox.filename = boxClipboard.filename;
+    newBox.alt      = boxClipboard.alt;
+    newBox.width    = boxClipboard.width  || 0;
+    newBox.height   = boxClipboard.height || 0;
+    newBox.fit      = boxClipboard.fit    || 'locked';
+    newBox.align    = boxClipboard.align  || 'left';
   } else {
     newBox = { id: genId(), type: boxClipboard.type, content: boxClipboard.content };
   }
@@ -2042,6 +2708,7 @@ function pasteBox() {
     mqFields.delete(focusedBoxId);
     boxResizers.delete(focusedBoxId);
     cleanupCalcBox(focusedBoxId);
+    cleanupImageBox(focusedBoxId);
     boxes.splice(idx, 1, newBox);
   } else {
     // Insert a new box below the focused one
@@ -2130,29 +2797,117 @@ function createPreviewElement(box) {
     const wrapper = document.createElement('div');
     wrapper.className = 'preview-calc-box';
     wrapper.dataset.boxId = box.id;
-    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants });
+    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
     for (const expr of (box.expressions || [])) {
       if (!expr.enabled) continue;
       const latex = (expr.latex || '').trim();
       if (!latex) continue;
       const result = results.get(expr.id);
-      const formatted = result ? formatCalcResult(result) : null;
       const div = document.createElement('div');
       div.className = 'preview-math';
-      let showResult = false;
-      if (formatted !== null && !result.hasOwnProperty('boolValue')) {
-        const kind = classifyCalcExpr(latex);
-        if (kind === 'def') {
-          const op = findCalcOperatorAtDepth0(latex);
-          const rhs = op ? latex.slice(op.idx + op.len).trim() : '';
-          showResult = !isNumericLiteralLatex(rhs) && box.showResultsDefs !== false;
-        } else if (kind === 'bare') {
-          showResult = box.showResultsBare !== false;
+      // In units mode, wrap unit names in \text{} for upright rendering.
+      // Substitutes directly in the original LaTeX to avoid altering structure.
+      let displayLatex = latex;
+      if (box.useUnits) {
+        const op = findCalcOperatorAtDepth0(latex);
+        if (op) {
+          const lhs = latex.slice(0, op.idx).trim();
+          const rhs = latex.slice(op.idx + op.len).trim();
+          displayLatex = `${lhs} = ${_wrapUnitsInText(rhs)}`;
+        } else {
+          displayLatex = _wrapUnitsInText(latex);
         }
-        // equations (boolValue) are already excluded above
       }
-      div.textContent = showResult ? `\\[${latex} \\text{ ${formatted}}\\]` : `\\[${latex}\\]`;
+      // Determine whether to show the result
+      let showResult = false;
+      let resultLatex = null;
+      if (result && !result.error && result.boolValue === undefined) {
+        const kind = classifyCalcExpr(latex);
+        const shouldShow = kind === 'def'
+          ? (() => { const op = findCalcOperatorAtDepth0(latex); const rhs = op ? latex.slice(op.idx + op.len).trim() : ''; return !isNumericLiteralLatex(rhs) && box.showResultsDefs !== false; })()
+          : (kind === 'bare' && box.showResultsBare !== false);
+        if (shouldShow) {
+          if (result.unitAst !== undefined) {
+            // Unit result: render via astToLatex for MathJax, or matched derived unit
+            const _match = matchDerivedUnit(astToUnitSignature(result.unitAst));
+            if (_match) {
+              const { name, power, coeff } = _match;
+              let s = '';
+              if (coeff === -1) s += '-';
+              else if (coeff !== 1) s += _numToLatex(coeff, box.sigFigs ?? 6) + ' \\, ';
+              if (name.includes('/')) {
+                const [num, den] = name.split('/');
+                s += `\\frac{\\text{${num}}}{\\text{${den}}}`;
+                if (power !== 1) s += `^{${power}}`;
+              } else {
+                s += `\\text{${name}}`;
+                if (power !== 1) s += `^{${power}}`;
+              }
+              resultLatex = s;
+            } else {
+              resultLatex = astToLatex(result.unitAst, box.sigFigs ?? 6);
+            }
+            showResult = true;
+          } else {
+            const formatted = formatCalcResultLatex(result, box.sigFigs ?? 6);
+            if (formatted !== null) { resultLatex = formatted; showResult = true; }
+          }
+        }
+      }
+      let previewLatex;
+      if (showResult && result && result.unitAst !== undefined) {
+        previewLatex = `\\[${displayLatex} = ${resultLatex}\\]`;
+      } else if (showResult) {
+        previewLatex = `\\[${displayLatex} ${resultLatex}\\]`;
+      } else {
+        previewLatex = `\\[${displayLatex}\\]`;
+      }
+      div.textContent = previewLatex;
       wrapper.appendChild(div);
+    }
+    return wrapper;
+  }
+  if (box.type === 'image') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'preview-image-box';
+    wrapper.dataset.boxId = box.id;
+    if (!box.src) return wrapper;
+    const a = box.align || 'left';
+    wrapper.style.display = 'flex';
+    wrapper.style.justifyContent = a === 'center' ? 'center' : a === 'right' ? 'flex-end' : 'flex-start';
+
+    function applyPreviewSize(img) {
+      const w = box.width || 0, h = box.height || 0;
+      if (w || h) {
+        img.style.width  = w ? `${w}px` : 'auto';
+        img.style.height = h ? `${h}px` : 'auto';
+        img.style.objectFit = box.fit === 'crop' ? 'cover' : 'fill';
+      }
+    }
+    if (box.mode === 'url') {
+      const img = document.createElement('img');
+      img.src = box.src;
+      img.alt = box.alt || '';
+      applyPreviewSize(img);
+      wrapper.appendChild(img);
+    } else {
+      // File mode: async IDB load
+      const placeholder = document.createElement('div');
+      placeholder.className = 'preview-image-placeholder';
+      placeholder.textContent = 'Loading image…';
+      wrapper.appendChild(placeholder);
+      idbLoadImageAsObjectURL(box.src).then(objUrl => {
+        if (objUrl) {
+          placeholder.remove();
+          const img = document.createElement('img');
+          img.src = objUrl;
+          img.alt = box.alt || '';
+          applyPreviewSize(img);
+          wrapper.appendChild(img);
+        } else {
+          placeholder.textContent = 'Image file not found';
+        }
+      }).catch(() => { placeholder.textContent = 'Image file not found'; });
     }
     return wrapper;
   }
@@ -2211,9 +2966,9 @@ async function updatePreview() {
 
     // Cache key encodes everything that affects the rendered output.
     // Graph boxes always bypass the cache (snapshot url changes independently).
-    const needsCache = box.type !== 'graph' && box.type !== 'pagebreak';
+    const needsCache = box.type !== 'graph' && box.type !== 'pagebreak' && box.type !== 'image';
     const cacheKey = box.type === 'calc'
-      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsConstants ? '1' : '0'}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
+      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsConstants ? '1' : '0'}|sf${box.sigFigs ?? 6}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
       : `${box.type}|${box.content}`;
     const cached = needsCache ? previewBoxCache.get(box.id) : null;
 
@@ -2661,6 +3416,118 @@ document.addEventListener('mouseup', () => {
 
 // ── Project management ────────────────────────────────────────────────────────
 
+// ── IndexedDB image storage ───────────────────────────────────────────────────
+
+function initImageDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('mathnotepad_imagedb', 1);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('images')) {
+        const store = db.createObjectStore('images', { keyPath: 'key' });
+        store.createIndex('by_project', 'projectId', { unique: false });
+      }
+    };
+    req.onsuccess = e => { imageDb = e.target.result; resolve(); };
+    req.onerror   = e => { console.warn('ImageDB open failed', e.target.error); resolve(); };
+  });
+}
+
+function idbSaveImage(projectId, filename, mimeType, arrayBuffer) {
+  if (!imageDb) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const key = `${projectId}/${filename}`;
+    const tx  = imageDb.transaction('images', 'readwrite');
+    tx.objectStore('images').put({ key, projectId, filename, mimeType, data: arrayBuffer });
+    tx.oncomplete = resolve;
+    tx.onerror    = e => reject(e.target.error);
+  });
+}
+
+function idbLoadImageAsObjectURL(key) {
+  if (!imageDb) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const req = imageDb.transaction('images', 'readonly').objectStore('images').get(key);
+    req.onsuccess = e => {
+      const rec = e.target.result;
+      if (!rec) { resolve(null); return; }
+      resolve(URL.createObjectURL(new Blob([rec.data], { type: rec.mimeType })));
+    };
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+function idbGetImageRecord(key) {
+  if (!imageDb) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const req = imageDb.transaction('images', 'readonly').objectStore('images').get(key);
+    req.onsuccess = e => resolve(e.target.result || null);
+    req.onerror   = e => reject(e.target.error);
+  });
+}
+
+function idbDeleteImage(key) {
+  if (!imageDb) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const tx = imageDb.transaction('images', 'readwrite');
+    tx.objectStore('images').delete(key);
+    tx.oncomplete = resolve;
+    tx.onerror    = e => reject(e.target.error);
+  });
+}
+
+function idbGetAllImagesForProject(projectId) {
+  if (!imageDb) return Promise.resolve([]);
+  return new Promise((resolve, reject) => {
+    const tx   = imageDb.transaction('images', 'readonly');
+    const req  = tx.objectStore('images').index('by_project').getAll(projectId);
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror   = e => reject(e.target.error);
+  });
+}
+
+function idbDeleteAllImagesForProject(projectId) {
+  if (!imageDb) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const tx    = imageDb.transaction('images', 'readwrite');
+    const store = tx.objectStore('images');
+    const idx   = store.index('by_project');
+    const req   = idx.openCursor(IDBKeyRange.only(projectId));
+    req.onsuccess = e => {
+      const cursor = e.target.result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+    };
+    tx.oncomplete = resolve;
+    tx.onerror    = e => reject(e.target.error);
+  });
+}
+
+function idbMigrateImageKeys(oldId, newId) {
+  if (!imageDb) return Promise.resolve();
+  return idbGetAllImagesForProject(oldId).then(records => {
+    if (!records.length) return;
+    const tx    = imageDb.transaction('images', 'readwrite');
+    const store = tx.objectStore('images');
+    for (const rec of records) {
+      store.delete(rec.key);
+      rec.key       = `${newId}/${rec.filename}`;
+      rec.projectId = newId;
+      store.put(rec);
+    }
+    // Update src references in the live boxes array
+    for (const box of boxes) {
+      if (box.type === 'image' && box.src && box.src.startsWith(`${oldId}/`)) {
+        box.src = `${newId}/${box.filename}`;
+        // Revoke old object URL if any — it stays valid but the key changed
+      }
+    }
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror    = e => reject(e.target.error);
+    });
+  });
+}
+
 function loadProjects() {
   return JSON.parse(localStorage.getItem(PROJ_KEY) || '[]');
 }
@@ -2744,19 +3611,49 @@ function saveCurrentProject() {
     currentProjectId = id;
     projectTitleLabel.textContent = title;
     markClean();
+    idbMigrateImageKeys('draft', id).then(() => syncToText());
     saveDraft();
     renderProjectsList();
   }
 }
 
-function downloadCurrentProject() {
+async function downloadCurrentProject() {
   const title = projectTitleLabel.textContent.replace(/\s•$/, '') || 'Untitled';
-  const blob = new Blob([latexSource.value], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = title + '.tex';
-  a.click();
+
+  const fileImageBoxes = boxes.filter(b => b.type === 'image' && b.mode === 'file' && b.src);
+
+  if (!fileImageBoxes.length || !window.JSZip) {
+    // Plain .tex download
+    const blob = new Blob([latexSource.value], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = title + '.tex'; a.click();
+    URL.revokeObjectURL(url);
+    return;
+  }
+
+  // ZIP download — rewrite IDB keys to images/<filename> in the .tex content
+  let texContent = latexSource.value;
+  for (const box of fileImageBoxes) {
+    if (box.src && box.filename) {
+      texContent = texContent.replaceAll(`% ${box.src}`, `% images/${box.filename}`);
+    }
+  }
+
+  const zip = new JSZip();
+  zip.file(title + '.tex', texContent);
+
+  for (const box of fileImageBoxes) {
+    const rec = await idbGetImageRecord(box.src).catch(() => null);
+    if (rec) {
+      zip.folder('images').file(rec.filename, rec.data, { binary: true });
+    }
+  }
+
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = title + '.zip'; a.click();
   URL.revokeObjectURL(url);
 }
 
@@ -2780,6 +3677,7 @@ function deleteProject(id) {
   let projects = loadProjects();
   projects = projects.filter(p => p.id !== id);
   saveProjects(projects);
+  idbDeleteAllImagesForProject(id).catch(() => {});
   if (currentProjectId === id) {
     currentProjectId = null;
     projectTitleLabel.textContent = 'Untitled';
@@ -2999,6 +3897,16 @@ function enterGraphMode(boxId) {
   // Set up re-render callback for pan/zoom
   renderer._onRender = () => scheduleGraphRender();
 
+  // Background click: defocus whatever expression row is active
+  renderer._onBackgroundClick = () => {
+    if (focusedGraphExprId !== null) {
+      const field = graphMqFields.get(focusedGraphExprId);
+      if (field) field.blur();
+      focusedGraphExprId = null;
+      scheduleGraphRender();
+    }
+  };
+
   // Set up click-to-focus: clicking a curve focuses its expression row
   renderer._onPick = exprId => {
     const listEl = document.getElementById('graph-expr-list');
@@ -3008,13 +3916,35 @@ function enterGraphMode(boxId) {
     if (idx !== -1) focusGraphExpr(idx, 'start');
   };
 
+  // Snap coordinate tooltip
+  const snapTooltip = document.createElement('div');
+  snapTooltip.id = 'graph-snap-tooltip';
+  previewContent.appendChild(snapTooltip);
+
+  renderer._onSnapUpdate = (snapPoint, canvasX, canvasY) => {
+    if (!snapPoint) {
+      snapTooltip.style.display = 'none';
+      return;
+    }
+    const fracX = canvasX / renderer.width;
+    const fracY = canvasY / renderer.height;
+    const OFFSET = 14;
+    let left = fracX * 100;
+    let top  = fracY * 100;
+    snapTooltip.style.display = 'block';
+    snapTooltip.style.left = `calc(${left}% + ${OFFSET}px)`;
+    snapTooltip.style.top  = `calc(${top}% - ${OFFSET}px)`;
+    const fmt = v => parseFloat(v.toPrecision(5)).toString();
+    snapTooltip.textContent = `(${fmt(snapPoint.wx)}, ${fmt(snapPoint.wy)})`;
+  };
+
   // Initial render
   renderGraphPreview();
 }
 
 function _teardownGraphModeUI() {
   clearTimeout(graphCommitTimer);
-  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; }
+  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; }
   graphMqFields.clear();
   graphExprUpdateFns.clear();
   focusedGraphExprId = null;
@@ -3264,8 +4194,10 @@ function createGraphExprRow(expr) {
         if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
           const constName = nameMatch[1];
           const constInfo = analysis.constants.find(c => c.name === constName);
-          // Slider only for depth-0 constants (directly adjustable)
-          if (constInfo && constInfo.depth === 0) {
+          const eqIdx = latex.indexOf('=');
+          const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
+          // Slider only for depth-0 constants defined as plain numeric literals (directly adjustable)
+          if (constInfo && constInfo.depth === 0 && /^-?\d+(\.\d+)?$/.test(rhs)) {
             isNumericConst = true;
             constValue = analysis.constantValues.get(constName);
           }
@@ -3273,8 +4205,6 @@ function createGraphExprRow(expr) {
           if (constInfo) {
             const evalVal = analysis.constantValues.get(constName);
             if (evalVal !== undefined) {
-              const eqIdx = latex.indexOf('=');
-              const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
               if (!/^-?\d+(\.\d+)?$/.test(rhs)) {
                 constEvalValue = evalVal;
               }
@@ -3288,7 +4218,7 @@ function createGraphExprRow(expr) {
               const ast = parseLatexToAst(trimmed);
               const vars = collectVariables(ast);
               if (!vars.has('x') && !vars.has('y')) {
-                const val = evaluateAst(ast, analysis.constantValues);
+                const val = evaluateAst(ast, analysis.constantValues, analysis.funcDefs || new Map());
                 if (isFinite(val) && !/^-?\d+(\.\d+)?$/.test(trimmed)) {
                   constEvalValue = val;
                 }
@@ -3881,7 +4811,9 @@ new ResizeObserver(() => {
 }).observe(document.getElementById('preview-content'));
 
 // ── Initialize ────────────────────────────────────────────────────────────────
-(function init() {
+initImageDb().catch(() => {}).then(init);
+
+function init() {
   applyFontSize();
   updateHighlightToolbar();
 
@@ -3921,7 +4853,7 @@ new ResizeObserver(() => {
   }
   markClean();
   updateLineNumbers();
-})();
+}
 
 // ── MathJax metrics cache ─────────────────────────────────────────────────────
 // getMetrics() reads em/ex from the DOM via getComputedStyle, which forces a
