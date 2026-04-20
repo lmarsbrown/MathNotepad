@@ -1090,16 +1090,23 @@ Provides built-in SI physical constants (speed of light, gravitational constant,
 None.
 
 ## Behaviour
-When a calc box is evaluated with `usePhysicsConstants: true`, the physics constants are injected as pre-defined variables accessible by their symbol (e.g. `c`, `G`, `h`, `\hbar`, `k_B`, `q_e`, `m_e`, `m_p`). Constants appear as hover tooltips in calc expressions via `buildPhysicsTooltip()`. A small badge displays the constant's value when recognized in an expression.
+Constants are split into three independently toggleable groups, each with its own button on the calc box toolbar:
+- **Physics** (`physicsBasic`): c, g, G, h, ℏ, m_e, m_p, σ
+- **E&M** (`physicsEM`): q_e, ε₀, μ₀, α
+- **Chem** (`physicsChem`): R, k_B, N_A
+
+When a group is enabled, its constants are injected as pre-defined variables in the calc box. Constants appear as hover tooltips on the toolbar buttons. A small badge displays the constant's value when recognized in an expression.
 
 ## Implementation
-**`PHYSICS_CONSTANTS`** (graph.js:31) — array of `{ varName, value, label, description, unitDims }` objects. `varName` is the normalized internal name (e.g. `'k_B'`, `'hbar'`) that must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps SI base unit names to exponents (same format as `DERIVED_UNIT_EXPANSIONS.units`); dimensionless constants use `{}`.
+**`PHYSICS_CONSTANTS_BASIC` / `PHYSICS_CONSTANTS_EM` / `PHYSICS_CONSTANTS_CHEM`** (graph.js:~31) — three arrays of `{ varName, value, label, description, unitDims }` objects. `PHYSICS_CONSTANTS` is their concatenation, used for legacy deserialization. `varName` must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps SI base unit names to exponents; dimensionless constants use `{}`.
 
-**In `evaluateCalcExpressions`** — if `usePhysicsConstants` is true, constants are merged into `allValues` as plain numbers. In units mode, they are additionally merged into `unitValues` as unit ASTs built via `buildConstantUnitAst(pc.value, pc.unitDims)` — so e.g. `c` evaluates to `2.998×10⁸ · m · s⁻¹` rather than a dimensionless scalar.
+**In `evaluateCalcExpressions`** — accepts `usePhysicsBasic`, `usePhysicsEM`, `usePhysicsChem` (plus legacy `usePhysicsConstants`). Active constants from enabled groups are merged into `allValues` as plain numbers. In units mode, they are additionally merged into `unitValues` as unit ASTs via `buildConstantUnitAst(pc.value, pc.unitDims)`.
 
-**`formatConstantValue(v)`** (script.js:70) — formats a numeric value for display: integers → `"= N"`, floats → `"≈ N"`. Used by both physics constant badges and calc result formatting.
+**Box model flags:** `physicsBasic`, `physicsEM`, `physicsChem` (all boolean, default false). Serialized as `{physics_basic}`, `{physics_em}`, `{physics_chem}` on the `\begin{calc}` line. Legacy `{physics}` (without underscore suffix) enables all three groups on load.
 
-**`buildPhysicsTooltip()`** (script.js:78) — generates tooltip HTML for physics constant badges.
+**`formatConstantValue(v)`** (script.js:74) — formats a numeric value for display: integers → `"= N"`, floats → `"≈ N"`. Used by both physics constant badges and calc result formatting.
+
+**`buildPhysicsTooltip(group, label)`** (script.js:81) — generates tooltip string for a constants group button.
 
 **No symbol conflicts with SI units:** Physics constant `varName` values do not overlap with `SI_BASE_UNITS` or `DERIVED_UNIT_EXPANSIONS` keys. `m_e` / `m_p` (electron/proton mass) have subscripts and do not conflict with `m` (meter).
 

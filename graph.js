@@ -27,24 +27,33 @@ class CompileError extends Error {
 //   label       — short human-readable name shown in tooltips
 //   description — units / full name shown in tooltips
 //
-// To add a new constant: append an entry here. No other changes required.
-const PHYSICS_CONSTANTS = [
-  { varName: 'c',         value: 2.99792458e8,    label: 'c',    description: 'Speed of light (2.998×10⁸ m/s)',                          unitDims: { m: 1, s: -1 } },
-  { varName: 'g',         value: 9.80665,          label: 'g',    description: 'Standard gravity (9.807 m/s²)',                           unitDims: { m: 1, s: -2 } },
-  { varName: 'G',         value: 6.67430e-11,      label: 'G',    description: 'Gravitational constant (6.674×10⁻¹¹ N·m²/kg²)',          unitDims: { m: 3, kg: -1, s: -2 } },
-  { varName: 'h',         value: 6.62607015e-34,   label: 'h',    description: 'Planck constant (6.626×10⁻³⁴ J·s)',                      unitDims: { kg: 1, m: 2, s: -1 } },
-  { varName: 'hbar',      value: 1.054571817e-34,  label: 'ℏ',    description: 'Reduced Planck constant (1.055×10⁻³⁴ J·s)',              unitDims: { kg: 1, m: 2, s: -1 } },
-  { varName: 'R',         value: 8.314462618,      label: 'R',    description: 'Ideal gas constant (8.314 J/(mol·K))',                   unitDims: { kg: 1, m: 2, s: -2, mol: -1, K: -1 } },
-  { varName: 'k_B',       value: 1.380649e-23,     label: 'k_B',  description: 'Boltzmann constant (1.381×10⁻²³ J/K)',                  unitDims: { kg: 1, m: 2, s: -2, K: -1 } },
-  { varName: 'N_A',       value: 6.02214076e23,    label: 'N_A',  description: 'Avogadro\'s number (6.022×10²³ mol⁻¹)',                 unitDims: { mol: -1 } },
-  { varName: 'q_e',       value: 1.602176634e-19,  label: 'q_e',  description: 'Elementary charge (1.602×10⁻¹⁹ C)',                     unitDims: { A: 1, s: 1 } },
-  { varName: 'epsilon_0', value: 8.8541878128e-12, label: 'ε₀',   description: 'Permittivity of free space (8.854×10⁻¹² F/m)',          unitDims: { kg: -1, m: -3, s: 4, A: 2 } },
-  { varName: 'mu_0',      value: 1.25663706212e-6, label: 'μ₀',   description: 'Permeability of free space (1.257×10⁻⁶ H/m)',           unitDims: { kg: 1, m: 1, s: -2, A: -2 } },
-  { varName: 'm_e',       value: 9.1093837015e-31, label: 'm_e',  description: 'Electron mass (9.109×10⁻³¹ kg)',                        unitDims: { kg: 1 } },
-  { varName: 'm_p',       value: 1.67262192369e-27,label: 'm_p',  description: 'Proton mass (1.673×10⁻²⁷ kg)',                          unitDims: { kg: 1 } },
-  { varName: 'sigma',     value: 5.670374419e-8,   label: 'σ',    description: 'Stefan–Boltzmann constant (5.670×10⁻⁸ W/(m²·K⁴))',     unitDims: { kg: 1, s: -3, K: -4 } },
-  { varName: 'alpha',     value: 7.2973525693e-3,  label: 'α',    description: 'Fine-structure constant (≈ 1/137)',                      unitDims: {} },
+// To add a constant: append to the appropriate group below.
+const PHYSICS_CONSTANTS_BASIC = [
+  { varName: 'c',         value: 2.99792458e8,     label: 'c',    description: 'Speed of light (2.998×10⁸ m/s)',                         unitDims: { m: 1, s: -1 } },
+  { varName: 'g',         value: 9.80665,           label: 'g',    description: 'Standard gravity (9.807 m/s²)',                          unitDims: { m: 1, s: -2 } },
+  { varName: 'G',         value: 6.67430e-11,       label: 'G',    description: 'Gravitational constant (6.674×10⁻¹¹ N·m²/kg²)',         unitDims: { m: 3, kg: -1, s: -2 } },
+  { varName: 'h',         value: 6.62607015e-34,    label: 'h',    description: 'Planck constant (6.626×10⁻³⁴ J·s)',                     unitDims: { kg: 1, m: 2, s: -1 } },
+  { varName: 'hbar',      value: 1.054571817e-34,   label: 'ℏ',    description: 'Reduced Planck constant (1.055×10⁻³⁴ J·s)',             unitDims: { kg: 1, m: 2, s: -1 } },
+  { varName: 'm_e',       value: 9.1093837015e-31,  label: 'm_e',  description: 'Electron mass (9.109×10⁻³¹ kg)',                       unitDims: { kg: 1 } },
+  { varName: 'm_p',       value: 1.67262192369e-27, label: 'm_p',  description: 'Proton mass (1.673×10⁻²⁷ kg)',                         unitDims: { kg: 1 } },
+  { varName: 'sigma',     value: 5.670374419e-8,    label: 'σ',    description: 'Stefan–Boltzmann constant (5.670×10⁻⁸ W/(m²·K⁴))',    unitDims: { kg: 1, s: -3, K: -4 } },
 ];
+
+const PHYSICS_CONSTANTS_EM = [
+  { varName: 'q_e',       value: 1.602176634e-19,  label: 'q_e',  description: 'Elementary charge (1.602×10⁻¹⁹ C)',                    unitDims: { A: 1, s: 1 } },
+  { varName: 'epsilon_0', value: 8.8541878128e-12, label: 'ε₀',   description: 'Permittivity of free space (8.854×10⁻¹² F/m)',         unitDims: { kg: -1, m: -3, s: 4, A: 2 } },
+  { varName: 'mu_0',      value: 1.25663706212e-6, label: 'μ₀',   description: 'Permeability of free space (1.257×10⁻⁶ H/m)',          unitDims: { kg: 1, m: 1, s: -2, A: -2 } },
+  { varName: 'alpha',     value: 7.2973525693e-3,  label: 'α',    description: 'Fine-structure constant (≈ 1/137)',                     unitDims: {} },
+];
+
+const PHYSICS_CONSTANTS_CHEM = [
+  { varName: 'R',         value: 8.314462618,      label: 'R',    description: 'Ideal gas constant (8.314 J/(mol·K))',                  unitDims: { kg: 1, m: 2, s: -2, mol: -1, K: -1 } },
+  { varName: 'k_B',       value: 1.380649e-23,     label: 'k_B',  description: 'Boltzmann constant (1.381×10⁻²³ J/K)',                 unitDims: { kg: 1, m: 2, s: -2, K: -1 } },
+  { varName: 'N_A',       value: 6.02214076e23,    label: 'N_A',  description: 'Avogadro\'s number (6.022×10²³ mol⁻¹)',                unitDims: { mol: -1 } },
+];
+
+// Combined — used for legacy deserialization and tooltip building.
+const PHYSICS_CONSTANTS = [...PHYSICS_CONSTANTS_BASIC, ...PHYSICS_CONSTANTS_EM, ...PHYSICS_CONSTANTS_CHEM];
 
 // ── SI Units ──────────────────────────────────────────────────────────────────
 // Base SI units — treated as symbolic atoms in units mode.
@@ -529,6 +538,7 @@ class Parser {
       case '\\lambda':  return { type: 'variable', name: this.tryParseSubscript('lambda') };
       case '\\mu':      return { type: 'variable', name: this.tryParseSubscript('mu') };
       case '\\sigma':   return { type: 'variable', name: this.tryParseSubscript('sigma') };
+      case '\\rho':   return { type: 'variable', name: this.tryParseSubscript('rho') };
       case '\\omega':   return { type: 'variable', name: this.tryParseSubscript('omega') };
       case '\\hbar':    return { type: 'variable', name: this.tryParseSubscript('hbar') };
 
@@ -1124,7 +1134,11 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
     }
 
     case 'call': {
-      const TRIG = new Set(['sin','cos','tan','asin','acos','atan','ln','exp','abs','sqrt']);
+      if (ast.name === 'sqrt') {
+        return recurse({ type: 'call', name: 'pow', args: [ast.args[0], { type: 'number', value: 0.5 }] });
+      }
+
+      const TRIG = new Set(['sin','cos','tan','asin','acos','atan','ln','exp','abs']);
       if (TRIG.has(ast.name)) {
         const arg = simplifyAst(recurse(ast.args[0]));
         if (arg.type === 'number') {
@@ -1357,20 +1371,25 @@ function _toCanonical(ast, atomMap) {
       });
     }
     case 'pow': {
+      // Flatten nested pow: pow(pow(x, a), b) → pow(x, a*b)
+      if (args[0].type === 'call' && args[0].name === 'pow' &&
+          args[0].args[1].type === 'number' && args[1].type === 'number') {
+        const newExp = args[0].args[1].value * args[1].value;
+        return _toCanonical({ type: 'call', name: 'pow', args: [args[0].args[0], { type: 'number', value: newExp }] }, atomMap);
+      }
       const expNode = args[1];
       if (expNode.type === 'number') {
         const e = expNode.value;
-        if (!Number.isInteger(e)) break; // non-integer: fall through to atom
         if (e === 0) return num(1);
         const base = _toCanonical(args[0], atomMap);
         if (base.length === 1) {
-          // Single-term base: just multiply exponents directly. Works for any integer e.
+          // Single-term base: multiply exponents directly. Works for any real e.
           const t = base[0];
           const factors = new Map();
           for (const [k, exp] of t.factors) factors.set(k, exp * e);
           return [{ coeff: Math.pow(t.coeff, e), factors }];
         }
-        if (e > 0 && e <= 8) {
+        if (Number.isInteger(e) && e > 0 && e <= 8) {
           // Multi-term base with small positive integer exponent: expand by repeated mul.
           let result = base;
           for (let i = 1; i < e; i++) result = _mulTerms(result, base);
@@ -1378,6 +1397,9 @@ function _toCanonical(ast, atomMap) {
         }
       }
       break; // fall through to atom
+    }
+    case 'sqrt': {
+      return _toCanonical({ type: 'call', name: 'pow', args: [args[0], { type: 'number', value: 0.5 }] }, atomMap);
     }
     default:
       break;
@@ -1527,7 +1549,7 @@ function _numToLatex(v) {
 function _latexAtom(ast, sigFigs = 6) {
   if (!ast) return '?';
   if (ast.type === 'number' || ast.type === 'variable') return astToLatex(ast, sigFigs);
-  if (ast.type === 'call' && (ast.name === 'add' || ast.name === 'sub' || ast.name === 'mul'))
+  if (ast.type === 'call' && (ast.name === 'add' || ast.name === 'sub' || ast.name === 'mul' || ast.name === 'pow'))
     return `\\left(${astToLatex(ast, sigFigs)}\\right)`;
   return astToLatex(ast, sigFigs);
 }
@@ -1544,7 +1566,7 @@ function astToLatex(ast, sigFigs = 6) {
       // Greek letter variable names must be re-emitted as LaTeX commands.
       // Subscripts are preserved: 'alpha_1' → '\alpha_{1}'.
       const GREEK_TO_LATEX = { alpha:'\\alpha', beta:'\\beta', gamma:'\\gamma', delta:'\\delta',
-        epsilon:'\\epsilon', theta:'\\theta', lambda:'\\lambda', mu:'\\mu', sigma:'\\sigma',
+        epsilon:'\\epsilon', theta:'\\theta', lambda:'\\lambda', mu:'\\mu', sigma:'\\sigma',rho:'\\rho',
         omega:'\\omega', hbar:'\\hbar', pi:'\\pi' };
       const underscoreIdx = ast.name.indexOf('_');
       const base = underscoreIdx === -1 ? ast.name : ast.name.slice(0, underscoreIdx);
@@ -2026,16 +2048,22 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
  * - Equalities where LHS is not a single identifier produce
  *   { boolValue: true|false } using epsilon=1e-9 for floating-point tolerance
  */
-function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, useUnits = false, useSymbolic = false } = {}) {
+function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false, useUnits = false, useSymbolic = false } = {}) {
   const results  = new Map();   // exprId → { value } | { boolValue } | { error } | { unitAst, warnings }
   const allValues = new Map();  // variable name → number (includes disabled defs)
+
+  // Build the active constants list from enabled groups.
+  // usePhysicsConstants is the legacy flag (enables all groups).
+  const activeConstants = [
+    ...(usePhysicsConstants || usePhysicsBasic ? PHYSICS_CONSTANTS_BASIC : []),
+    ...(usePhysicsConstants || usePhysicsEM    ? PHYSICS_CONSTANTS_EM    : []),
+    ...(usePhysicsConstants || usePhysicsChem  ? PHYSICS_CONSTANTS_CHEM  : []),
+  ];
 
   // Pre-populate with physics constants so user expressions can reference them.
   // User definitions evaluated in Step 2 take priority and will overwrite any
   // physics constant whose name the user explicitly redefines.
-  if (usePhysicsConstants) {
-    for (const pc of PHYSICS_CONSTANTS) allValues.set(pc.varName, pc.value);
-  }
+  for (const pc of activeConstants) allValues.set(pc.varName, pc.value);
 
   // In units mode, build a parallel value map that stores number | ASTNode values.
   // Derived unit symbols are expanded to base-unit ASTs so that e.g. N → kg·m·s⁻².
@@ -2047,10 +2075,8 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       if (!unitValues.has(name)) unitValues.set(name, ast);
     }
     // Override physics constants with unit-carrying ASTs (value × SI base units).
-    if (usePhysicsConstants) {
-      for (const pc of PHYSICS_CONSTANTS) {
-        unitValues.set(pc.varName, buildConstantUnitAst(pc.value, pc.unitDims || {}));
-      }
+    for (const pc of activeConstants) {
+      unitValues.set(pc.varName, buildConstantUnitAst(pc.value, pc.unitDims || {}));
     }
   }
 
@@ -2069,7 +2095,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
     const op = findCalcOperatorAtDepth0(trimmed);
     if (!op || op.op !== '=') continue;
     const lhs = trimmed.slice(0, op.idx).trim();
-    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
+    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
     try {
       const lhsAst = parseLatexToAst(lhs);
       if (lhsAst.type !== 'variable') continue;
@@ -2198,7 +2224,9 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         const warnings = [];
         const val = evaluateAstSymbolic(ast, unitValues, funcDefs, { useSymbolic, warnings });
         if (val.type === 'number') return { value: val.value };
-        return { unitAst: val, warnings };
+        let unitAst = val;
+        try { unitAst = simplifyAst(val); } catch (_) {}
+        return { unitAst, warnings };
       }
       const val = evaluateAst(ast, allValues, funcDefs);
       return { value: val };
@@ -2225,7 +2253,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       const rhsStr = trimmed.slice(op.idx + 1).trim();
 
       const lhsVarName = (() => {
-        if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhsStr)) return null;
+        if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhsStr)) return null;
         try { const a = parseLatexToAst(lhsStr); return a.type === 'variable' ? a.name : null; } catch (_) { return null; }
       })();
       const isDefiningExpr = lhsVarName !== null && allDefs.has(lhsVarName) && allDefs.get(lhsVarName).exprId === e.id;
@@ -2234,7 +2262,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         if (useUnits && unitValues.has(lhsVarName)) {
           const v = unitValues.get(lhsVarName);
           if (typeof v === 'number') results.set(e.id, { value: v });
-          else results.set(e.id, { unitAst: v, warnings: [] });
+          else { let unitAst = v; try { unitAst = simplifyAst(v); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
         } else if (!useUnits && allValues.has(lhsVarName)) {
           results.set(e.id, { value: allValues.get(lhsVarName) });
         } else {
@@ -2246,8 +2274,21 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         try {
           const lhsRes = evalToResult(parseLatexToAst(lhsStr));
           const rhsRes = evalToResult(parseLatexToAst(rhsStr));
+
+          
           if (lhsRes.value !== undefined && rhsRes.value !== undefined) {
-            results.set(e.id, { boolValue: Math.abs(lhsRes.value - rhsRes.value) < 1e-9 });
+            
+            //The average scale of the values so that differences in tiny values don't get marked as a rounding error. 
+            let scale = 10**Math.ceil(
+              Math.min(-Math.log10(0.5*(Math.abs(lhsRes.value)+Math.abs(rhsRes.value))),1e-10)
+            );
+            if(scale==Infinity){
+              scale=1;
+            }
+            console.log(0.5*(Math.abs(lhsRes.value)+Math.abs(rhsRes.value)),scale);
+            
+
+            results.set(e.id, { boolValue: Math.abs(lhsRes.value - rhsRes.value)*scale < 1e-9 });
           } else if (lhsRes.unitAst && rhsRes.unitAst) {
             const lSig = astToUnitSignature(lhsRes.unitAst);
             const rSig = astToUnitSignature(rhsRes.unitAst);

@@ -78,10 +78,9 @@ function formatConstantValue(v, sigFigs = 6) {
   return '≈ ' + s;
 }
 
-/** Build a tooltip string listing all available physics constants. */
-function buildPhysicsTooltip() {
-  const lines = PHYSICS_CONSTANTS.map(pc => `${pc.label}: ${pc.description}`);
-  return 'Toggle physics constants (off by default)\n\n' + lines.join('\n');
+function buildPhysicsTooltip(group, label) {
+  const lines = group.map(pc => `${pc.label}: ${pc.description}`);
+  return `Toggle ${label} constants\n\n` + lines.join('\n');
 }
 
 let graphRenderer = null; // lazily created GraphRenderer
@@ -296,7 +295,9 @@ function makeCalcBox(id) {
     content: '',
     showResultsDefs: true,
     showResultsBare: true,
-    physicsConstants: false,
+    physicsBasic: false,
+    physicsEM: false,
+    physicsChem: false,
     useUnits: false,
     useSymbolic: false,
     sigFigs: 6,
@@ -532,7 +533,7 @@ function scheduleCalcUpdate(boxId) {
 function updateCalcResults(boxId) {
   const box = boxes.find(b => b.id === boxId);
   if (!box || box.type !== 'calc') return;
-  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
+  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
   const updateFns = calcUpdateFnsMap.get(boxId);
   if (!updateFns) return;
   for (const fn of updateFns.values()) fn(results);
@@ -579,12 +580,14 @@ function serializeToLatex(boxArray) {
       );
       const defsFlag     = b.showResultsDefs !== false ? '{showdefs}' : '';
       const bareFlag     = b.showResultsBare !== false ? '{showbare}' : '';
-      const physicsFlag  = b.physicsConstants ? '{physics}' : '';
+      const basicFlag    = b.physicsBasic ? '{physics_basic}' : '';
+      const emFlag       = b.physicsEM    ? '{physics_em}'    : '';
+      const chemFlag     = b.physicsChem  ? '{physics_chem}'  : '';
       const unitsFlag    = b.useUnits    ? '{units}'    : '';
       const symbolicFlag = b.useSymbolic ? '{symbolic}' : '';
       const sfVal        = b.sigFigs ?? 6;
       const sfFlag       = sfVal !== 6 ? `{sf=${sfVal}}` : '';
-      serialized = `\\begin{calc}${defsFlag}${bareFlag}${physicsFlag}${unitsFlag}${symbolicFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+      serialized = `\\begin{calc}${defsFlag}${bareFlag}${basicFlag}${emFlag}${chemFlag}${unitsFlag}${symbolicFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
     }
     else if (b.type === 'image') {
       const modeFlag   = `{${b.mode || 'url'}}`;
@@ -702,7 +705,11 @@ function parseFromLatex(src) {
       const legacyAll = line.includes('{showresults}');
       const showResultsDefs = legacyAll || line.includes('{showdefs}');
       const showResultsBare = legacyAll || line.includes('{showbare}');
-      const physicsConstants = line.includes('{physics}');
+      // Legacy {physics} flag enables all three groups.
+      const legacyPhysics = line.includes('{physics}') && !line.includes('{physics_');
+      const physicsBasic = legacyPhysics || line.includes('{physics_basic}');
+      const physicsEM    = legacyPhysics || line.includes('{physics_em}');
+      const physicsChem  = legacyPhysics || line.includes('{physics_chem}');
       const useUnits    = line.includes('{units}');
       const useSymbolic = line.includes('{symbolic}');
       const sfMatch     = line.match(/\{sf=(\d+)\}/);
@@ -728,7 +735,7 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{calc}
-      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsConstants, useUnits, useSymbolic, sigFigs, expressions }));
+      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsBasic, physicsEM, physicsChem, useUnits, useSymbolic, sigFigs, expressions }));
       continue;
     }
 
@@ -1182,7 +1189,13 @@ function createBoxElement(box) {
   });
 
   // Click on box padding → focus the field
+  let mousedownInMqField = false;
+  div.addEventListener('mousedown', e => {
+    mousedownInMqField = !!e.target.closest('.mq-editable-field');
+  });
   div.addEventListener('click', e => {
+    const wasMqDrag = mousedownInMqField;
+    mousedownInMqField = false;
     if (e.target.closest('.delete-btn') || e.target.closest('.box-drag-handle')) return;
     if (e.target.closest('.mq-editable-field') || e.target.closest('.text-input')) return;
     if (e.target.closest('.calc-toolbar') || e.target.closest('.calc-expr-result')) return;
@@ -1192,6 +1205,7 @@ function createBoxElement(box) {
     } else if (box.type === 'pagebreak' || box.type === 'graph') {
       setFocused(box.id, div);
     } else if (box.type === 'calc') {
+      if (wasMqDrag) return; // Don't steal focus when user was dragging to select in a MQ field
       // Focus first expression field without scrolling (preventScroll bypasses MathQuill's native scroll-into-view)
       const firstField = calcMqFields.get(box.id)?.values().next().value;
       if (firstField) firstField.el().querySelector('textarea')?.focus({ preventScroll: true });
@@ -1252,7 +1266,7 @@ function createBoxElement(box) {
 
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
-      autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec hbar '+greekLetters,
+      autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec hbar nabla '+greekLetters,
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -1629,22 +1643,28 @@ function createBoxElement(box) {
       (idx, val) => { boxes[idx].showResultsBare = val; }
     ));
 
-    // Physics constants toggle
-    const physicsBtn = document.createElement('button');
-    physicsBtn.type = 'button';
-    physicsBtn.className = 'calc-show-results-btn' + (box.physicsConstants ? ' active' : '');
-    physicsBtn.title = buildPhysicsTooltip();
-    physicsBtn.textContent = 'Physics';
-    physicsBtn.addEventListener('mousedown', e => e.preventDefault());
-    physicsBtn.addEventListener('click', () => {
-      const idx = boxes.findIndex(b => b.id === box.id);
-      if (idx === -1) return;
-      boxes[idx].physicsConstants = !boxes[idx].physicsConstants;
-      physicsBtn.classList.toggle('active', boxes[idx].physicsConstants);
-      syncToText();
-      scheduleCalcUpdate(box.id);
-    });
-    toolbar.appendChild(physicsBtn);
+    // Physics constants toggles (3 groups)
+    const makePhysicsBtn = (label, tooltipGroup, tooltipLabel, flagKey) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'calc-show-results-btn' + (box[flagKey] ? ' active' : '');
+      btn.title = buildPhysicsTooltip(tooltipGroup, tooltipLabel);
+      btn.textContent = label;
+      btn.addEventListener('mousedown', e => e.preventDefault());
+      btn.addEventListener('click', () => {
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (idx === -1) return;
+        boxes[idx][flagKey] = !boxes[idx][flagKey];
+        btn.classList.toggle('active', boxes[idx][flagKey]);
+        syncToText();
+        scheduleCalcUpdate(box.id);
+      });
+      toolbar.appendChild(btn);
+      return btn;
+    };
+    makePhysicsBtn('Physics', PHYSICS_CONSTANTS_BASIC, 'basic physics', 'physicsBasic');
+    makePhysicsBtn('E&M',     PHYSICS_CONSTANTS_EM,    'E&M',            'physicsEM');
+    makePhysicsBtn('Chem',    PHYSICS_CONSTANTS_CHEM,  'chemistry',      'physicsChem');
 
     // Units mode toggle
     const unitsBtn = document.createElement('button');
@@ -2646,7 +2666,7 @@ function cutBox(id) {
   } else if (box.type === 'calc') {
     // For calc boxes, commit live state then copy expressions
     commitCalcBox(id);
-    boxClipboard = { type: 'calc', content: '', expressions: JSON.parse(JSON.stringify(box.expressions || [])), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsConstants: !!box.physicsConstants };
+    boxClipboard = { type: 'calc', content: '', expressions: JSON.parse(JSON.stringify(box.expressions || [])), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsBasic: !!box.physicsBasic, physicsEM: !!box.physicsEM, physicsChem: !!box.physicsChem };
     deleteBox(id);
     return;
   } else if (box.type === 'image') {
@@ -2687,7 +2707,9 @@ function pasteBox() {
     }));
     newBox.showResultsDefs = boxClipboard.showResultsDefs !== false;
     newBox.showResultsBare = boxClipboard.showResultsBare !== false;
-    newBox.physicsConstants = !!boxClipboard.physicsConstants;
+    newBox.physicsBasic = !!boxClipboard.physicsBasic;
+    newBox.physicsEM    = !!boxClipboard.physicsEM;
+    newBox.physicsChem  = !!boxClipboard.physicsChem;
   } else if (boxClipboard.type === 'image') {
     newBox = makeImageBox();
     newBox.mode     = boxClipboard.mode;
@@ -2797,7 +2819,7 @@ function createPreviewElement(box) {
     const wrapper = document.createElement('div');
     wrapper.className = 'preview-calc-box';
     wrapper.dataset.boxId = box.id;
-    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsConstants: !!box.physicsConstants, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
+    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
     for (const expr of (box.expressions || [])) {
       if (!expr.enabled) continue;
       const latex = (expr.latex || '').trim();
@@ -2968,7 +2990,7 @@ async function updatePreview() {
     // Graph boxes always bypass the cache (snapshot url changes independently).
     const needsCache = box.type !== 'graph' && box.type !== 'pagebreak' && box.type !== 'image';
     const cacheKey = box.type === 'calc'
-      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsConstants ? '1' : '0'}|sf${box.sigFigs ?? 6}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
+      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
       : `${box.type}|${box.content}`;
     const cached = needsCache ? previewBoxCache.get(box.id) : null;
 
