@@ -24,7 +24,9 @@ Math Notepad is a browser-based document editor for composing structured mathema
 The app has three panels: a raw LaTeX source editor on the left, a visual box editor in the middle, and a document preview on the right. The two editors stay in sync — edits in either direction propagate to the other. The document is made of "boxes", each representing one content element (equation, text block, heading, graph, or computation). The preview renders the document as letter-sized pages with MathJax typesetting. The app is entirely client-side; all state is in memory and localStorage.
 
 ## Implementation
-**Files:** `index.html` (HTML structure + CDN scripts), `script.js` (all UI logic, ~4000 lines), `graph.js` (LaTeX parser, evaluator, GLSL compiler, GraphRenderer class, ~2972 lines), `gpuimage.js` (WebGL framebuffer utility), `gl_utils.js` (WebGL helpers), `style.css` (dark Catppuccin theme).
+**Files:** `index.html` (HTML structure + CDN scripts), `script.js` (core UI: box system, serialization, state, projects, ~3437 lines), `graph-ui.js` (graph editing mode UI, ~914 lines), `preview.js` (preview panel rendering, ~574 lines), `math.js` (LaTeX parser, AST evaluator, GLSL/JS/LaTeX codegen, calc evaluator, ~2359 lines), `graph.js` (GraphRenderer class only, ~1152 lines), `gpuimage.js` (WebGL framebuffer utility), `gl_utils.js` (WebGL helpers), `style.css` (dark Catppuccin theme).
+
+**Load order:** `gl_util.js` → `gpuimage.js` → `math.js` → `graph.js` → `script.js` → `graph-ui.js` → `preview.js`. The last two load after script.js because they depend on globals defined there; their top-level event bindings run after all scripts have parsed.
 
 **Entry point:** IIFE `init()` at the bottom of `script.js` — restores UI state from localStorage, loads the draft project, initializes event listeners.
 
@@ -429,13 +431,13 @@ Shows the document as it will look when printed — paginated, typeset with Math
 **DOM:** `#preview-content` inside `#preview-panel`. Contains one or more `div.preview-page`.
 
 **Render pipeline:**
-1. `schedulePreview(delay)` (script.js:2095) — debounced trigger.
-2. `updatePreview()` (script.js:2187) — async; calls `createPreviewElement(box)` for each box, inserts into a single page, runs `MathJax.typesetPromise()`, then `paginatePreview()`.
-3. `createPreviewElement(box)` (script.js:2106) — builds preview DOM per box type; result is cached in `previewBoxCache` by box id + content hash. Graph boxes render as `<canvas>` via `graphRenderer`.
+1. `schedulePreview(delay)` (preview.js) — debounced trigger.
+2. `updatePreview()` (preview.js) — async; calls `createPreviewElement(box)` for each box, inserts into a single page, runs `MathJax.typesetPromise()`, then `paginatePreview()`.
+3. `createPreviewElement(box)` (preview.js) — builds preview DOM per box type; result is cached in `previewBoxCache` by box id + content hash. Graph boxes render as `<canvas>` via `graphRenderer`.
 
-**Zoom:** `applyPreviewZoom()` (script.js:2430) sets `transform: scale(...)` on `.preview-page` elements. `stepPreviewZoom(delta)` (script.js:2438) steps through `ZOOM_STEPS` array.
+**Zoom:** `applyPreviewZoom()` (preview.js) sets `transform: scale(...)` on `.preview-page` elements. `stepPreviewZoom(delta)` (preview.js) steps through `ZOOM_STEPS` array.
 
-**Scroll sync:** `scrollAndHighlightPreview(boxId)` (script.js:2474) scrolls preview to a box's element. `scrollAndHighlightBox(boxId)` (script.js:2492) scrolls editor to a box.
+**Scroll sync:** `scrollAndHighlightPreview(boxId)` (preview.js) scrolls preview to a box's element. `scrollAndHighlightBox(boxId)` (preview.js) scrolls editor to a box.
 
 **Print/PDF:** `@media print` in style.css hides all panels except the pages. SVG strokes set to `stroke="none"` post-MathJax to prevent PDF artefacts.
 
@@ -453,9 +455,9 @@ None.
 After MathJax typesetting, all content sits in a single tall page. Pagination then measures each element's `offsetTop` and moves elements to a new page when they would cross the page boundary. Page break boxes always force a new page. Text boxes that overflow a page are split at `<br>` tags.
 
 ### Implementation
-**`paginatePreview()`** (script.js:2339) — iterates children of the first `.preview-page`, measuring `offsetTop`. Page height: 11in × 96dpi = 1056px, minus 2in padding top/bottom = 768px usable. Creates additional `div.preview-page` elements as needed.
+**`paginatePreview()`** (preview.js) — iterates children of the first `.preview-page`, measuring `offsetTop`. Page height: 11in × 96dpi = 1056px, minus 2in padding top/bottom = 768px usable. Creates additional `div.preview-page` elements as needed.
 
-**`splitTextAtBr(el, maxHeight, ruler)`** (script.js:2304) — splits a text element at `<br>` tags into two parts when it overflows. Uses a hidden `ruler` element to measure partial heights.
+**`splitTextAtBr(el, maxHeight, ruler)`** (preview.js) — splits a text element at `<br>` tags into two parts when it overflows. Uses a hidden `ruler` element to measure partial heights.
 
 ---
 
@@ -481,29 +483,29 @@ Clicking a graph box in the right panel enters graph edit mode:
 
 ## Implementation
 **Entry/exit:**
-- `enterGraphMode(boxId)` (script.js:2953) — hides box list, builds expression list, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
-- `exitGraphMode()` (script.js:3067) — calls `_teardownGraphModeUI()`, restores box list and preview.
-- `_teardownGraphModeUI()` (script.js:3047) — destroys MathQuill fields, clears maps.
+- `enterGraphMode(boxId)` (graph-ui.js) — hides box list, builds expression list, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
+- `exitGraphMode()` (graph-ui.js) — calls `_teardownGraphModeUI()`, restores box list and preview.
+- `_teardownGraphModeUI()` (graph-ui.js) — destroys MathQuill fields, clears maps.
 
 **Expression list:**
-- `renderGraphExprList(box)` (script.js:3106) — builds the expression list DOM from `box.expressions`.
-- `createGraphExprRow(expr)` (script.js:3158) — builds one row with MathQuill field, color swatch, enable pill toggle, error badge.
-- `addGraphExpression()` (script.js:3801), `addGraphExpressionAfter(afterId)` (script.js:3813) — append/insert expressions.
-- `deleteGraphExpr(exprId)` (script.js:3137) — remove expression row.
-- `commitGraphEditorToBox(boxId)` (script.js:3766) — reads DOM state into `boxes[idx].expressions`, then calls `syncToText()`.
+- `renderGraphExprList(box)` (graph-ui.js) — builds the expression list DOM from `box.expressions`.
+- `createGraphExprRow(expr)` (graph-ui.js) — builds one row with MathQuill field, color swatch, enable pill toggle, error badge.
+- `addGraphExpression()` (graph-ui.js), `addGraphExpressionAfter(afterId)` (graph-ui.js) — append/insert expressions.
+- `deleteGraphExpr(exprId)` (graph-ui.js) — remove expression row.
+- `commitGraphEditorToBox(boxId)` (graph-ui.js) — reads DOM state into `boxes[idx].expressions`, then calls `syncToText()`.
 
-**Color picker:** `openColorPopup(anchorEl, exprId)` (script.js:3670), `closeColorPopup()` (script.js:3531) — fixed popup with preset palette + `<input type="color">`.
+**Color picker:** `openColorPopup(anchorEl, exprId)` (graph-ui.js), `closeColorPopup()` (graph-ui.js) — fixed popup with preset palette + `<input type="color">`.
 
 **Render trigger:**
-- `scheduleGraphRender()` (script.js:135) — rAF-debounced.
-- `renderGraphPreview()` (script.js:92) — compiles expressions via `compileGraphExpressions` (graph.js:1448), calls `graphRenderer.render(...)`.
-- `updateGraphExprErrors(errors)` (script.js:113) — updates error badges on rows.
+- `scheduleGraphRender()` (script.js) — rAF-debounced.
+- `renderGraphPreview()` (script.js) — compiles expressions via `compileGraphExpressions` (math.js), calls `graphRenderer.render(...)`.
+- `updateGraphExprErrors(errors)` (script.js) — updates error badges on rows.
 
-**Crop:** `showGraphCropRect` (script.js:85) toggled by checkbox. `getGraphCropInfo(box)` (script.js:153), `updateGraphCropOverlay()` (script.js:201) manage the dashed overlay.
+**Crop:** `showGraphCropRect` (script.js) toggled by checkbox. `getGraphCropInfo(box)` (script.js), `updateGraphCropOverlay()` (script.js) manage the dashed overlay.
 
 **Snap tooltip:** `graphRenderer._onSnapUpdate` callback wired in `enterGraphMode` to update `#graph-snap-tooltip` with formatted `(x, y)`.
 
-**GraphRenderer singleton:** `getGraphRenderer()` (script.js:86) lazily creates one instance shared across all graph boxes.
+**GraphRenderer singleton:** `getGraphRenderer()` (script.js) lazily creates one instance shared across all graph boxes.
 
 ---
 
@@ -525,9 +527,9 @@ Each expression row has:
 Arrow keys / Tab navigate between expression rows. Enter in a row inserts a new row after it. Backspace on empty row deletes it.
 
 ### Implementation
-Built by `createGraphExprRow(expr)` (script.js:3158). MathQuill fields stored in `graphMqFields` map. `edit` handler debounces via `graphCommitTimer` then calls `commitGraphEditorToBox` + `scheduleGraphRender()`. `focusGraphExpr(idx, edge)` (script.js:3126) focuses a row by index.
+Built by `createGraphExprRow(expr)` (graph-ui.js). MathQuill fields stored in `graphMqFields` map. `edit` handler debounces via `graphCommitTimer` then calls `commitGraphEditorToBox` + `scheduleGraphRender()`. `focusGraphExpr(idx, edge)` (graph-ui.js) focuses a row by index.
 
-**Color palette:** `GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4']` (script.js:60). New expressions cycle via `nextGraphColor()`. Colors are stored as literal CSS hex and passed unchanged to the renderer — do not transform at render time.
+**Color palette:** `GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4']` (script.js). New expressions cycle via `nextGraphColor()`. Colors are stored as literal CSS hex and passed unchanged to the renderer — do not transform at render time.
 
 ---
 
@@ -548,7 +550,7 @@ The renderer uses a two-pass approach:
 Pan and zoom via mouse drag and scroll wheel. Snap-to-curve follows the cursor along a focused curve showing `(x, y)` in real time.
 
 ## Implementation
-**Class:** `GraphRenderer` (graph.js:1834). Singleton created by `getGraphRenderer()` (script.js:86).
+**Class:** `GraphRenderer` (graph.js). Singleton created by `getGraphRenderer()` (script.js).
 
 **Render entry:** `render(width, height, lightTheme, focusedExprId)` — resizes canvas/buffers if needed, computes aspect-corrected world bounds (X range authoritative, Y derived from aspect), then executes both passes.
 
@@ -623,13 +625,13 @@ A shared math expression pipeline used by both the graphing calculator (to compi
 Takes a MathQuill LaTeX string and produces either a numeric value, a GLSL shader expression, or a JavaScript evaluator function. The pipeline is: **tokenize → parse → AST → classify → analyze → evaluate/compile**.
 
 ## Implementation
-**File:** `graph.js`. Entry point: `parseLatexToAst(latex)` (graph.js:517).
+**File:** `math.js`. Entry point: `parseLatexToAst(latex)` (math.js).
 
-**Tokenizer:** `tokenize(src)` (graph.js:~143) — produces token array from LaTeX. Token types defined in `TK` object (graph.js:100).
+**Tokenizer:** `tokenize(src)` (math.js) — produces token array from LaTeX. Token types defined in `TK` object.
 
 *Multi-letter unit name matching:* The tokenizer greedily matches SI unit names (listed in `SI_ALL_UNIT_NAMES`, sorted longest-first) before falling back to single-letter IDENT tokens. This means `kg` tokenizes as one IDENT `kg`, not `k` × `g`. Any sequence of letters that begins a known unit name and is not directly adjacent to another letter on its left will match. Consequence: `kg`, `mol`, `Pa`, `Hz`, `rad`, etc. are always single variable-name tokens, even outside units mode. Multi-unit sequences without an explicit separator (e.g., `kgm`) are resolved greedily: `kg` matches first, then `m` separately.
 
-**Parser:** `Parser` class (graph.js:~195) — recursive descent. Methods: `parseExpr`, `parseSum`, `parseProduct`, `parseUnary`, `parsePower`, `parseAtom`, `parseCallArgs`. Handles: arithmetic, `\frac`, `\sqrt`, trig/log/exp, `\pi`, `\infty`, absolute value `|...|`, Greek letters, subscripts, user function calls.
+**Parser:** `Parser` class (math.js) — recursive descent. Methods: `parseExpr`, `parseSum`, `parseProduct`, `parseUnary`, `parsePower`, `parseAtom`, `parseCallArgs`. Handles: arithmetic, `\frac`, `\sqrt`, trig/log/exp, `\pi`, `\infty`, absolute value `|...|`, Greek letters, subscripts, user function calls.
 
 `\log` is compiled to `div(ln(x), ln(10))` — it does not appear as a `log` AST node. `\sqrt[n]{x}` compiles to `pow(x, div(1, n))`.
 
@@ -640,11 +642,11 @@ Takes a MathQuill LaTeX string and produces either a numeric value, a GLSL shade
 Both are handled in `evaluateAst`, `evaluateAstSymbolic`, `differentiateAst`, `astToGlsl`, and `astToJsFunction` by calling `differentiateAst` N times.
 
 **AST helpers:**
-- `collectVariables(ast)` (graph.js:528) — extract variable names
-- `substituteAst(ast, paramMap)` (graph.js:548) — bind params → args; variables not in map are left as-is
-- `collectFunctionCalls(ast, funcDefNames)` (graph.js:561) — find calls to user functions (for cycle detection)
+- `collectVariables(ast)` (math.js) — extract variable names
+- `substituteAst(ast, paramMap)` (math.js) — bind params → args; variables not in map are left as-is
+- `collectFunctionCalls(ast, funcDefNames)` (math.js) — find calls to user functions (for cycle detection)
 
-**`parseExpression(latex)`** (graph.js:580) — convenience wrapper returning `{ ast, error }`.
+**`parseExpression(latex)`** (math.js) — convenience wrapper returning `{ ast, error }`.
 
 ---
 
@@ -662,10 +664,10 @@ None.
 - User-defined functions `f(x) = body` are collected into `funcDefs: Map<name, { params, body, exprId }>`.
 
 ### Implementation
-- `classifyExpression(parsed)` (graph.js:599)
-- `analyzeExpressions(classifiedList)` (graph.js:635) — returns `{ funcDefs, allValues, xyDefNames, constantNames, errors }`
-- `evaluateConstants(analysis)` (graph.js:1240) — pre-compute non-xy-dependent definitions
-- `compileGraphExpressions(expressions)` (graph.js:1448) — full pipeline: parse → classify → analyze → compile each expression to `{ shaderCode, jsEvaluator }` or `{ error }`
+- `classifyExpression(parsed)` (math.js)
+- `analyzeExpressions(classifiedList)` (math.js) — returns `{ funcDefs, allValues, xyDefNames, constantNames, errors }`
+- `evaluateConstants(analysis)` (math.js) — pre-compute non-xy-dependent definitions
+- `compileGraphExpressions(expressions)` (math.js) — full pipeline: parse → classify → analyze → compile each expression to `{ shaderCode, jsEvaluator }` or `{ error }`
 
 ---
 
@@ -685,12 +687,12 @@ Numeric evaluation is needed for calc boxes and for pre-computing constants befo
 - **`astToLatex`** converts a simplified AST to a LaTeX string. Used for rendering unit results in the preview. Unit variable names are wrapped in `\text{...}`.
 
 ### Implementation
-- `evaluateAst(ast, values, funcDefs)` (graph.js:~863)
-- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` (graph.js:~971) — `valueMap` maps names to `number | ASTNode`; `opts.useSymbolic` keeps unknown vars symbolic; `opts.warnings` accumulates `{ funcName, units[] }` objects when transcendental functions receive unit arguments
-- `differentiateAst(ast, varName, funcDefs)` (graph.js:~1053)
-- `simplifyAst(ast)` (graph.js:~1390) — calls `_toCanonical`, `_combineTerms`, `_fromCanonical`
-- Internal helpers: `_atomKey` (graph.js:~1044), `_toCanonical` (graph.js:~1080), `_combineTerms` (graph.js:~1168), `_fromCanonical` (graph.js:~1180), `_simplifyAstFallback` (graph.js:~1228)
-- `astToLatex(ast)` (graph.js:~1395) — AST → LaTeX string; `_latexAtom(ast)` wraps add/sub/mul in parens when used as a `pow` base or `neg` operand (but not when used as a `mul` operand, since multiplication is associative)
+- `evaluateAst(ast, values, funcDefs)` (math.js)
+- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` (math.js) — `valueMap` maps names to `number | ASTNode`; `opts.useSymbolic` keeps unknown vars symbolic; `opts.warnings` accumulates `{ funcName, units[] }` objects when transcendental functions receive unit arguments
+- `differentiateAst(ast, varName, funcDefs)` (math.js)
+- `simplifyAst(ast)` (math.js) — calls `_toCanonical`, `_combineTerms`, `_fromCanonical`
+- Internal helpers: `_atomKey` (math.js), `_toCanonical` (math.js), `_combineTerms` (math.js), `_fromCanonical` (math.js), `_simplifyAstFallback` (math.js)
+- `astToLatex(ast)` (math.js) — AST → LaTeX string; `_latexAtom(ast)` wraps add/sub/mul in parens when used as a `pow` base or `neg` operand (but not when used as a `mul` operand, since multiplication is associative)
 
 ---
 
@@ -706,12 +708,12 @@ None.
 Takes an implicit expression (e.g. `x^2 + y^2 - 1`) and produces a GLSL float expression `F(x, y)`. Constants are inlined; x/y-dependent sub-expressions become GLSL variables. The full shader wraps this with the sign-change detection logic.
 
 ### Implementation
-- `astToGlsl(ast, constantNames, xyDefNames, funcDefs)` (graph.js:1256) — recursive AST → GLSL string
-- `astToJsFunction(ast, constantValues, funcDefs)` (graph.js:1316) — AST → JavaScript `function(x, y)` for snap-to-curve evaluation
-- `generateShaderCode(implicitExpr, analysis)` (graph.js:1384) — produces complete fragment shader GLSL
-- `buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs)` (graph.js:1514) — builds JS evaluator for one expression
+- `astToGlsl(ast, constantNames, xyDefNames, funcDefs)` (math.js) — recursive AST → GLSL string
+- `astToJsFunction(ast, constantValues, funcDefs)` (math.js) — AST → JavaScript `function(x, y)` for snap-to-curve evaluation
+- `generateShaderCode(implicitExpr, analysis)` (math.js) — produces complete fragment shader GLSL
+- `buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs)` (math.js) — builds JS evaluator for one expression
 
-**Error type:** `CompileError` (graph.js:17) — thrown on unknown LaTeX commands.
+**Error type:** `CompileError` (math.js) — thrown on unknown LaTeX commands.
 
 ---
 
@@ -784,12 +786,12 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
     .calc-sigfigs-label     "sf:" label
       .calc-sigfigs-input   number input (1–15, default 6)
   .calc-expr-list
-    .calc-expr-row
-      .calc-expr-main
+    .expr-wrapper           (shared with graph editor rows)
+      .expr-row
         .expr-toggle        pill button
-        .calc-expr-mq       MathQuill field
+        .expr-mq            MathQuill field
         .calc-expr-result   result text (plain text or inline HTML for fractions)
-        .calc-expr-delete   × button
+        .expr-delete        × button
       .calc-expr-error      error text (hidden unless error)
       .calc-unit-warning    warning text (hidden unless unit mismatch)
   .calc-add-btn             "+ Expression"
@@ -845,12 +847,12 @@ Evaluates a list of math expressions in dependency order, supporting variable de
 **Variable definition LHS constraint:** The LHS regex only accepts single-letter variable names or Greek letters (with optional subscript). Multi-letter names (including unit names like `kg`) are treated as equations, not definitions — this is intentional to prevent shadowing unit symbols.
 
 ### Implementation
-- `evaluateCalcExpressions(expressions, opts)` (graph.js:~1840) — main evaluator
+- `evaluateCalcExpressions(expressions, opts)` (math.js) — main evaluator
   - `opts.usePhysicsConstants` — inject PHYSICS_CONSTANTS into values map
   - `opts.useUnits` — enable units mode: builds `unitValues` map (physics constants + derived unit ASTs), uses `evaluateAstSymbolic` for all evaluation
   - `opts.useSymbolic` — only meaningful with `useUnits`; keeps undefined non-unit variables symbolic rather than throwing
-- `findCalcOperatorAtDepth0(s)` (graph.js:66) — finds `=`, `<`, `>`, `\leq`, `\geq`, `\neq` at brace-depth 0; returns `{ idx, len, op }` or `null`
-- `findEqAtDepth0(s)` (graph.js:49) — finds `=` only
+- `findCalcOperatorAtDepth0(s)` (math.js) — finds `=`, `<`, `>`, `\leq`, `\geq`, `\neq` at brace-depth 0; returns `{ idx, len, op }` or `null`
+- `findEqAtDepth0(s)` (math.js) — finds `=` only
 
 **Units mode internal data flow:** When `useUnits` is true, a parallel `unitValues: Map<name, number|ASTNode>` is built alongside `allValues`. Derived unit names (N, J, W, etc.) are pre-loaded as ASTs via `buildDerivedUnitParamMap()`. Variable definitions are resolved into `unitValues` using `evaluateAstSymbolic`. The `evalToResult` helper (defined inside the expression loop) dispatches to either `evaluateAstSymbolic` or `evaluateAst` based on the mode.
 
@@ -883,14 +885,14 @@ In the preview, unit results use `astToLatex` output embedded directly in displa
 
 ## Implementation
 **Constants in graph.js:**
-- `SI_BASE_UNITS` (graph.js:~51) — `Set` of 7 base unit symbols: `m`, `s`, `kg`, `A`, `K`, `mol`, `cd`
-- `DERIVED_UNIT_EXPANSIONS` (graph.js:~55) — object mapping 12 derived unit names to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad
-- `SI_ALL_UNIT_NAMES` (graph.js:~71) — all unit names sorted longest-first; used by the tokenizer for greedy matching
+- `SI_BASE_UNITS` (math.js) — `Set` of 7 base unit symbols: `m`, `s`, `kg`, `A`, `K`, `mol`, `cd`
+- `DERIVED_UNIT_EXPANSIONS` (math.js) — object mapping 12 derived unit names to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad
+- `SI_ALL_UNIT_NAMES` (math.js) — all unit names sorted longest-first; used by the tokenizer for greedy matching
 
 **Helper functions in graph.js:**
-- `buildDerivedUnitParamMap()` (graph.js:~928) — converts `DERIVED_UNIT_EXPANSIONS` into a `Map<name, ASTNode>` where each AST represents the base-unit expansion. E.g., N → `mul(kg, mul(m, pow(s, -2)))`. This map is merged into `unitValues` at the start of units-mode evaluation so that `substituteAst`-style substitution expands derived units automatically via `evaluateAstSymbolic`.
-- `collectUnitVarsInAst(ast)` (graph.js:~947) — walks an AST and returns a `Set` of SI base unit variable names found in it. Used to determine which units appear in a transcendental function's argument (for warnings).
-- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` (graph.js:~971) — symbolic evaluator (see [AST Evaluation & Simplification](#ast-evaluation--simplification))
+- `buildDerivedUnitParamMap()` (math.js) — converts `DERIVED_UNIT_EXPANSIONS` into a `Map<name, ASTNode>` where each AST represents the base-unit expansion. E.g., N → `mul(kg, mul(m, pow(s, -2)))`. This map is merged into `unitValues` at the start of units-mode evaluation so that `substituteAst`-style substitution expands derived units automatically via `evaluateAstSymbolic`.
+- `collectUnitVarsInAst(ast)` (math.js) — walks an AST and returns a `Set` of SI base unit variable names found in it. Used to determine which units appear in a transcendental function's argument (for warnings).
+- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` (math.js) — symbolic evaluator (see [AST Evaluation & Simplification](#ast-evaluation--simplification))
 
 **Display helpers in script.js (after `formatCalcResult`, script.js:~310):**
 - `toSuperscript(n)` — converts integer to Unicode superscript string (⁻², ³, etc.)
@@ -1098,7 +1100,7 @@ Constants are split into three independently toggleable groups, each with its ow
 When a group is enabled, its constants are injected as pre-defined variables in the calc box. Constants appear as hover tooltips on the toolbar buttons. A small badge displays the constant's value when recognized in an expression.
 
 ## Implementation
-**`PHYSICS_CONSTANTS_BASIC` / `PHYSICS_CONSTANTS_EM` / `PHYSICS_CONSTANTS_CHEM`** (graph.js:~31) — three arrays of `{ varName, value, label, description, unitDims }` objects. `PHYSICS_CONSTANTS` is their concatenation, used for legacy deserialization. `varName` must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps SI base unit names to exponents; dimensionless constants use `{}`.
+**`PHYSICS_CONSTANTS_BASIC` / `PHYSICS_CONSTANTS_EM` / `PHYSICS_CONSTANTS_CHEM`** (math.js) — three arrays of `{ varName, value, label, description, unitDims }` objects. `PHYSICS_CONSTANTS` is their concatenation, used for legacy deserialization. `varName` must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps SI base unit names to exponents; dimensionless constants use `{}`.
 
 **In `evaluateCalcExpressions`** — accepts `usePhysicsBasic`, `usePhysicsEM`, `usePhysicsChem` (plus legacy `usePhysicsConstants`). Active constants from enabled groups are merged into `allValues` as plain numbers. In units mode, they are additionally merged into `unitValues` as unit ASTs via `buildConstantUnitAst(pc.value, pc.unitDims)`.
 

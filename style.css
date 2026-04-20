@@ -341,18 +341,32 @@ html, body {
 #graph-expr-list::-webkit-scrollbar-track { background: transparent; }
 #graph-expr-list::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
 
-.graph-expr-row {
+.expr-wrapper {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 0;
   padding: 5px 8px;
   background: #181825;
   border: 1px solid #313244;
   border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
-.graph-expr-handle {
+.expr-wrapper.expr-disabled {
+  opacity: 0.45;
+}
+
+.expr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.expr-drag-handle {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -366,15 +380,13 @@ html, body {
   line-height: 1;
 }
 
-.graph-expr-handle:hover {
+.expr-drag-handle:hover {
   color: #7f849c;
 }
 
-.graph-expr-handle:active {
+.expr-drag-handle:active {
   cursor: grabbing;
 }
-
-/* .graph-expr-toggle is now a pill button (.expr-toggle) — no extra styles needed */
 
 .graph-expr-color-swatch {
   flex-shrink: 0;
@@ -460,24 +472,30 @@ html, body {
   border-color: #89b4fa;
 }
 
-.graph-expr-mq {
+.expr-mq {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
-/* Override MathQuill border inside graph expr rows */
-.graph-expr-row .mq-editable-field {
+/* Override MathQuill border inside expr rows */
+.expr-mq .mq-editable-field {
   border: none !important;
   background: transparent !important;
+  box-shadow: none !important;
+  display: block !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
   font-size: 14px;
 }
 
-.graph-expr-row .mq-editable-field.mq-focused {
+.expr-mq .mq-editable-field.mq-focused {
   box-shadow: none !important;
   background: transparent !important;
 }
 
-.graph-expr-delete {
+.expr-delete {
   flex-shrink: 0;
   background: none;
   border: none;
@@ -493,7 +511,7 @@ html, body {
   transition: color 0.1s, background 0.1s;
 }
 
-.graph-expr-delete:hover {
+.expr-delete:hover {
   color: #f38ba8;
   background: #313244;
 }
@@ -558,8 +576,7 @@ html, body {
   text-overflow: ellipsis;
 }
 
-.graph-expr-row.has-error .mq-editable-field,
-.calc-expr-row.has-error .mq-editable-field {
+.expr-wrapper.has-error .mq-editable-field {
   border-color: #f38ba8;
 }
 
@@ -1475,30 +1492,6 @@ html, body {
   width: 100%;
 }
 
-.calc-expr-row {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 5px 8px;
-  background: #181825;
-  border: 1px solid #313244;
-  border-radius: 6px;
-  width: 100%;
-  box-sizing: border-box;
-  min-width: 0;
-}
-
-.calc-expr-row.calc-expr-disabled {
-  opacity: 0.45;
-}
-
-.calc-expr-main {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-}
 
 .calc-expr-error {
   font-size: 11px;
@@ -1570,26 +1563,6 @@ html, body {
   opacity: 1;
 }
 
-.calc-expr-mq {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.calc-expr-mq .mq-editable-field {
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  display: block !important;
-  width: 100% !important;
-  min-width: 0 !important;
-  box-sizing: border-box !important;
-  font-size: 14px;
-}
-
-.calc-expr-mq .mq-editable-field.mq-focused {
-  background: transparent !important;
-}
 
 .calc-expr-result {
   flex-shrink: 0;
@@ -1607,26 +1580,6 @@ html, body {
   color: #cdd6f4;
 }
 
-.calc-expr-delete {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: #585b70;
-  cursor: pointer;
-  font-size: 16px;
-  width: 22px;
-  height: 22px;
-  border-radius: 3px;
-  padding: 0;
-  line-height: 22px;
-  text-align: center;
-  transition: color 0.1s, background 0.1s;
-}
-
-.calc-expr-delete:hover {
-  color: #f38ba8;
-  background: #313244;
-}
 
 .calc-add-btn {
   margin: 4px 10px 2px;

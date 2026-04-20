@@ -114,23 +114,23 @@ function renderGraphPreview() {
 
 /** Update error indicators on graph expression rows. */
 function updateGraphExprErrors(errors) {
-  const rows = document.querySelectorAll('#graph-expr-list .graph-expr-row');
-  for (const row of rows) {
-    const exprId = row.dataset.exprId;
+  const wrappers = document.querySelectorAll('#graph-expr-list .expr-wrapper');
+  for (const wrapper of wrappers) {
+    const exprId = wrapper.dataset.exprId;
     const errorMsg = errors.get(exprId);
-    let errorEl = row.querySelector('.graph-expr-error');
+    let errorEl = wrapper.querySelector('.graph-expr-error');
     if (errorMsg) {
       if (!errorEl) {
         errorEl = document.createElement('span');
         errorEl.className = 'graph-expr-error';
-        row.appendChild(errorEl);
+        wrapper.appendChild(errorEl);
       }
       errorEl.textContent = errorMsg;
       errorEl.title = errorMsg;
-      row.classList.add('has-error');
+      wrapper.classList.add('has-error');
     } else {
       if (errorEl) errorEl.remove();
-      row.classList.remove('has-error');
+      wrapper.classList.remove('has-error');
     }
   }
 }
@@ -544,7 +544,7 @@ function commitCalcBox(boxId) {
   if (idx === -1) return;
   const fieldMap = calcMqFields.get(boxId);
   if (!fieldMap) return;
-  const rows = boxList.querySelectorAll(`[data-id="${boxId}"] .calc-expr-row`);
+  const rows = boxList.querySelectorAll(`[data-id="${boxId}"] .expr-wrapper`);
   const expressions = [];
   for (const row of rows) {
     const exprId = row.dataset.exprId;
@@ -1745,81 +1745,90 @@ function createBoxElement(box) {
 
     // ── Helper: create one expression row ────────────────────────────────────
     function createCalcExprRow(expr) {
-      const row = document.createElement('div');
-      row.className = 'calc-expr-row' + (expr.enabled ? '' : ' calc-expr-disabled');
-      row.dataset.exprId = expr.id;
-
-      // Inner row: toggle + MQ field + result + delete button
-      const mainRow = document.createElement('div');
-      mainRow.className = 'calc-expr-main';
-      row.appendChild(mainRow);
-
-      // Pill toggle (enable/disable)
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'expr-toggle';
-      toggle.setAttribute('aria-pressed', expr.enabled ? 'true' : 'false');
-      toggle.title = expr.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
-      toggle.addEventListener('click', () => {
-        const isEnabled = toggle.getAttribute('aria-pressed') !== 'true';
-        toggle.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
-        toggle.title = isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
-        row.classList.toggle('calc-expr-disabled', !isEnabled);
-        commitCalcBox(box.id);
-        scheduleCalcUpdate(box.id);
-      });
-      mainRow.appendChild(toggle);
-
-      // MathQuill field
-      const mqSpan = document.createElement('span');
-      mqSpan.className = 'calc-expr-mq';
-      mainRow.appendChild(mqSpan);
-
-      // Result display
+      // Result display span passed as rightSlot to createExprRow
       const resultSpan = document.createElement('span');
       resultSpan.className = 'calc-expr-result';
       resultSpan.style.display = 'none';
-      mainRow.appendChild(resultSpan);
+      resultSpan.title = 'Click to copy';
+      resultSpan.style.cursor = 'pointer';
 
-      // Delete button
-      const delBtn = document.createElement('button');
-      delBtn.type = 'button';
-      delBtn.className = 'calc-expr-delete';
-      delBtn.textContent = '×';
-      delBtn.title = 'Delete expression';
-      delBtn.addEventListener('mousedown', e => e.preventDefault());
-      delBtn.addEventListener('click', () => {
-        const idx = boxes.findIndex(b => b.id === box.id);
-        if (idx === -1) return;
-        const exprIdx = boxes[idx].expressions.findIndex(e => e.id === expr.id);
-        if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-        calcFieldMap.delete(expr.id);
-        calcUpdateFns.delete(expr.id);
-        row.remove();
-        commitCalcBox(box.id);
-        scheduleCalcUpdate(box.id);
+      //Claude: please do not touch the greek letters. There are some I dont want (like psi) because the interefere with others (you can spell epsilon without psi for example)
+      const greekLetters = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi omega';
+
+      const { wrapper, mqField: field, mqSpan } = createExprRow(expr, {
+        rightSlot: resultSpan,
+        autoCommands: 'sqrt sum int prod infty partial leq geq neq ' + greekLetters,
+        onToggle: () => {
+          commitCalcBox(box.id);
+          scheduleCalcUpdate(box.id);
+        },
+        onDelete: () => {
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (idx === -1) return;
+          const exprIdx = boxes[idx].expressions.findIndex(e => e.id === expr.id);
+          if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+          calcFieldMap.delete(expr.id);
+          calcUpdateFns.delete(expr.id);
+          wrapper.remove();
+          commitCalcBox(box.id);
+          scheduleCalcUpdate(box.id);
+        },
+        onEdit: () => {
+          commitCalcBox(box.id);
+          scheduleCalcUpdate(box.id);
+        },
+        onEnter: () => {
+          const addAfter = calcAddExprFns.get(box.id);
+          if (addAfter) addAfter(expr.id);
+        },
+        onMoveOut: (dir) => {
+          const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+          const idx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+          if (dir === 1 && idx < wrappers.length - 1) {
+            calcFieldMap.get(wrappers[idx + 1].dataset.exprId)?.focus();
+          } else if (dir === -1 && idx > 0) {
+            calcFieldMap.get(wrappers[idx - 1].dataset.exprId)?.focus();
+          } else {
+            const boxIdx = boxes.findIndex(b => b.id === box.id);
+            if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+            else if (dir === -1 && boxIdx > 0)          focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+          }
+        },
+        onBackspaceEmpty: () => {
+          const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+          const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+          if (wrappers.length > 1) {
+            const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+            calcFieldMap.get(focusTarget)?.focus();
+          }
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (idx !== -1) {
+            const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+            if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+          }
+          calcFieldMap.delete(expr.id);
+          calcUpdateFns.delete(expr.id);
+          wrapper.remove();
+          commitCalcBox(box.id);
+          scheduleCalcUpdate(box.id);
+        },
       });
-      mainRow.appendChild(delBtn);
 
       // Error line (shown below the main row when this expression has an error)
       const errorLine = document.createElement('div');
       errorLine.className = 'calc-expr-error';
       errorLine.style.display = 'none';
-      row.appendChild(errorLine);
+      wrapper.appendChild(errorLine);
 
       // Warning line (shown below when a unit mismatch is detected)
       const warningLine = document.createElement('div');
       warningLine.className = 'calc-unit-warning';
       warningLine.style.display = 'none';
-      row.appendChild(warningLine);
+      wrapper.appendChild(warningLine);
 
-      // Click-to-copy on result span
-      resultSpan.title = 'Click to copy';
-      resultSpan.style.cursor = 'pointer';
       resultSpan.addEventListener('click', () => {
         const val = resultSpan.textContent;
         if (!val) return;
-        // Strip leading "= " or "≈ " prefix so only the value is copied
         const num = val.replace(/^[=≈]\s*/, '');
         navigator.clipboard.writeText(num).then(() => {
           const prevHtml = resultSpan.innerHTML;
@@ -1838,17 +1847,14 @@ function createBoxElement(box) {
         const result = resultMap ? resultMap.get(expr.id) : null;
         const currentExpr = boxes.find(b => b.id === box.id)?.expressions?.find(e => e.id === expr.id);
         const currentLatex = currentExpr?.latex || '';
-        // For numeric-literal defs (x = 5), the result is redundant even in the box
         const kind = classifyCalcExpr(currentLatex);
         let suppress = false;
         if (kind === 'def') {
           const op = findCalcOperatorAtDepth0(currentLatex.trim());
           const rhs = op ? currentLatex.trim().slice(op.idx + op.len).trim() : '';
-          // Only suppress for actual definitions (value result), not equality checks (boolValue)
           suppress = isNumericLiteralLatex(rhs) && !(result && result.boolValue !== undefined);
         }
 
-        // Clear warning line each update
         warningLine.style.display = 'none';
         warningLine.textContent = '';
 
@@ -1856,15 +1862,13 @@ function createBoxElement(box) {
           errorLine.textContent = result.error;
           errorLine.style.display = '';
           resultSpan.style.display = 'none';
-          row.classList.add('has-error');
+          wrapper.classList.add('has-error');
         } else if (result && result.unitAst !== undefined && !suppress) {
-          // Unit mode result
           errorLine.style.display = 'none';
-          row.classList.remove('has-error');
+          wrapper.classList.remove('has-error');
           renderUnitResult(resultSpan, result.unitAst, result.warnings, boxes.find(b => b.id === box.id)?.sigFigs ?? 6);
           resultSpan.style.display = '';
           resultSpan.style.color = '';
-          // Show warnings if any
           const warnText = formatUnitWarnings(result.warnings);
           if (warnText) {
             warningLine.textContent = warnText;
@@ -1880,100 +1884,25 @@ function createBoxElement(box) {
             if (result.boolValue === true)  resultSpan.style.color = '#4ec9b0';
             else if (result.boolValue === false) resultSpan.style.color = '#f44747';
             else resultSpan.style.color = '';
-            row.classList.remove('has-error');
+            wrapper.classList.remove('has-error');
           } else {
             errorLine.style.display = 'none';
             resultSpan.style.display = 'none';
-            row.classList.remove('has-error');
+            wrapper.classList.remove('has-error');
           }
         }
       };
       calcUpdateFns.set(expr.id, updateResult);
 
-      // MathQuill setup
-      //Claude: please do not touch the greek letters. There are some I dont want (like psi) because the interefere with others (you can spell epsilon without psi for example)
-      const greekLetters = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi omega';
-      const field = MQ.MathField(mqSpan, {
-        spaceBehavesLikeTab: false,
-        autoCommands: 'sqrt sum int prod infty partial leq geq neq ' + greekLetters,
-        autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp',
-        handlers: {
-          edit: () => {
-            commitCalcBox(box.id);
-            scheduleCalcUpdate(box.id);
-          },
-          enter: () => {
-            const addAfter = calcAddExprFns.get(box.id);
-            if (addAfter) addAfter(expr.id);
-          },
-          moveOutOf: (dir) => {
-            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
-            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-            if (dir === 1 && idx < rows.length - 1) {
-              calcFieldMap.get(rows[idx + 1].dataset.exprId)?.focus();
-            } else if (dir === -1 && idx > 0) {
-              calcFieldMap.get(rows[idx - 1].dataset.exprId)?.focus();
-            } else {
-              // At edge of calc box — navigate to adjacent box
-              const boxIdx = boxes.findIndex(b => b.id === box.id);
-              if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-              else if (dir === -1 && boxIdx > 0)          focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-            }
-          },
-          upOutOf: () => {
-            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
-            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-            if (idx > 0) {
-              calcFieldMap.get(rows[idx - 1].dataset.exprId)?.focus();
-            } else {
-              const boxIdx = boxes.findIndex(b => b.id === box.id);
-              if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-            }
-          },
-          downOutOf: () => {
-            const rows = [...exprList.querySelectorAll('.calc-expr-row')];
-            const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-            if (idx < rows.length - 1) {
-              calcFieldMap.get(rows[idx + 1].dataset.exprId)?.focus();
-            } else {
-              const boxIdx = boxes.findIndex(b => b.id === box.id);
-              if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-            }
-          },
-        },
-      });
       if (expr.latex) field.latex(expr.latex);
       calcFieldMap.set(expr.id, field);
-
-      // Backspace on empty field → delete the expression row
-      mqSpan.addEventListener('keydown', e => {
-        if (e.key !== 'Backspace' || field.latex() !== '') return;
-        e.preventDefault();
-        const rows = [...exprList.querySelectorAll('.calc-expr-row')];
-        const rowIdx = rows.findIndex(r => r.dataset.exprId === expr.id);
-        // Focus the previous row (or next if this is the first), unless it's the only row
-        if (rows.length > 1) {
-          const focusTarget = rowIdx > 0 ? rows[rowIdx - 1].dataset.exprId : rows[rowIdx + 1].dataset.exprId;
-          calcFieldMap.get(focusTarget)?.focus();
-        }
-        const idx = boxes.findIndex(b => b.id === box.id);
-        if (idx !== -1) {
-          const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
-          if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-        }
-        calcFieldMap.delete(expr.id);
-        calcUpdateFns.delete(expr.id);
-        row.remove();
-        commitCalcBox(box.id);
-        scheduleCalcUpdate(box.id);
-      }, true); // capture phase: fires before MathQuill's inner textarea handler
 
       mqSpan.addEventListener('focusin',  () => setFocused(box.id, div));
       mqSpan.addEventListener('focusout', (e) => {
         if (!div.contains(e.relatedTarget)) clearFocused(box.id, div);
       });
 
-      return row;
+      return wrapper;
     }
 
     // Populate expression list
@@ -2007,7 +1936,7 @@ function createBoxElement(box) {
           boxes[idx].expressions.push(newExpr);
         }
         // Insert into DOM after the correct row
-        const afterRow = exprList.querySelector(`.calc-expr-row[data-expr-id="${afterExprId}"]`);
+        const afterRow = exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
         const newRow = createCalcExprRow(newExpr);
         if (afterRow) {
           exprList.insertBefore(newRow, afterRow.nextSibling);
@@ -2745,578 +2674,6 @@ function pasteBox() {
   focusBox(newBox.id);
 }
 
-// ── Preview ───────────────────────────────────────────────────────────────────
-
-// Blackboard bold shorthands: RR → \mathbb{R}, etc.
-// Applied to LaTeX strings in the preview only; boxes/source are left untouched.
-// IMPORTANT: call this BEFORE escapeHtml so that <-/-> are substituted before < and > are escaped.
-const BB_SUBS = {
-  'RR': '\\mathbb{R}',
-  'CC': '\\mathbb{C}',
-  'ZZ': '\\mathbb{Z}',
-  'NN': '\\mathbb{N}',
-  'QQ': '\\mathbb{Q}',
-  'FF': '\\mathbb{F}',
-  'HH': '\\mathbb{H}',
-};
-function applyBBSubs(latex) {
-  let out = latex;
-  out = out.replace(/<=/g, '\\leq ');
-  out = out.replace(/>=/g, '\\geq ');
-  out = out.replace(/->/g, '\\rightarrow ');
-  out = out.replace(/<-/g, '\\leftarrow ');
-  out = out.replace(/!=/g, '\\neq ');
-  for (const [key, val] of Object.entries(BB_SUBS)) out = out.replaceAll(key, val);
-  return out;
-}
-
-// Escape HTML and convert $...$ to MathJax inline math \(...\).
-// Splits on dollar-sign pairs; odd-indexed segments are math, even are plain text.
-const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-function processTextContent(text) {
-  return text.split(/\$([^$]+)\$/).map((part, i) => {
-    if (i % 2 === 1) return `\\(${escapeHtml(applyBBSubs(part))}\\)`;
-    return escapeHtml(part).replace(/\n/g, '<br>');
-  }).join('');
-}
-
-function schedulePreview(delay = PREVIEW_DEBOUNCE_MS) {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(() => updatePreview(), delay);
-}
-
-let previewRunning = false;
-let previewPending = false;
-
-// Build the inner preview DOM element for a single box with raw (un-typeset)
-// content. Graph and pagebreak boxes never go through MathJax; math/text/heading
-// boxes will be passed to typesetPromise after this returns.
-function createPreviewElement(box) {
-  if (box.type === 'math') {
-    const div = document.createElement('div');
-    div.className = 'preview-math';
-    div.dataset.boxId = box.id;
-    // Use textContent so the backslashes are literal characters in the text node,
-    // which is what MathJax's input scanner expects to find.
-    div.textContent = `\\[${applyBBSubs(box.content)}\\]`;
-    return div;
-  }
-  if (box.type === 'h1' || box.type === 'h2' || box.type === 'h3') {
-    const el = document.createElement(box.type);
-    el.className = `preview-${box.type}`;
-    el.dataset.boxId = box.id;
-    el.innerHTML = processTextContent(box.content);
-    return el;
-  }
-  if (box.type === 'pagebreak') {
-    const div = document.createElement('div');
-    div.className = 'preview-pagebreak';
-    div.dataset.boxId = box.id;
-    return div;
-  }
-  if (box.type === 'calc') {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'preview-calc-box';
-    wrapper.dataset.boxId = box.id;
-    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
-    for (const expr of (box.expressions || [])) {
-      if (!expr.enabled) continue;
-      const latex = (expr.latex || '').trim();
-      if (!latex) continue;
-      const result = results.get(expr.id);
-      const div = document.createElement('div');
-      div.className = 'preview-math';
-      // In units mode, wrap unit names in \text{} for upright rendering.
-      // Substitutes directly in the original LaTeX to avoid altering structure.
-      let displayLatex = latex;
-      if (box.useUnits) {
-        const op = findCalcOperatorAtDepth0(latex);
-        if (op) {
-          const lhs = latex.slice(0, op.idx).trim();
-          const rhs = latex.slice(op.idx + op.len).trim();
-          displayLatex = `${lhs} = ${_wrapUnitsInText(rhs)}`;
-        } else {
-          displayLatex = _wrapUnitsInText(latex);
-        }
-      }
-      // Determine whether to show the result
-      let showResult = false;
-      let resultLatex = null;
-      if (result && !result.error && result.boolValue === undefined) {
-        const kind = classifyCalcExpr(latex);
-        const shouldShow = kind === 'def'
-          ? (() => { const op = findCalcOperatorAtDepth0(latex); const rhs = op ? latex.slice(op.idx + op.len).trim() : ''; return !isNumericLiteralLatex(rhs) && box.showResultsDefs !== false; })()
-          : (kind === 'bare' && box.showResultsBare !== false);
-        if (shouldShow) {
-          if (result.unitAst !== undefined) {
-            // Unit result: render via astToLatex for MathJax, or matched derived unit
-            const _match = matchDerivedUnit(astToUnitSignature(result.unitAst));
-            if (_match) {
-              const { name, power, coeff } = _match;
-              let s = '';
-              if (coeff === -1) s += '-';
-              else if (coeff !== 1) s += _numToLatex(coeff, box.sigFigs ?? 6) + ' \\, ';
-              if (name.includes('/')) {
-                const [num, den] = name.split('/');
-                s += `\\frac{\\text{${num}}}{\\text{${den}}}`;
-                if (power !== 1) s += `^{${power}}`;
-              } else {
-                s += `\\text{${name}}`;
-                if (power !== 1) s += `^{${power}}`;
-              }
-              resultLatex = s;
-            } else {
-              resultLatex = astToLatex(result.unitAst, box.sigFigs ?? 6);
-            }
-            showResult = true;
-          } else {
-            const formatted = formatCalcResultLatex(result, box.sigFigs ?? 6);
-            if (formatted !== null) { resultLatex = formatted; showResult = true; }
-          }
-        }
-      }
-      let previewLatex;
-      if (showResult && result && result.unitAst !== undefined) {
-        previewLatex = `\\[${displayLatex} = ${resultLatex}\\]`;
-      } else if (showResult) {
-        previewLatex = `\\[${displayLatex} ${resultLatex}\\]`;
-      } else {
-        previewLatex = `\\[${displayLatex}\\]`;
-      }
-      div.textContent = previewLatex;
-      wrapper.appendChild(div);
-    }
-    return wrapper;
-  }
-  if (box.type === 'image') {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'preview-image-box';
-    wrapper.dataset.boxId = box.id;
-    if (!box.src) return wrapper;
-    const a = box.align || 'left';
-    wrapper.style.display = 'flex';
-    wrapper.style.justifyContent = a === 'center' ? 'center' : a === 'right' ? 'flex-end' : 'flex-start';
-
-    function applyPreviewSize(img) {
-      const w = box.width || 0, h = box.height || 0;
-      if (w || h) {
-        img.style.width  = w ? `${w}px` : 'auto';
-        img.style.height = h ? `${h}px` : 'auto';
-        img.style.objectFit = box.fit === 'crop' ? 'cover' : 'fill';
-      }
-    }
-    if (box.mode === 'url') {
-      const img = document.createElement('img');
-      img.src = box.src;
-      img.alt = box.alt || '';
-      applyPreviewSize(img);
-      wrapper.appendChild(img);
-    } else {
-      // File mode: async IDB load
-      const placeholder = document.createElement('div');
-      placeholder.className = 'preview-image-placeholder';
-      placeholder.textContent = 'Loading image…';
-      wrapper.appendChild(placeholder);
-      idbLoadImageAsObjectURL(box.src).then(objUrl => {
-        if (objUrl) {
-          placeholder.remove();
-          const img = document.createElement('img');
-          img.src = objUrl;
-          img.alt = box.alt || '';
-          applyPreviewSize(img);
-          wrapper.appendChild(img);
-        } else {
-          placeholder.textContent = 'Image file not found';
-        }
-      }).catch(() => { placeholder.textContent = 'Image file not found'; });
-    }
-    return wrapper;
-  }
-  if (box.type === 'graph') {
-    const div = document.createElement('div');
-    div.dataset.boxId = box.id;
-    if (box._snapshotDataUrl) {
-      div.className = 'preview-graph-image';
-      div.style.cssText = 'text-align:center;margin:8px 0';
-      const img = document.createElement('img');
-      img.src = box._snapshotDataUrl;
-      img.style.cssText = `max-width:100%;width:${box.width || 600}px;height:auto;border-radius:4px`;
-      div.appendChild(img);
-    } else {
-      const n = (box.expressions || []).filter(e => e.enabled).length;
-      div.className = 'preview-graph-placeholder';
-      div.style.cssText = `width:${box.width || 600}px;height:${box.height || 400}px`;
-      const span = document.createElement('span');
-      span.textContent = `${n} expression${n !== 1 ? 's' : ''}`;
-      div.appendChild(span);
-    }
-    return div;
-  }
-  // text box (default)
-  const p = document.createElement('p');
-  p.className = 'preview-text';
-  p.dataset.boxId = box.id;
-  p.innerHTML = processTextContent(box.content);
-  return p;
-}
-
-async function updatePreview() {
-  if (!isPreviewOpen) return;
-  if (graphModeBoxId) return; // preview panel is used for graph canvas in graph mode
-  if (previewRunning) { previewPending = true; return; }
-  previewRunning = true;
-  previewPending = false;
-
-  // Build a new page div from cached + fresh elements. Graph and pagebreak boxes
-  // are always recreated (no MathJax cost). Math/text/heading elements are reused
-  // from cache when their content hasn't changed, so typesetPromise only runs on
-  // the subset that actually changed.
-  const pageDiv = document.createElement('div');
-  pageDiv.className = 'preview-page';
-
-  const toTypeset = []; // elements that need MathJax this cycle
-  const activeIds = new Set();
-
-
-  
-  const innerEls = [];
-  
-  for (const box of boxes) {
-    if (box.commented) continue;
-    activeIds.add(box.id);
-
-    // Cache key encodes everything that affects the rendered output.
-    // Graph boxes always bypass the cache (snapshot url changes independently).
-    const needsCache = box.type !== 'graph' && box.type !== 'pagebreak' && box.type !== 'image';
-    const cacheKey = box.type === 'calc'
-      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
-      : `${box.type}|${box.content}`;
-    const cached = needsCache ? previewBoxCache.get(box.id) : null;
-
-    let innerEl;
-    if (cached && cached.key === cacheKey) {
-      innerEl = cached.el; // reuse the already-typeset DOM node
-    } else {
-      // Content changed — discard the old rendered element and tell MathJax to
-      // release its internal state for it, preventing unbounded list growth.
-      if (cached) window.MathJax?.typesetClear?.([cached.el]);
-      innerEl = createPreviewElement(box);
-      if (needsCache) {
-        previewBoxCache.set(box.id, { key: cacheKey, el: innerEl });
-        toTypeset.push(innerEl);
-      }
-    }
-    innerEls.push([innerEl,box]);
-  }
-  let cachedMissed = !metricsCache;
-
-  //If there are no cached metrics add the divs to the DOM before running mathjax on them so that the metrics can be cached.
-  if(cachedMissed){
-    for(let innerEl of innerEls){
-      if (innerEl[1].highlighted) {
-        const wrap = document.createElement('div');
-        wrap.className = 'preview-highlight-box';
-        if (innerEl[1].fillColor) wrap.style.background = innerEl[1].fillColor;
-        wrap.appendChild(innerEl[0]);
-        pageDiv.appendChild(wrap);
-      } else {
-        pageDiv.appendChild(innerEl[0]);
-      }
-    }
-  }
-  
-
-  // Evict cache entries for boxes that no longer exist, and release their
-  // MathJax state so the internal MathDocument list doesn't grow unboundedly.
-  // Without this, Firefox degrades severely after many create/delete cycles.
-  for (const [id, entry] of previewBoxCache) {
-    if (!activeIds.has(id)) {
-      window.MathJax?.typesetClear?.([entry.el]);
-      previewBoxCache.delete(id);
-    }
-  }
-
-  // Swap in the new page. Cached elements are already in pageDiv so they
-  // survive the innerHTML clear as detached (but still JS-referenced) nodes.
-  previewContent.innerHTML = '';
-  previewContent.appendChild(pageDiv);
-
-  if (toTypeset.length > 0 && window.MathJax?.typesetPromise) {
-    await MathJax.typesetPromise(toTypeset);
-    // Eliminate SVG stroke rendering that causes artefacts in printed PDFs.
-    // Must set stroke="none" on every element individually — PDF renderers don't
-    // reliably cascade SVG attributes, and child stroke-width="0" can reintroduce strokes.
-    for (const el of toTypeset) {
-      el.querySelectorAll('svg, svg *').forEach(e => e.setAttribute('stroke', 'none'));
-    }
-  }
-
-  //If there are cached metrics add the divs after mathjax has rendered to avoid reflowing the entire page
-  if(!cachedMissed){
-    for(let innerEl of innerEls){
-      if (innerEl[1].highlighted) {
-        const wrap = document.createElement('div');
-        wrap.className = 'preview-highlight-box';
-        if (innerEl[1].fillColor) wrap.style.background = innerEl[1].fillColor;
-        wrap.appendChild(innerEl[0]);
-        pageDiv.appendChild(wrap);
-      } else {
-        pageDiv.appendChild(innerEl[0]);
-      }
-    }
-  }
-
-  paginatePreview();  // split content across separate page divs
-  applyPreviewZoom(); // apply after MathJax renders so it measures at natural size
-
-  previewContent.scrollTop = previewScrollTop;
-  previewRunning = false;
-  if (previewPending) schedulePreview(0);
-}
-
-// Try to split a .preview-text element at a <br> boundary so that the first
-// part fits within maxHeight px. Returns [part1El, part2El] or null if no
-// split is possible (no <br>s, or even the first line exceeds maxHeight).
-function splitTextAtBr(el, maxHeight, ruler) {
-  const parts = el.innerHTML.split(/<br\s*\/?>/i);
-  if (parts.length <= 1) return null;
-
-  let lastFitting = 0;
-  for (let i = 1; i < parts.length; i++) {
-    const testEl = el.cloneNode(false);
-    testEl.innerHTML = parts.slice(0, i).join('<br>');
-    ruler.appendChild(testEl);
-    const h = testEl.offsetHeight;
-    ruler.removeChild(testEl);
-    if (h <= maxHeight) {
-      lastFitting = i;
-    } else {
-      break;
-    }
-  }
-
-  if (lastFitting === 0 || lastFitting >= parts.length) return null;
-
-  const part1 = el.cloneNode(false);
-  part1.innerHTML = parts.slice(0, lastFitting).join('<br>');
-
-  const part2 = el.cloneNode(false);
-  part2.innerHTML = parts.slice(lastFitting).join('<br>');
-
-  return [part1, part2];
-}
-
-// Split the single rendered page into multiple .preview-page divs at page boundaries.
-// Render happens in one tall page first so MathJax can lay out content naturally,
-// then we use actual offsetTop positions (not summed offsetHeights) so that CSS
-// margin collapsing between elements is already accounted for in the measurement.
-// Text boxes (.preview-text) are split across pages at <br> boundaries using a
-// hidden ruler element for accurate height measurement.
-function paginatePreview() {
-  const singlePage = previewContent.querySelector('.preview-page');
-  if (!singlePage) return;
-
-  const children = Array.from(singlePage.children);
-  if (children.length === 0) return;
-
-  // 1in padding-top; content area = 9in = 864px (letter minus top+bottom padding).
-  // .preview-page has position:relative so offsetTop is relative to the page element.
-  const PADDING_TOP    = 96;  // 1in at 96 dpi
-  const PAGE_CONTENT_H = 864; // 9in at 96 dpi
-
-  // Measure positions before detaching elements.
-  const tops    = children.map(el => el.offsetTop - PADDING_TOP);
-  const bottoms = children.map((el, i) => {
-    const mb = parseFloat(getComputedStyle(el).marginBottom) || 0;
-    return tops[i] + el.offsetHeight + mb;
-  });
-
-
-  // Hidden off-screen ruler with the same CSS as a real page — used to measure
-  // split fragment heights without affecting the visible layout.
-  const ruler = document.createElement('div');
-  ruler.className = 'preview-page';
-  ruler.style.cssText = 'position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;min-height:0;';
-  document.body.appendChild(ruler);
-
-  children.forEach(el => el.remove());
-
-  // Queue: each entry carries the element plus its measured top/bottom in the
-  // original single-page coordinate space (or estimated coords for split parts).
-  const queue = children.map((el, i) => ({ el, top: tops[i], bottom: bottoms[i] }));
-
-  const pages   = [[]];
-  let pageBaseY = 0; // where the current page's content area starts in original coords
-
-  while (queue.length > 0) {
-    const item        = queue.shift();
-    const { el }      = item;
-    const relTop      = item.top    - pageBaseY;
-    const relBottom   = item.bottom - pageBaseY;
-    const currentPage = pages[pages.length - 1];
-
-    // Forced page break — start a new page without adding any element
-    if (el.classList.contains('preview-pagebreak')) {
-      pages.push([]);
-      pageBaseY = item.top;
-      continue;
-    }
-
-    if (currentPage.length > 0 && relBottom > PAGE_CONTENT_H) {
-      // Element overflows the current page. Try splitting text boxes.
-      const remaining = PAGE_CONTENT_H - relTop;
-
-      if (el.classList.contains('preview-text') && remaining > 20) {
-        const parts = splitTextAtBr(el, remaining, ruler);
-        if (parts) {
-          currentPage.push(parts[0]);
-          // Measure part2 in the ruler so subsequent items can estimate positions.
-          ruler.appendChild(parts[1]);
-          const part2H = parts[1].offsetHeight;
-          ruler.removeChild(parts[1]);
-          // New page starts at item.top in original coords.
-          pages.push([]);
-          pageBaseY = item.top;
-          // Part2 sits at the top of the new page.
-          queue.unshift({ el: parts[1], top: item.top, bottom: item.top + part2H });
-          continue;
-        }
-      }
-
-      // Can't split — move the whole element to a new page.
-      pages.push([]);
-      pageBaseY = item.top;
-      pages[pages.length - 1].push(el);
-    } else {
-      currentPage.push(el);
-    }
-  }
-
-  ruler.remove();
-
-  previewContent.innerHTML = '';
-  for (const group of pages) {
-    const pageDiv = document.createElement('div');
-    pageDiv.className = 'preview-page';
-    group.forEach(el => pageDiv.appendChild(el));
-    previewContent.appendChild(pageDiv);
-  }
-}
-
-function applyPreviewZoom() {
-  const zoom = ZOOM_STEPS[previewZoomIndex];
-  previewContent.querySelectorAll('.preview-page').forEach(page => {
-    page.style.zoom = zoom + '%';
-  });
-  previewZoomLabel.textContent = zoom + '%';
-}
-
-function stepPreviewZoom(delta) {
-  const next = Math.max(0, Math.min(ZOOM_STEPS.length - 1, previewZoomIndex + delta));
-  if (next !== previewZoomIndex) {
-    previewZoomIndex = next;
-    applyPreviewZoom();
-  }
-}
-
-previewZoomInBtn.addEventListener('click',  () => stepPreviewZoom(+1));
-previewZoomOutBtn.addEventListener('click', () => stepPreviewZoom(-1));
-
-previewContent.addEventListener('scroll', () => { previewScrollTop = previewContent.scrollTop; }, { passive: true });
-
-previewContent.addEventListener('wheel', e => {
-  if (e.ctrlKey) {
-    e.preventDefault();
-    stepPreviewZoom(e.deltaY < 0 ? +1 : -1);
-  } else if (e.shiftKey) {
-    e.preventDefault();
-    previewContent.scrollLeft += e.deltaY;
-  }
-}, { passive: false });
-
-previewContent.addEventListener('click', e => {
-  if (graphModeBoxId) return;
-  // Walk up from the clicked element to find a data-box-id
-  let target = e.target;
-  while (target && target !== previewContent) {
-    if (target.dataset.boxId) {
-      scrollAndHighlightBox(target.dataset.boxId);
-      return;
-    }
-    target = target.parentElement;
-  }
-});
-
-function scrollAndHighlightPreview(boxId) {
-  // Find the element in the preview that corresponds to this box.
-  // It may be wrapped in a .preview-highlight-box, so walk up one level.
-  let el = previewContent.querySelector(`[data-box-id="${boxId}"]`);
-  if (!el) return;
-  const target = el.parentElement?.classList.contains('preview-highlight-box') ? el.parentElement : el;
-  // Scroll target into the center of the preview panel
-  const contentRect = previewContent.getBoundingClientRect();
-  const targetRect  = target.getBoundingClientRect();
-  const offset = targetRect.top - contentRect.top - (contentRect.height / 2) + (targetRect.height / 2);
-  previewContent.scrollBy({ top: offset, behavior: 'smooth' });
-  // Blink animation
-  target.classList.remove('preview-blink');
-  void target.offsetWidth; // force reflow to restart animation
-  target.classList.add('preview-blink');
-  target.addEventListener('animationend', () => target.classList.remove('preview-blink'), { once: true });
-}
-
-function scrollAndHighlightBox(boxId) {
-  const el = boxList.querySelector(`[data-id="${boxId}"]`);
-  if (!el) return;
-  // Scroll box into center of the box list
-  const listRect = boxList.getBoundingClientRect();
-  const elRect   = el.getBoundingClientRect();
-  const offset   = elRect.top - listRect.top - (listRect.height / 2) + (elRect.height / 2);
-  boxList.scrollBy({ top: offset, behavior: 'smooth' });
-  // Blink green
-  el.classList.remove('box-highlight-blink');
-  // Force reflow so removing+re-adding restarts the animation
-  void el.offsetWidth;
-  el.classList.add('box-highlight-blink');
-  el.addEventListener('animationend', () => el.classList.remove('box-highlight-blink'), { once: true });
-}
-
-function togglePreview() {
-  isPreviewOpen = !isPreviewOpen;
-  previewPanel.classList.toggle('open', isPreviewOpen);
-  divider2.classList.toggle('open', isPreviewOpen);
-  const previewLabel = isPreviewOpen ? 'Hide Preview' : 'Preview';
-  togglePreviewBtn.textContent = previewLabel;
-  document.getElementById('graph-toggle-preview-btn').textContent = previewLabel;
-  if (isPreviewOpen) {
-    // Reset any manually-dragged width so it starts at flex: 1
-    previewPanel.style.flex = '';
-    previewPanel.style.width = '';
-    updatePreview();
-  }
-  saveUiState();
-}
-
-togglePreviewBtn.addEventListener('click', togglePreview);
-downloadPdfBtn.addEventListener('click', () => window.print()); // print dialog → "Save as PDF"
-
-const toggleSourceBtn = document.getElementById('toggle-source-btn');
-let isSourceOpen = true;
-
-function toggleSource() {
-  isSourceOpen = !isSourceOpen;
-  document.getElementById('left-panel').classList.toggle('hidden', !isSourceOpen);
-  document.getElementById('divider').classList.toggle('hidden', !isSourceOpen);
-  const sourceLabel = isSourceOpen ? 'Hide Source' : 'Source';
-  toggleSourceBtn.textContent = sourceLabel;
-  document.getElementById('graph-toggle-source-btn').textContent = sourceLabel;
-  saveUiState();
-}
-
-toggleSourceBtn.addEventListener('click', toggleSource);
-document.getElementById('graph-toggle-source-btn').addEventListener('click', toggleSource);
-document.getElementById('graph-toggle-preview-btn').addEventListener('click', togglePreview);
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
@@ -3868,901 +3225,6 @@ document.getElementById('new-project-btn').addEventListener('click', newProject)
 saveBtn.addEventListener('click', saveCurrentProject);
 downloadBtn.addEventListener('click', downloadCurrentProject);
 
-// ── Graph editing mode ────────────────────────────────────────────────────────
-
-function enterGraphMode(boxId) {
-  const box = boxes.find(b => b.id === boxId);
-  if (!box || box.type !== 'graph') return;
-
-  // Open preview first (while graphModeBoxId is still null so updatePreview runs)
-  if (!isPreviewOpen) togglePreview();
-
-  // Now lock graph mode — subsequent updatePreview calls are blocked
-  graphModeBoxId = boxId;
-
-  // Swap right-panel content: hide box list, show graph editor
-  boxList.style.display = 'none';
-  document.getElementById('graph-editor-content').style.display = 'flex';
-  document.getElementById('normal-toolbar').style.display = 'none';
-  // Sync graph toolbar toggle button labels to current panel state
-  document.getElementById('graph-toggle-source-btn').textContent = isSourceOpen ? 'Hide Source' : 'Source';
-  document.getElementById('graph-toggle-preview-btn').textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
-  document.getElementById('graph-crop-checkbox').checked = showGraphCropRect;
-  document.getElementById('graph-toolbar').style.display = '';
-  document.getElementById('right-panel-title').textContent = 'Graph Expressions';
-
-  // Set size inputs
-  document.getElementById('graph-width-input').value  = box.width  || 600;
-  document.getElementById('graph-height-input').value = box.height || 400;
-
-  // Populate expression list
-  renderGraphExprList(box);
-
-  // Mount the WebGL canvas into the preview panel
-  const renderer = getGraphRenderer();
-  // Restore view bounds if this graph was edited before
-  if (box._viewBounds) {
-    renderer.xMin = box._viewBounds.xMin;
-    renderer.xMax = box._viewBounds.xMax;
-    renderer.yMin = box._viewBounds.yMin;
-    renderer.yMax = box._viewBounds.yMax;
-  } else {
-    renderer.xMin = -5; renderer.xMax = 5;
-    renderer.yMin = -5; renderer.yMax = 5;
-  }
-  previewContent.innerHTML = '';
-  previewContent.classList.add('graph-mode');
-  previewContent.appendChild(renderer.canvas);
-  renderer.canvas.style.width  = '100%';
-  renderer.canvas.style.height = '100%';
-
-  // Set up re-render callback for pan/zoom
-  renderer._onRender = () => scheduleGraphRender();
-
-  // Background click: defocus whatever expression row is active
-  renderer._onBackgroundClick = () => {
-    if (focusedGraphExprId !== null) {
-      const field = graphMqFields.get(focusedGraphExprId);
-      if (field) field.blur();
-      focusedGraphExprId = null;
-      scheduleGraphRender();
-    }
-  };
-
-  // Set up click-to-focus: clicking a curve focuses its expression row
-  renderer._onPick = exprId => {
-    const listEl = document.getElementById('graph-expr-list');
-    if (!listEl) return;
-    const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
-    const idx = rows.findIndex(r => r.dataset.exprId === exprId);
-    if (idx !== -1) focusGraphExpr(idx, 'start');
-  };
-
-  // Snap coordinate tooltip
-  const snapTooltip = document.createElement('div');
-  snapTooltip.id = 'graph-snap-tooltip';
-  previewContent.appendChild(snapTooltip);
-
-  renderer._onSnapUpdate = (snapPoint, canvasX, canvasY) => {
-    if (!snapPoint) {
-      snapTooltip.style.display = 'none';
-      return;
-    }
-    const fracX = canvasX / renderer.width;
-    const fracY = canvasY / renderer.height;
-    const OFFSET = 14;
-    let left = fracX * 100;
-    let top  = fracY * 100;
-    snapTooltip.style.display = 'block';
-    snapTooltip.style.left = `calc(${left}% + ${OFFSET}px)`;
-    snapTooltip.style.top  = `calc(${top}% - ${OFFSET}px)`;
-    const fmt = v => parseFloat(v.toPrecision(5)).toString();
-    snapTooltip.textContent = `(${fmt(snapPoint.wx)}, ${fmt(snapPoint.wy)})`;
-  };
-
-  // Initial render
-  renderGraphPreview();
-}
-
-function _teardownGraphModeUI() {
-  clearTimeout(graphCommitTimer);
-  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; }
-  graphMqFields.clear();
-  graphExprUpdateFns.clear();
-  focusedGraphExprId = null;
-  closeColorPopup();
-  document.getElementById('graph-expr-list').innerHTML = '';
-  boxList.style.display = '';
-  document.getElementById('graph-editor-content').style.display = 'none';
-  document.getElementById('normal-toolbar').style.display = '';
-  document.getElementById('graph-toolbar').style.display = 'none';
-  document.getElementById('right-panel-title').textContent = 'Equations';
-  graphModeBoxId = null;
-  previewContent.classList.remove('graph-mode');
-  // Remove crop overlay if present
-  const overlay = document.getElementById('graph-crop-overlay');
-  if (overlay) overlay.remove();
-}
-
-function exitGraphMode() {
-  if (!graphModeBoxId) return;
-
-  commitGraphEditorToBox(graphModeBoxId);
-  clearTimeout(graphCommitTimer);
-
-  // Capture the graph to a static image for the document
-  if (graphRenderer) {
-    const box = boxes.find(b => b.id === graphModeBoxId);
-    if (box) {
-      // Use crop world-bounds so the snapshot matches what the overlay shows
-      const crop = getGraphCropInfo(box);
-
-      // Save the canvas-view bounds for restore, then apply the crop bounds
-      const savedXMin = graphRenderer.xMin, savedXMax = graphRenderer.xMax;
-      const savedYMin = graphRenderer.yMin, savedYMax = graphRenderer.yMax;
-      graphRenderer.xMin = crop.worldXMin; graphRenderer.xMax = crop.worldXMax;
-      graphRenderer.yMin = crop.worldYMin; graphRenderer.yMax = crop.worldYMax;
-
-      graphRenderer.updateExpressions(box.expressions || []);
-      graphRenderer.render(box.width || 600, box.height || 400, !!box.lightTheme);
-      box._snapshotDataUrl = graphRenderer.canvas.toDataURL('image/png');
-
-      // Restore canvas-view bounds and save them for re-entry
-      graphRenderer.xMin = savedXMin; graphRenderer.xMax = savedXMax;
-      graphRenderer.yMin = savedYMin; graphRenderer.yMax = savedYMax;
-      box._viewBounds = { xMin: savedXMin, xMax: savedXMax,
-                          yMin: savedYMin, yMax: savedYMax };
-    }
-  }
-
-  _teardownGraphModeUI();
-
-  // Rebuild box list to show updated snapshot, then restore preview
-  rebuildBoxList();
-  syncToText();
-  if (isPreviewOpen) schedulePreview(0);
-}
-
-function renderGraphExprList(box) {
-  const listEl = document.getElementById('graph-expr-list');
-  listEl.innerHTML = '';
-  graphMqFields.clear();
-  graphExprUpdateFns.clear();
-  // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
-  for (const expr of (box.expressions || [])) {
-    const m = expr.id.match(/^ge(\d+)$/);
-    if (m) graphExprNextId = Math.max(graphExprNextId, parseInt(m[1]) + 1);
-  }
-  for (const expr of (box.expressions || [])) {
-    listEl.appendChild(createGraphExprRow(expr));
-  }
-  // Reflow MathQuill fields after they're mounted in the DOM
-  for (const field of graphMqFields.values()) {
-    field.reflow();
-  }
-}
-
-// Focus a graph expression by its index in the DOM list, placing cursor at 'start' or 'end'.
-function focusGraphExpr(idx, edge) {
-  const listEl = document.getElementById('graph-expr-list');
-  if (!listEl) return;
-  const rows = listEl.querySelectorAll('.graph-expr-row');
-  if (idx < 0 || idx >= rows.length) return;
-  const exprId = rows[idx].dataset.exprId;
-  const field = graphMqFields.get(exprId);
-  if (field) setTimeout(() => field.focus(), 0);
-}
-
-// Delete a graph expression by id, focusing adjacent expression or nothing.
-function deleteGraphExpr(exprId) {
-  const listEl = document.getElementById('graph-expr-list');
-  if (!listEl) return;
-  const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
-  const idx = rows.findIndex(r => r.dataset.exprId === exprId);
-  const focusIdx = idx > 0 ? idx - 1 : (rows.length > 1 ? 1 : -1);
-
-  clearTimeout(graphCommitTimer);
-  const boxIdx = boxes.findIndex(b => b.id === graphModeBoxId);
-  if (boxIdx !== -1) {
-    boxes[boxIdx].expressions = boxes[boxIdx].expressions.filter(e => e.id !== exprId);
-  }
-  graphMqFields.delete(exprId);
-  graphExprUpdateFns.delete(exprId);
-  (rows[idx].closest('.graph-expr-wrapper') || rows[idx]).remove();
-  updateGraphBoxCount(graphModeBoxId);
-  syncToText();
-  scheduleGraphRender();
-  if (focusIdx >= 0) focusGraphExpr(focusIdx, 'end');
-}
-
-function createGraphExprRow(expr) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'graph-expr-wrapper';
-
-  const row = document.createElement('div');
-  row.className = 'graph-expr-row';
-  row.dataset.exprId = expr.id;
-  row.dataset.sliderMin = expr.sliderMin != null ? expr.sliderMin : 0;
-  row.dataset.sliderMax = expr.sliderMax != null ? expr.sliderMax : 10;
-  row.dataset.color = expr.color || '#3b82f6';
-  row.dataset.thickness = expr.thickness != null ? expr.thickness : 2.0;
-  wrapper.appendChild(row);
-
-  // Slider row (shown only for numeric constant expressions)
-  const sliderRow = document.createElement('div');
-  sliderRow.className = 'graph-expr-slider-row';
-  sliderRow.style.display = 'none';
-
-  const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.className = 'graph-expr-slider';
-  slider.min = row.dataset.sliderMin;
-  slider.max = row.dataset.sliderMax;
-  slider.step = 'any';
-
-  const minInput = document.createElement('input');
-  minInput.type = 'number';
-  minInput.className = 'graph-expr-slider-min';
-  minInput.value = row.dataset.sliderMin;
-  minInput.title = 'Min';
-
-  const maxInput = document.createElement('input');
-  maxInput.type = 'number';
-  maxInput.className = 'graph-expr-slider-max';
-  maxInput.value = row.dataset.sliderMax;
-  maxInput.title = 'Max';
-
-  sliderRow.appendChild(minInput);
-  sliderRow.appendChild(slider);
-  sliderRow.appendChild(maxInput);
-
-  let sliderDragging = false;
-
-  function applySliderValue(val) {
-    // Extract variable name from current latex and update the expression
-    const field = graphMqFields.get(expr.id);
-    if (!field) return;
-    const currentLatex = field.latex();
-    const nameMatch = currentLatex.match(/^([a-zA-Z]\w*)\s*=/);
-    if (!nameMatch) return;
-    const rounded = parseFloat(val.toPrecision(6));
-    field.latex(`${nameMatch[1]}=${rounded}`);
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  }
-
-  slider.addEventListener('mousedown', () => { sliderDragging = true; });
-  slider.addEventListener('mouseup',   () => { sliderDragging = false; });
-  slider.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
-  slider.addEventListener('touchend',   () => { sliderDragging = false; });
-  slider.addEventListener('input', () => applySliderValue(parseFloat(slider.value)));
-
-  minInput.addEventListener('change', () => {
-    const min = parseFloat(minInput.value);
-    if (isNaN(min)) return;
-    slider.min = min;
-    row.dataset.sliderMin = min;
-    commitGraphEditorToBox(graphModeBoxId);
-  });
-
-  maxInput.addEventListener('change', () => {
-    const max = parseFloat(maxInput.value);
-    if (isNaN(max)) return;
-    slider.max = max;
-    row.dataset.sliderMax = max;
-    commitGraphEditorToBox(graphModeBoxId);
-  });
-
-  // Drag handle
-  const handle = document.createElement('div');
-  handle.className = 'graph-expr-handle';
-  handle.innerHTML = '&#8942;&#8942;';
-  handle.title = 'Drag to reorder';
-  row.appendChild(handle);
-
-  // Enable/disable pill toggle
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'expr-toggle graph-expr-toggle';
-  toggle.setAttribute('aria-pressed', expr.enabled ? 'true' : 'false');
-  toggle.title = expr.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
-  toggle.addEventListener('click', () => {
-    const isEnabled = toggle.getAttribute('aria-pressed') !== 'true';
-    toggle.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
-    toggle.title = isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  });
-  row.appendChild(toggle);
-
-  // Color swatch — clicking opens the color/thickness popup
-  const colorSwatch = document.createElement('div');
-  colorSwatch.className = 'graph-expr-color-swatch';
-  colorSwatch.style.background = expr.color || '#3b82f6';
-  colorSwatch.title = 'Color & thickness';
-  colorSwatch.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openColorPopup(colorSwatch, expr.id);
-  });
-  row.appendChild(colorSwatch);
-
-  // Constant value badge — declared here so updateGraphingControls can reference it
-  const constValueSpan = document.createElement('span');
-  constValueSpan.className = 'graph-expr-const-value';
-  constValueSpan.style.display = 'none';
-
-  function updateGraphingControls(latex) {
-    let graphing = false;
-    let isGraphable = false;
-    let isNumericConst = false;
-    let constValue = null;
-    let constEvalValue = null;
-    if (latex.trim() !== '' && graphModeBoxId) {
-      const box = boxes.find(b => b.id === graphModeBoxId);
-      // Force this expression enabled to determine if it's graphable by nature
-      const allExprs = (box ? box.expressions || [] : []).map(e =>
-        e.id === expr.id ? { ...e, latex, enabled: true } : e
-      );
-      if (!allExprs.find(e => e.id === expr.id)) {
-        allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
-      }
-      const { renderExprs, analysis } = compileGraphExpressions(allExprs);
-      isGraphable = renderExprs.some(re => re.exprId === expr.id);
-      // graphing = actually rendering right now (respects enabled state)
-      const currentEnabled = toggle.getAttribute('aria-pressed') === 'true';
-      graphing = isGraphable && currentEnabled;
-      if (!isGraphable) {
-        const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
-        if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
-          const constName = nameMatch[1];
-          const constInfo = analysis.constants.find(c => c.name === constName);
-          const eqIdx = latex.indexOf('=');
-          const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
-          // Slider only for depth-0 constants defined as plain numeric literals (directly adjustable)
-          if (constInfo && constInfo.depth === 0 && /^-?\d+(\.\d+)?$/.test(rhs)) {
-            isNumericConst = true;
-            constValue = analysis.constantValues.get(constName);
-          }
-          // Badge for any constant whose value was evaluated and isn't a plain number literal
-          if (constInfo) {
-            const evalVal = analysis.constantValues.get(constName);
-            if (evalVal !== undefined) {
-              if (!/^-?\d+(\.\d+)?$/.test(rhs)) {
-                constEvalValue = evalVal;
-              }
-            }
-          }
-        } else {
-          // Try to evaluate bare constant expressions (no = sign, no x/y)
-          const trimmed = latex.trim();
-          if (findEqAtDepth0(trimmed) === -1) {
-            try {
-              const ast = parseLatexToAst(trimmed);
-              const vars = collectVariables(ast);
-              if (!vars.has('x') && !vars.has('y')) {
-                const val = evaluateAst(ast, analysis.constantValues, analysis.funcDefs || new Map());
-                if (isFinite(val) && !/^-?\d+(\.\d+)?$/.test(trimmed)) {
-                  constEvalValue = val;
-                }
-              }
-            } catch (e) { /* not evaluable */ }
-          }
-        }
-      }
-    }
-    colorSwatch.style.display = isGraphable ? '' : 'none';
-    toggle.style.display = isGraphable ? '' : 'none';
-    if (!isGraphable) toggle.setAttribute('aria-pressed', 'true');
-    sliderRow.style.display = isNumericConst ? '' : 'none';
-    if (isNumericConst && constValue !== null && !sliderDragging) {
-      slider.value = constValue;
-    }
-    // Update the constant value badge
-    const formatted = constEvalValue !== null ? formatConstantValue(constEvalValue) : null;
-    if (formatted !== null) {
-      constValueSpan.textContent = formatted;
-      constValueSpan.style.display = 'block';
-    } else {
-      constValueSpan.style.display = 'none';
-    }
-  }
-  updateGraphingControls(expr.latex || '');
-
-  // MathQuill field
-  const mqSpan = document.createElement('span');
-  mqSpan.className = 'graph-expr-mq';
-  row.appendChild(mqSpan);
-  row.appendChild(sliderRow);
-
-  const greekLetters = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega";
-  const field = MQ.MathField(mqSpan, {
-    spaceBehavesLikeTab: false,
-    autoCommands: 'sqrt sum int prod infty partial ' + greekLetters,
-    autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp',
-    handlers: {
-      edit: () => {
-        updateGraphingControls(field.latex());
-        clearTimeout(graphCommitTimer);
-        graphCommitTimer = setTimeout(() => {
-          commitGraphEditorToBox(graphModeBoxId);
-          scheduleGraphRender();
-        }, GRAPH_RENDER_DEBOUNCE_MS);
-      },
-      enter: () => {
-        addGraphExpressionAfter(expr.id);
-      },
-      moveOutOf: (dir) => {
-        const listEl = document.getElementById('graph-expr-list');
-        if (!listEl) return;
-        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
-        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-        if (dir === 1 && idx < rows.length - 1) focusGraphExpr(idx + 1, 'start');
-        else if (dir === -1 && idx > 0)         focusGraphExpr(idx - 1, 'end');
-      },
-      upOutOf: () => {
-        const listEl = document.getElementById('graph-expr-list');
-        if (!listEl) return;
-        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
-        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-        if (idx > 0) focusGraphExpr(idx - 1, 'end');
-      },
-      downOutOf: () => {
-        const listEl = document.getElementById('graph-expr-list');
-        if (!listEl) return;
-        const rows = Array.from(listEl.querySelectorAll('.graph-expr-row'));
-        const idx = rows.findIndex(r => r.dataset.exprId === expr.id);
-        if (idx < rows.length - 1) focusGraphExpr(idx + 1, 'start');
-      },
-    },
-  });
-  if (expr.latex) field.latex(expr.latex);
-  graphMqFields.set(expr.id, field);
-  graphExprUpdateFns.set(expr.id, () => updateGraphingControls(field.latex()));
-
-  mqSpan.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.shiftKey) applyRedo(); else applyUndo();
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-      e.preventDefault();
-      e.stopPropagation();
-      applyRedo();
-    }
-    // Backspace on empty expression → delete it (mirrors regular box behavior)
-    if (e.key === 'Backspace' && field.latex() === '') {
-      e.preventDefault();
-      deleteGraphExpr(expr.id);
-    }
-  }, true); // capture phase: fires before MathQuill's inner textarea handler
-
-  // Delete button
-  const delBtn = document.createElement('button');
-  delBtn.className = 'graph-expr-delete';
-  delBtn.textContent = '×';
-  delBtn.title = 'Remove expression';
-  delBtn.addEventListener('click', () => deleteGraphExpr(expr.id));
-  row.insertBefore(delBtn, sliderRow);
-
-  // Append constant value badge last so it wraps to its own line below everything
-  constValueSpan.addEventListener('click', () => {
-    const raw = constValueSpan.textContent.replace(/^[≈=]\s*/, '');
-    navigator.clipboard.writeText(raw).catch(() => {});
-  });
-  row.appendChild(constValueSpan);
-
-  // Drag-to-reorder
-  handle.addEventListener('mousedown', e => {
-    e.preventDefault();
-    const list = document.getElementById('graph-expr-list');
-    if (!list) return;
-
-    const allWrappers = () => Array.from(list.querySelectorAll('.graph-expr-wrapper'));
-    const wrapperEl = wrapper;
-    const startY = e.clientY;
-    const origRect = wrapperEl.getBoundingClientRect();
-
-    // Create a floating clone
-    const ghost = wrapperEl.cloneNode(true);
-    ghost.style.cssText = `
-      position: fixed;
-      left: ${origRect.left}px;
-      top: ${origRect.top}px;
-      width: ${origRect.width}px;
-      opacity: 0.85;
-      pointer-events: none;
-      z-index: 9999;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-    `;
-    document.body.appendChild(ghost);
-
-    // Placeholder to hold space
-    const placeholder = document.createElement('div');
-    placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
-    wrapperEl.replaceWith(placeholder);
-
-    let currentTarget = placeholder;
-
-    function onMove(ev) {
-      ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
-
-      const siblings = allWrappers().filter(w => w !== wrapperEl);
-      let inserted = false;
-      for (const sib of siblings) {
-        const r = sib.getBoundingClientRect();
-        const mid = r.top + r.height / 2;
-        if (ev.clientY < mid) {
-          if (currentTarget !== sib) {
-            sib.before(placeholder);
-            currentTarget = sib;
-          }
-          inserted = true;
-          break;
-        }
-      }
-      if (!inserted) {
-        const last = siblings[siblings.length - 1];
-        if (last && currentTarget !== null) {
-          list.appendChild(placeholder);
-          currentTarget = null;
-        }
-      }
-    }
-
-    function onUp() {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      ghost.remove();
-      placeholder.replaceWith(wrapperEl);
-      commitGraphEditorToBox(graphModeBoxId);
-      scheduleGraphRender();
-    }
-
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-
-  // Track focus for render-on-top highlight
-  row.addEventListener('focusin', () => {
-    if (focusedGraphExprId !== expr.id) {
-      focusedGraphExprId = expr.id;
-      scheduleGraphRender();
-    }
-  });
-  row.addEventListener('focusout', e => {
-    if (!row.contains(e.relatedTarget)) {
-      const leavingId = expr.id;
-      setTimeout(() => {
-        if (focusedGraphExprId === leavingId) {
-          focusedGraphExprId = null;
-          scheduleGraphRender();
-        }
-      }, 0);
-    }
-  });
-
-  return wrapper;
-}
-
-let _activeColorPopup = null;
-let _activeColorPopupOutside = null;
-
-function closeColorPopup() {
-  if (_activeColorPopupOutside) {
-    document.removeEventListener('mousedown', _activeColorPopupOutside, true);
-    _activeColorPopupOutside = null;
-  }
-  if (_activeColorPopup) {
-    _activeColorPopup.remove();
-    _activeColorPopup = null;
-  }
-}
-
-function closeFillColorPopup() {
-  if (_activeFillColorPopup) {
-    _activeFillColorPopup.remove();
-    _activeFillColorPopup = null;
-  }
-  if (_activeFillColorPopupOutside) {
-    document.removeEventListener('click', _activeFillColorPopupOutside, true);
-    _activeFillColorPopupOutside = null;
-  }
-}
-
-function openFillColorPopup(anchorEl, boxId) {
-  closeFillColorPopup();
-
-  const idx = boxes.findIndex(b => b.id === boxId);
-  if (idx === -1) return;
-  const currentColor = boxes[idx].fillColor || null;
-
-  const popup = document.createElement('div');
-  popup.className = 'fill-color-popup';
-  _activeFillColorPopup = popup;
-
-  const applyColor = (c) => {
-    boxes[idx].fillColor = c;
-    if (c) {
-      fillColorBtn.style.background = c;
-      fillColorBtn.classList.remove('no-fill');
-    } else {
-      fillColorBtn.style.background = '';
-      fillColorBtn.classList.add('no-fill');
-    }
-    // Update active chip highlights within this popup
-    popup.querySelectorAll('.graph-color-chip').forEach(ch => {
-      ch.classList.toggle('active', ch.dataset.value === (c || ''));
-    });
-    syncToText();
-  };
-
-  // Default presets
-  const defaultLabel = document.createElement('div');
-  defaultLabel.className = 'fill-color-popup-section-label';
-  defaultLabel.textContent = 'Presets';
-  popup.appendChild(defaultLabel);
-
-  const defaultPalette = document.createElement('div');
-  defaultPalette.className = 'graph-color-palette';
-
-  // Transparent / no-fill chip
-  const transparentChip = document.createElement('div');
-  transparentChip.className = 'graph-color-chip' + (currentColor === null ? ' active' : '');
-  transparentChip.style.cssText = 'background: repeating-conic-gradient(#585b70 0% 25%, #313244 0% 50%) 0 0 / 8px 8px;';
-  transparentChip.title = 'No fill';
-  transparentChip.dataset.value = '';
-  transparentChip.addEventListener('click', () => { applyColor(null); closeFillColorPopup(); });
-  defaultPalette.appendChild(transparentChip);
-
-  for (const c of HIGHLIGHT_FILL_COLORS) {
-    const chip = document.createElement('div');
-    chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
-    chip.style.background = c;
-    chip.title = c;
-    chip.dataset.value = c;
-    chip.addEventListener('click', () => { applyColor(c); closeFillColorPopup(); });
-    defaultPalette.appendChild(chip);
-  }
-  popup.appendChild(defaultPalette);
-
-  // Project custom colors: any fillColor in use across boxes that isn't a default preset
-  const customColors = [...new Set(
-    boxes.filter(b => b.fillColor && !HIGHLIGHT_FILL_COLORS.includes(b.fillColor)).map(b => b.fillColor)
-  )];
-  if (customColors.length > 0) {
-    const customLabel = document.createElement('div');
-    customLabel.className = 'fill-color-popup-section-label';
-    customLabel.textContent = 'Project colors';
-    popup.appendChild(customLabel);
-
-    const customPalette = document.createElement('div');
-    customPalette.className = 'graph-color-palette';
-    for (const c of customColors) {
-      const chip = document.createElement('div');
-      chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
-      chip.style.background = c;
-      chip.title = c;
-      chip.dataset.value = c;
-      chip.addEventListener('click', () => { applyColor(c); closeFillColorPopup(); });
-      customPalette.appendChild(chip);
-    }
-    popup.appendChild(customPalette);
-  }
-
-  // Custom color picker row
-  const pickerRow = document.createElement('div');
-  pickerRow.className = 'graph-color-custom';
-  const pickerLabel = document.createElement('span');
-  pickerLabel.textContent = 'Custom:';
-  const pickerInput = document.createElement('input');
-  pickerInput.type = 'color';
-  pickerInput.value = currentColor || HIGHLIGHT_FILL_COLORS[0];
-  pickerInput.addEventListener('input', () => applyColor(pickerInput.value));
-  pickerRow.appendChild(pickerLabel);
-  pickerRow.appendChild(pickerInput);
-  popup.appendChild(pickerRow);
-
-  // Prevent all clicks within the popup from stealing focus away from the box
-  popup.addEventListener('mousedown', e => e.preventDefault());
-
-  document.body.appendChild(popup);
-
-  // Position below the anchor
-  const rect = anchorEl.getBoundingClientRect();
-  const popupW = 210;
-  let left = rect.left;
-  let top  = rect.bottom + 4;
-  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
-  if (top + 180 > window.innerHeight - 8) top = rect.top - 180 - 4;
-  popup.style.left = left + 'px';
-  popup.style.top  = top + 'px';
-
-  // Use 'click' (not 'mousedown') so the browser's internal color picker panel
-  // — which fires mousedown on non-DOM elements — doesn't trigger a close.
-  const onOutside = (e) => {
-    if (!popup.contains(e.target) && e.target !== anchorEl) closeFillColorPopup();
-  };
-  _activeFillColorPopupOutside = onOutside;
-  setTimeout(() => document.addEventListener('click', onOutside, true), 0);
-}
-
-function openColorPopup(anchorEl, exprId) {
-  closeColorPopup();
-
-  const row = anchorEl.closest('.graph-expr-row');
-  const currentColor = row.dataset.color || '#3b82f6';
-  const currentThickness = parseFloat(row.dataset.thickness) || 2.0;
-
-  const popup = document.createElement('div');
-  popup.className = 'graph-color-popup';
-  _activeColorPopup = popup;
-
-  // Preset palette
-  const palette = document.createElement('div');
-  palette.className = 'graph-color-palette';
-  for (const c of GRAPH_COLORS) {
-    const chip = document.createElement('div');
-    chip.className = 'graph-color-chip' + (c === currentColor ? ' active' : '');
-    chip.style.background = c;
-    chip.title = c;
-    chip.addEventListener('click', () => {
-      row.dataset.color = c;
-      anchorEl.style.background = c;
-      commitGraphEditorToBox(graphModeBoxId);
-      scheduleGraphRender();
-      closeColorPopup();
-    });
-    palette.appendChild(chip);
-  }
-  popup.appendChild(palette);
-
-  // Custom color picker row
-  const customRow = document.createElement('div');
-  customRow.className = 'graph-color-custom';
-  const customLabel = document.createElement('span');
-  customLabel.textContent = 'Custom:';
-  const customInput = document.createElement('input');
-  customInput.type = 'color';
-  customInput.value = currentColor;
-  customInput.addEventListener('input', () => {
-    row.dataset.color = customInput.value;
-    anchorEl.style.background = customInput.value;
-    // Update active chip highlights
-    popup.querySelectorAll('.graph-color-chip').forEach(ch => {
-      ch.classList.toggle('active', ch.title === customInput.value);
-    });
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  });
-  customRow.appendChild(customLabel);
-  customRow.appendChild(customInput);
-  popup.appendChild(customRow);
-
-  // Thickness number input row
-  const thickRow = document.createElement('div');
-  thickRow.className = 'graph-color-thickness';
-  const thickLabel = document.createElement('span');
-  thickLabel.textContent = 'Thickness:';
-  const thickInput = document.createElement('input');
-  thickInput.type = 'number';
-  thickInput.min = '0.5';
-  thickInput.max = '7';
-  thickInput.step = '0.5';
-  thickInput.value = currentThickness;
-  thickInput.addEventListener('change', () => {
-    const val = Math.min(7, Math.max(0.5, parseFloat(thickInput.value) || 2.0));
-    thickInput.value = val;
-    row.dataset.thickness = val;
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  });
-  thickRow.appendChild(thickLabel);
-  thickRow.appendChild(thickInput);
-  popup.appendChild(thickRow);
-
-  document.body.appendChild(popup);
-
-  // Position below the anchor
-  const rect = anchorEl.getBoundingClientRect();
-  const popupW = 196; // min-width + padding estimate
-  let left = rect.left;
-  let top = rect.bottom + 4;
-  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
-  if (top + 160 > window.innerHeight - 8) top = rect.top - 160 - 4;
-  popup.style.left = left + 'px';
-  popup.style.top = top + 'px';
-
-  // Close on outside click
-  const onOutside = (e) => {
-    if (!popup.contains(e.target) && e.target !== anchorEl) {
-      closeColorPopup();
-    }
-  };
-  _activeColorPopupOutside = onOutside;
-  setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
-}
-
-function commitGraphEditorToBox(boxId) {
-  if (!boxId) return;
-  const idx = boxes.findIndex(b => b.id === boxId);
-  if (idx === -1) return;
-
-  const rows = document.querySelectorAll('#graph-expr-list .graph-expr-row');
-  const expressions = [];
-  for (const row of rows) {
-    const exprId  = row.dataset.exprId;
-    const toggleEl  = row.querySelector('.graph-expr-toggle');
-    const enabled   = toggleEl ? toggleEl.getAttribute('aria-pressed') === 'true' : true;
-    const color     = row.dataset.color || '#3b82f6';
-    const thickness = parseFloat(row.dataset.thickness) || 2.0;
-    const sliderMin = parseFloat(row.dataset.sliderMin) || 0;
-    const sliderMax = parseFloat(row.dataset.sliderMax) || 10;
-    const field     = graphMqFields.get(exprId);
-    const latex     = field ? field.latex() : '';
-    expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
-  }
-  boxes[idx].expressions = expressions;
-  boxes[idx].width  = parseInt(document.getElementById('graph-width-input').value)  || 600;
-  boxes[idx].height = parseInt(document.getElementById('graph-height-input').value) || 400;
-
-  updateGraphBoxCount(boxId);
-  syncToText();
-}
-
-function updateGraphBoxCount(boxId) {
-  const boxEl = boxList.querySelector(`[data-id="${boxId}"] .graph-expr-count`);
-  if (!boxEl) return;
-  const box = boxes.find(b => b.id === boxId);
-  const n = box ? (box.expressions || []).length : 0;
-  boxEl.textContent = `${n} expression${n !== 1 ? 's' : ''}`;
-}
-
-function addGraphExpression() {
-  if (!graphModeBoxId) return;
-  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const listEl = document.getElementById('graph-expr-list');
-  const row = createGraphExprRow(newExpr);
-  listEl.appendChild(row);
-  const field = graphMqFields.get(newExpr.id);
-  if (field) field.reflow();
-  commitGraphEditorToBox(graphModeBoxId);
-  if (field) setTimeout(() => field.focus(), 0);
-}
-
-function addGraphExpressionAfter(afterId) {
-  if (!graphModeBoxId) return;
-  clearTimeout(graphCommitTimer);
-  commitGraphEditorToBox(graphModeBoxId);
-
-  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const listEl  = document.getElementById('graph-expr-list');
-  const afterRow = listEl.querySelector(`.graph-expr-row[data-expr-id="${afterId}"]`);
-  const newWrapper = createGraphExprRow(newExpr);
-
-  if (afterRow) {
-    const afterWrapper = afterRow.closest('.graph-expr-wrapper') || afterRow;
-    listEl.insertBefore(newWrapper, afterWrapper.nextSibling);
-  } else {
-    listEl.appendChild(newWrapper);
-  }
-
-  // Also insert into boxes array
-  const idx = boxes.findIndex(b => b.id === graphModeBoxId);
-  if (idx !== -1) {
-    const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterId);
-    if (exprIdx !== -1) {
-      boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
-    } else {
-      boxes[idx].expressions.push(newExpr);
-    }
-  }
-  const field = graphMqFields.get(newExpr.id);
-  if (field) field.reflow();
-  updateGraphBoxCount(graphModeBoxId);
-  syncToText();
-  if (field) setTimeout(() => field.focus(), 0);
-}
 
 // ── Highlight toolbar button handlers ────────────────────────────────────────
 [highlightBtn, fillColorBtn].forEach(btn => {
@@ -4790,22 +3252,6 @@ fillColorBtn.addEventListener('click', (e) => {
   openFillColorPopup(fillColorBtn, focusedBoxId);
 });
 
-// Wire up graph editor panel buttons
-document.getElementById('graph-done-btn').addEventListener('click', exitGraphMode);
-document.getElementById('graph-add-expr-btn').addEventListener('mousedown', e => e.preventDefault());
-document.getElementById('graph-add-expr-btn').addEventListener('click', addGraphExpression);
-
-document.getElementById('graph-width-input').addEventListener('change', () => {
-  if (graphModeBoxId) { commitGraphEditorToBox(graphModeBoxId); updateGraphCropOverlay(); }
-});
-document.getElementById('graph-height-input').addEventListener('change', () => {
-  if (graphModeBoxId) { commitGraphEditorToBox(graphModeBoxId); updateGraphCropOverlay(); }
-});
-
-document.getElementById('graph-crop-checkbox').addEventListener('change', e => {
-  showGraphCropRect = e.target.checked;
-  updateGraphCropOverlay();
-});
 
 // ── Reflow all boxes when the panel width changes ──────────────────────────────
 // MathQuill equations and textareas need explicit re-measurement; they don't
