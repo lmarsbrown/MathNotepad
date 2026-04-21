@@ -4,17 +4,41 @@
   padding: 0;
 }
 
-html, body {
+html {
+  height: 100%;
+}
+
+body {
   height: 100%;
   background: #1e1e2e;
   color: #cdd6f4;
   font-family: 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 14px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #a6adc8;
+  flex-shrink: 0;
 }
 
 #app {
   display: flex;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
 }
 
 /* ── Panels ── */
@@ -1342,6 +1366,7 @@ html, body {
 @media print {
   #projects-panel,
   #projects-overlay,
+  #top-bar,
   #left-panel,
   #divider,
   #right-panel,

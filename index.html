@@ -33,18 +33,22 @@
   </div>
   <div id="projects-overlay"></div>
 
+  <div id="top-bar">
+    <div class="header-left">
+      <button id="projects-btn" title="Projects">☰</button>
+      <span id="project-title-label">Untitled</span>
+    </div>
+    <div class="toolbar">
+      <button id="toggle-source-btn">Source</button>
+      <button id="toggle-preview-btn">Preview</button>
+      <span class="toolbar-sep"></span>
+      <button id="save-btn">Save</button>
+      <button id="download-btn">Download</button>
+    </div>
+  </div>
+
   <div id="app">
     <div id="left-panel">
-      <div class="panel-header">
-        <div class="header-left">
-          <button id="projects-btn" title="Projects">☰</button>
-          <span id="project-title-label">Untitled</span>
-        </div>
-        <div class="header-right">
-          <button id="save-btn">Save</button>
-          <button id="download-btn">Download</button>
-        </div>
-      </div>
       <div id="latex-wrapper">
         <div id="line-numbers" aria-hidden="true"></div>
         <div id="latex-source-container">
@@ -56,7 +60,6 @@
     <div id="divider"></div>
     <div id="right-panel">
       <div class="panel-header">
-        <span id="right-panel-title">Equations</span>
         <div class="toolbar" id="normal-toolbar">
           <div id="default-type-toggle">
             <button id="default-math-btn" class="type-seg active">Math</button><button id="default-text-btn" class="type-seg">Text</button>
@@ -76,17 +79,11 @@
           <span id="font-size-label" class="font-size-label">16px</span>
           <button id="font-inc-btn" title="Increase font size">A+</button>
           <span class="toolbar-sep"></span>
-          <button id="toggle-source-btn">Source</button>
-          <button id="toggle-preview-btn">Preview</button>
-          <span class="toolbar-sep"></span>
           <button id="highlight-btn">Highlight</button>
           <button id="fill-color-btn" class="fill-color-swatch-btn" style="display:none" title="Fill color"></button>
         </div>
         <div class="toolbar" id="graph-toolbar" style="display:none">
           <button id="graph-add-expr-btn">+ Expression</button>
-          <span class="toolbar-sep"></span>
-          <button id="graph-toggle-source-btn">Hide Source</button>
-          <button id="graph-toggle-preview-btn">Hide Preview</button>
           <span class="toolbar-sep"></span>
           <label class="graph-crop-label"><input type="checkbox" id="graph-crop-checkbox"> Crop</label>
           <span class="toolbar-sep"></span>

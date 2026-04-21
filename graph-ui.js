@@ -16,12 +16,9 @@ function enterGraphMode(boxId) {
   boxList.style.display = 'none';
   document.getElementById('graph-editor-content').style.display = 'flex';
   document.getElementById('normal-toolbar').style.display = 'none';
-  // Sync graph toolbar toggle button labels to current panel state
-  document.getElementById('graph-toggle-source-btn').textContent = isSourceOpen ? 'Hide Source' : 'Source';
-  document.getElementById('graph-toggle-preview-btn').textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
   document.getElementById('graph-crop-checkbox').checked = showGraphCropRect;
   document.getElementById('graph-toolbar').style.display = '';
-  document.getElementById('right-panel-title').textContent = 'Graph Expressions';
+
 
   // Set size inputs
   document.getElementById('graph-width-input').value  = box.width  || 600;
@@ -108,7 +105,7 @@ function _teardownGraphModeUI() {
   document.getElementById('graph-editor-content').style.display = 'none';
   document.getElementById('normal-toolbar').style.display = '';
   document.getElementById('graph-toolbar').style.display = 'none';
-  document.getElementById('right-panel-title').textContent = 'Equations';
+
   graphModeBoxId = null;
   previewContent.classList.remove('graph-mode');
   // Remove crop overlay if present

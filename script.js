@@ -2007,7 +2007,7 @@ function createBoxElement(box) {
       exprList.style.display = isCollapsed ? 'none' : '';
       addBtn.style.display   = isCollapsed ? 'none' : '';
       collapseBtn.textContent = isCollapsed ? '▸' : '▾';
-      syncToText();
+      syncToText(false); // collapsed state doesn't affect preview output
     });
 
     // ── Register the "add expression after" function ──────────────────────────
@@ -2398,7 +2398,12 @@ function restoreSnapshot(snap, preferFocusIdx = -1, preferCalcExprIdx = -1) {
 }
 
 // ── Sync right → left ─────────────────────────────────────────────────────────
-function syncToText() {
+/**
+ * Serializes the current box state back to the latex source textarea.
+ * @param {boolean} [triggerPreview=true] - Whether to schedule a preview re-render.
+ *   Pass false when the change doesn't affect preview output (e.g. collapse state).
+ */
+function syncToText(triggerPreview = true) {
   if (suppressBoxSync) return;
   suppressTextSync = true;
   let latex = serializeToLatex(boxes);
@@ -2409,7 +2414,7 @@ function syncToText() {
   pushHistory(latex);
   saveDraft();
   markDirty();
-  schedulePreview();
+  if (triggerPreview) schedulePreview();
 }
 
 // ── Sync left → right (debounced) ─────────────────────────────────────────────

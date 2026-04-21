@@ -615,9 +615,7 @@ function togglePreview() {
   isPreviewOpen = !isPreviewOpen;
   previewPanel.classList.toggle('open', isPreviewOpen);
   divider2.classList.toggle('open', isPreviewOpen);
-  const previewLabel = isPreviewOpen ? 'Hide Preview' : 'Preview';
-  togglePreviewBtn.textContent = previewLabel;
-  document.getElementById('graph-toggle-preview-btn').textContent = previewLabel;
+  togglePreviewBtn.textContent = isPreviewOpen ? 'Hide Preview' : 'Preview';
   if (isPreviewOpen) {
     // Reset any manually-dragged width so it starts at flex: 1
     previewPanel.style.flex = '';
@@ -637,12 +635,8 @@ function toggleSource() {
   isSourceOpen = !isSourceOpen;
   document.getElementById('left-panel').classList.toggle('hidden', !isSourceOpen);
   document.getElementById('divider').classList.toggle('hidden', !isSourceOpen);
-  const sourceLabel = isSourceOpen ? 'Hide Source' : 'Source';
-  toggleSourceBtn.textContent = sourceLabel;
-  document.getElementById('graph-toggle-source-btn').textContent = sourceLabel;
+  toggleSourceBtn.textContent = isSourceOpen ? 'Hide Source' : 'Source';
   saveUiState();
 }
 
 toggleSourceBtn.addEventListener('click', toggleSource);
-document.getElementById('graph-toggle-source-btn').addEventListener('click', toggleSource);
-document.getElementById('graph-toggle-preview-btn').addEventListener('click', togglePreview);
