@@ -31,24 +31,24 @@ class CompileError extends Error {
 const PHYSICS_CONSTANTS_BASIC = [
   { varName: 'c',         value: 2.99792458e8,     label: 'c',    description: 'Speed of light (2.998×10⁸ m/s)',                         unitDims: { m: 1, s: -1 } },
   { varName: 'g',         value: 9.80665,           label: 'g',    description: 'Standard gravity (9.807 m/s²)',                          unitDims: { m: 1, s: -2 } },
-  { varName: 'G',         value: 6.67430e-11,       label: 'G',    description: 'Gravitational constant (6.674×10⁻¹¹ N·m²/kg²)',         unitDims: { m: 3, kg: -1, s: -2 } },
-  { varName: 'h',         value: 6.62607015e-34,    label: 'h',    description: 'Planck constant (6.626×10⁻³⁴ J·s)',                     unitDims: { kg: 1, m: 2, s: -1 } },
-  { varName: 'hbar',      value: 1.054571817e-34,   label: 'ℏ',    description: 'Reduced Planck constant (1.055×10⁻³⁴ J·s)',             unitDims: { kg: 1, m: 2, s: -1 } },
+  { varName: 'G',         value: 6.67430e-11,       label: 'G',    description: 'Gravitational constant (6.674×10⁻¹¹ N·m²/kg²)',         unitDims: { N: 1, m: 2, kg: -2 } },
+  { varName: 'h',         value: 6.62607015e-34,    label: 'h',    description: 'Planck constant (6.626×10⁻³⁴ J·s)',                     unitDims: { J: 1, s: 1 } },
+  { varName: 'hbar',      value: 1.054571817e-34,   label: 'ℏ',    description: 'Reduced Planck constant (1.055×10⁻³⁴ J·s)',             unitDims: { J: 1, s: 1 } },
   { varName: 'm_e',       value: 9.1093837015e-31,  label: 'm_e',  description: 'Electron mass (9.109×10⁻³¹ kg)',                       unitDims: { kg: 1 } },
   { varName: 'm_p',       value: 1.67262192369e-27, label: 'm_p',  description: 'Proton mass (1.673×10⁻²⁷ kg)',                         unitDims: { kg: 1 } },
-  { varName: 'sigma',     value: 5.670374419e-8,    label: 'σ',    description: 'Stefan–Boltzmann constant (5.670×10⁻⁸ W/(m²·K⁴))',    unitDims: { kg: 1, s: -3, K: -4 } },
+  { varName: 'sigma',     value: 5.670374419e-8,    label: 'σ',    description: 'Stefan–Boltzmann constant (5.670×10⁻⁸ W/(m²·K⁴))',    unitDims: { W: 1, m: -2, K: -4 } },
 ];
 
 const PHYSICS_CONSTANTS_EM = [
-  { varName: 'q_e',       value: 1.602176634e-19,  label: 'q_e',  description: 'Elementary charge (1.602×10⁻¹⁹ C)',                    unitDims: { A: 1, s: 1 } },
-  { varName: 'epsilon_0', value: 8.8541878128e-12, label: 'ε₀',   description: 'Permittivity of free space (8.854×10⁻¹² F/m)',         unitDims: { kg: -1, m: -3, s: 4, A: 2 } },
-  { varName: 'mu_0',      value: 1.25663706212e-6, label: 'μ₀',   description: 'Permeability of free space (1.257×10⁻⁶ H/m)',          unitDims: { kg: 1, m: 1, s: -2, A: -2 } },
+  { varName: 'q_e',       value: 1.602176634e-19,  label: 'q_e',  description: 'Elementary charge (1.602×10⁻¹⁹ C)',                    unitDims: { C: 1 } },
+  { varName: 'epsilon_0', value: 8.8541878128e-12, label: 'ε₀',   description: 'Permittivity of free space (8.854×10⁻¹² F/m)',         unitDims: { F: 1, m: -1 } },
+  { varName: 'mu_0',      value: 1.25663706212e-6, label: 'μ₀',   description: 'Permeability of free space (1.257×10⁻⁶ H/m)',          unitDims: { H: 1, m: -1 } },
   { varName: 'alpha',     value: 7.2973525693e-3,  label: 'α',    description: 'Fine-structure constant (≈ 1/137)',                     unitDims: {} },
 ];
 
 const PHYSICS_CONSTANTS_CHEM = [
-  { varName: 'R',         value: 8.314462618,      label: 'R',    description: 'Ideal gas constant (8.314 J/(mol·K))',                  unitDims: { kg: 1, m: 2, s: -2, mol: -1, K: -1 } },
-  { varName: 'k_B',       value: 1.380649e-23,     label: 'k_B',  description: 'Boltzmann constant (1.381×10⁻²³ J/K)',                 unitDims: { kg: 1, m: 2, s: -2, K: -1 } },
+  { varName: 'R',         value: 8.314462618,      label: 'R',    description: 'Ideal gas constant (8.314 J/(mol·K))',                  unitDims: { J: 1, mol: -1, K: -1 } },
+  { varName: 'k_B',       value: 1.380649e-23,     label: 'k_B',  description: 'Boltzmann constant (1.381×10⁻²³ J/K)',                 unitDims: { J: 1, K: -1 } },
   { varName: 'N_A',       value: 6.02214076e23,    label: 'N_A',  description: 'Avogadro\'s number (6.022×10²³ mol⁻¹)',                unitDims: { mol: -1 } },
 ];
 
@@ -62,18 +62,129 @@ const SI_BASE_UNITS = new Set(['m', 's', 'kg', 'A', 'K', 'mol', 'cd']);
 // Derived SI units — expanded to base units at evaluation time.
 // Each entry: { coeff: number, units: { [baseUnit]: exponent } }
 const DERIVED_UNIT_EXPANSIONS = {
-  N:   { coeff: 1, units: { kg: 1, m: 1, s: -2 } },
-  J:   { coeff: 1, units: { kg: 1, m: 2, s: -2 } },
-  W:   { coeff: 1, units: { kg: 1, m: 2, s: -3 } },
-  Pa:  { coeff: 1, units: { kg: 1, m: -1, s: -2 } },
-  Hz:  { coeff: 1, units: { s: -1 } },
-  V:   { coeff: 1, units: { kg: 1, m: 2, s: -3, A: -1 } },
-  C:   { coeff: 1, units: { s: 1, A: 1 } },
-  F:   { coeff: 1, units: { kg: -1, m: -2, s: 4, A: 2 } },
-  H:   { coeff: 1, units: { kg: 1, m: 2, s: -2, A: -2 } },
-  T:   { coeff: 1, units: { kg: 1, s: -2, A: -1 } },
-  Wb:  { coeff: 1, units: { kg: 1, m: 2, s: -2, A: -1 } },
-  rad: { coeff: 1, units: {} },
+  N:   { coeff: 1,    units: { kg: 1, m: 1, s: -2 } },
+  J:   { coeff: 1,    units: { kg: 1, m: 2, s: -2 } },
+  W:   { coeff: 1,    units: { kg: 1, m: 2, s: -3 } },
+  Pa:  { coeff: 1,    units: { kg: 1, m: -1, s: -2 } },
+  Hz:  { coeff: 1,    units: { s: -1 } },
+  V:   { coeff: 1,    units: { kg: 1, m: 2, s: -3, A: -1 } },
+  C:   { coeff: 1,    units: { s: 1, A: 1 } },
+  F:   { coeff: 1,    units: { kg: -1, m: -2, s: 4, A: 2 } },
+  H:   { coeff: 1,    units: { kg: 1, m: 2, s: -2, A: -2 } },
+  T:   { coeff: 1,    units: { kg: 1, s: -2, A: -1 } },
+  Wb:  { coeff: 1,    units: { kg: 1, m: 2, s: -2, A: -1 } },
+  rad: { coeff: 1,    units: {} },
+  // Liter-based volume units (enabled only when chemistry mode is active).
+  μL:  { coeff: 1e-9, units: { m: 3 } },
+  mL:  { coeff: 1e-6, units: { m: 3 } },
+  L:   { coeff: 1e-3, units: { m: 3 } },
+};
+
+// Unit names only valid when chemistry mode is active (L conflicts with length variable).
+const CHEM_ONLY_UNITS = new Set(['μL', 'mL', 'L']);
+
+// Scaled / prefixed unit atoms. Same format as DERIVED_UNIT_EXPANSIONS.
+// Base units (m, s, kg, A) and unscaled derived units (N, J, Pa, …) are NOT duplicated here.
+const SCALED_UNIT_ATOMS = {
+  // Length
+  nm:  { coeff: 1e-9,      units: { m: 1 } },
+  μm:  { coeff: 1e-6,      units: { m: 1 } },
+  mm:  { coeff: 1e-3,      units: { m: 1 } },
+  cm:  { coeff: 0.01,      units: { m: 1 } },
+  km:  { coeff: 1e3,       units: { m: 1 } },
+  // Time (small)
+  ns:  { coeff: 1e-9,      units: { s: 1 } },
+  μs:  { coeff: 1e-6,      units: { s: 1 } },
+  ms:  { coeff: 1e-3,      units: { s: 1 } },
+  // Time (large, non-SI)
+  min: { coeff: 60,        units: { s: 1 } },
+  hr:  { coeff: 3600,      units: { s: 1 } },
+  day: { coeff: 86400,     units: { s: 1 } },
+  yr:  { coeff: 3.15576e7, units: { s: 1 } },
+  // Mass (relative to kg)
+  μg:  { coeff: 1e-9,      units: { kg: 1 } },
+  mg:  { coeff: 1e-6,      units: { kg: 1 } },
+  g:   { coeff: 1e-3,      units: { kg: 1 } },
+  // Current (relative to A)
+  μA:  { coeff: 1e-6,      units: { A: 1 } },
+  mA:  { coeff: 1e-3,      units: { A: 1 } },
+  // Energy (relative to J = kg·m²·s⁻²)
+  nJ:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -2 } },
+  μJ:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2 } },
+  mJ:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2 } },
+  kJ:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -2 } },
+  MJ:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -2 } },
+  GJ:  { coeff: 1e9,       units: { kg: 1, m: 2, s: -2 } },
+  TJ:  { coeff: 1e12,      units: { kg: 1, m: 2, s: -2 } },
+  PJ:  { coeff: 1e15,      units: { kg: 1, m: 2, s: -2 } },
+  // Power (relative to W = kg·m²·s⁻³)
+  nW:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -3 } },
+  μW:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3 } },
+  mW:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3 } },
+  kW:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -3 } },
+  MW:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -3 } },
+  GW:  { coeff: 1e9,       units: { kg: 1, m: 2, s: -3 } },
+  TW:  { coeff: 1e12,      units: { kg: 1, m: 2, s: -3 } },
+  // Force (relative to N = kg·m·s⁻²)
+  mN:  { coeff: 1e-3,      units: { kg: 1, m: 1, s: -2 } },
+  kN:  { coeff: 1e3,       units: { kg: 1, m: 1, s: -2 } },
+  MN:  { coeff: 1e6,       units: { kg: 1, m: 1, s: -2 } },
+  // Pressure (relative to Pa = kg·m⁻¹·s⁻²)
+  kPa: { coeff: 1e3,       units: { kg: 1, m: -1, s: -2 } },
+  MPa: { coeff: 1e6,       units: { kg: 1, m: -1, s: -2 } },
+  GPa: { coeff: 1e9,       units: { kg: 1, m: -1, s: -2 } },
+  // Frequency (relative to Hz = s⁻¹)
+  kHz: { coeff: 1e3,       units: { s: -1 } },
+  MHz: { coeff: 1e6,       units: { s: -1 } },
+  GHz: { coeff: 1e9,       units: { s: -1 } },
+  THz: { coeff: 1e12,      units: { s: -1 } },
+  // Voltage (relative to V = kg·m²·s⁻³·A⁻¹)
+  μV:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3, A: -1 } },
+  mV:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3, A: -1 } },
+  kV:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -3, A: -1 } },
+  MV:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -3, A: -1 } },
+  // Charge (relative to C = s·A)
+  μC:  { coeff: 1e-6,      units: { s: 1, A: 1 } },
+  mC:  { coeff: 1e-3,      units: { s: 1, A: 1 } },
+  // Capacitance (relative to F = kg⁻¹·m⁻²·s⁴·A²)
+  pF:  { coeff: 1e-12,     units: { kg: -1, m: -2, s: 4, A: 2 } },
+  nF:  { coeff: 1e-9,      units: { kg: -1, m: -2, s: 4, A: 2 } },
+  μF:  { coeff: 1e-6,      units: { kg: -1, m: -2, s: 4, A: 2 } },
+  mF:  { coeff: 1e-3,      units: { kg: -1, m: -2, s: 4, A: 2 } },
+  // Inductance (relative to H = kg·m²·s⁻²·A⁻²)
+  nH:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -2, A: -2 } },
+  μH:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2, A: -2 } },
+  mH:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2, A: -2 } },
+  // Magnetic flux density (relative to T = kg·s⁻²·A⁻¹)
+  μT:  { coeff: 1e-6,      units: { kg: 1, s: -2, A: -1 } },
+  mT:  { coeff: 1e-3,      units: { kg: 1, s: -2, A: -1 } },
+  // Weber (relative to Wb = kg·m²·s⁻²·A⁻¹)
+  μWb: { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2, A: -1 } },
+  mWb: { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2, A: -1 } },
+};
+
+// Scale series for each base/derived unit, used by _selectBestScale.
+// Each entry: { name: string, p: number } where p is the prefix multiplier relative to SI.
+const SCALABLE_UNITS_SERIES = {
+  m:   [{name:'nm',p:1e-9},{name:'μm',p:1e-6},{name:'mm',p:1e-3},{name:'cm',p:0.01},
+        {name:'m',p:1},{name:'km',p:1e3}],
+  s:   [{name:'ns',p:1e-9},{name:'μs',p:1e-6},{name:'ms',p:1e-3},{name:'s',p:1},
+        {name:'min',p:60},{name:'hr',p:3600},{name:'day',p:86400},{name:'yr',p:3.15576e7}],
+  kg:  [{name:'μg',p:1e-9},{name:'mg',p:1e-6},{name:'g',p:1e-3},{name:'kg',p:1}],
+  A:   [{name:'μA',p:1e-6},{name:'mA',p:1e-3},{name:'A',p:1}],
+  J:   [{name:'nJ',p:1e-9},{name:'μJ',p:1e-6},{name:'mJ',p:1e-3},{name:'J',p:1},
+        {name:'kJ',p:1e3},{name:'MJ',p:1e6},{name:'GJ',p:1e9},{name:'TJ',p:1e12},{name:'PJ',p:1e15}],
+  W:   [{name:'nW',p:1e-9},{name:'μW',p:1e-6},{name:'mW',p:1e-3},{name:'W',p:1},
+        {name:'kW',p:1e3},{name:'MW',p:1e6},{name:'GW',p:1e9},{name:'TW',p:1e12}],
+  N:   [{name:'mN',p:1e-3},{name:'N',p:1},{name:'kN',p:1e3},{name:'MN',p:1e6}],
+  Pa:  [{name:'Pa',p:1},{name:'kPa',p:1e3},{name:'MPa',p:1e6},{name:'GPa',p:1e9}],
+  Hz:  [{name:'Hz',p:1},{name:'kHz',p:1e3},{name:'MHz',p:1e6},{name:'GHz',p:1e9},{name:'THz',p:1e12}],
+  V:   [{name:'μV',p:1e-6},{name:'mV',p:1e-3},{name:'V',p:1},{name:'kV',p:1e3},{name:'MV',p:1e6}],
+  C:   [{name:'μC',p:1e-6},{name:'mC',p:1e-3},{name:'C',p:1}],
+  F:   [{name:'pF',p:1e-12},{name:'nF',p:1e-9},{name:'μF',p:1e-6},{name:'mF',p:1e-3},{name:'F',p:1}],
+  H:   [{name:'nH',p:1e-9},{name:'μH',p:1e-6},{name:'mH',p:1e-3},{name:'H',p:1}],
+  T:   [{name:'μT',p:1e-6},{name:'mT',p:1e-3},{name:'T',p:1}],
+  Wb:  [{name:'μWb',p:1e-6},{name:'mWb',p:1e-3},{name:'Wb',p:1}],
 };
 
 // Compound unit simplifications — matched at display time (power=1 only).
@@ -86,9 +197,13 @@ const COMPOUND_UNIT_SIMPLIFICATIONS = [
 // All unit names sorted longest-first for greedy tokenizer matching.
 const SI_ALL_UNIT_NAMES = [
   ...Object.keys(DERIVED_UNIT_EXPANSIONS),
+  ...Object.keys(SCALED_UNIT_ATOMS),
   ...SI_BASE_UNITS,
 ].sort((a, b) => b.length - a.length);
 const SI_ALL_UNIT_NAMES_SET = new Set(SI_ALL_UNIT_NAMES);
+
+// Module-level flag: set in evaluateCalcExpressions before each evaluation.
+let _activePhysicsChem = false;
 
 function findEqAtDepth0(s) {
   let depth = 0;
@@ -177,6 +292,16 @@ function tokenize(src) {
       }
       if (matched) { tokens.push({ type: TK.IDENT, val: matched }); i += matched.length; }
       else          { tokens.push({ type: TK.IDENT, val: c });       i++; }
+      continue;
+    }
+    // Handle μ (micro prefix, U+00B5 or U+03BC) — try greedy match of μ-prefixed unit names.
+    if (c === '\u00B5' || c === '\u03BC') {
+      let matched = null;
+      for (const name of SI_ALL_UNIT_NAMES) {
+        if ((name[0] === '\u00B5' || name[0] === '\u03BC') && src.startsWith(name, i)) { matched = name; break; }
+      }
+      if (matched) { tokens.push({ type: TK.IDENT, val: matched }); i += matched.length; }
+      else          { i++; } // skip unrecognised μ
       continue;
     }
     if (c === '\\') {
@@ -536,7 +661,18 @@ class Parser {
       case '\\epsilon': return { type: 'variable', name: this.tryParseSubscript('epsilon') };
       case '\\theta':   return { type: 'variable', name: this.tryParseSubscript('theta') };
       case '\\lambda':  return { type: 'variable', name: this.tryParseSubscript('lambda') };
-      case '\\mu':      return { type: 'variable', name: this.tryParseSubscript('mu') };
+      case '\\mu': {
+        // Check if the next token completes a μ-prefixed unit (e.g. \mu J → μJ, \mu s → μs).
+        const nextTok = this.peek();
+        if (nextTok.type === TK.IDENT) {
+          const combined = 'μ' + nextTok.val;
+          if (SCALED_UNIT_ATOMS[combined] !== undefined || DERIVED_UNIT_EXPANSIONS[combined] !== undefined) {
+            this.next(); // consume the unit letters
+            return { type: 'variable', name: combined };
+          }
+        }
+        return { type: 'variable', name: this.tryParseSubscript('mu') };
+      }
       case '\\sigma':   return { type: 'variable', name: this.tryParseSubscript('sigma') };
       case '\\rho':   return { type: 'variable', name: this.tryParseSubscript('rho') };
       case '\\omega':   return { type: 'variable', name: this.tryParseSubscript('omega') };
@@ -990,7 +1126,7 @@ function collectUnitVarsInAst(ast) {
   while (stack.length) {
     const node = stack.pop();
     if (!node) continue;
-    if (node.type === 'variable' && SI_BASE_UNITS.has(node.name)) units.add(node.name);
+    if (node.type === 'variable' && (SI_BASE_UNITS.has(node.name) || DERIVED_UNIT_EXPANSIONS[node.name] !== undefined || SCALED_UNIT_ATOMS[node.name] !== undefined)) units.add(node.name);
     if (node.args) for (const a of node.args) stack.push(a);
     if (node.arg)  stack.push(node.arg);
   }
@@ -1006,8 +1142,16 @@ function astToUnitSignature(ast) {
   if (!ast) return null;
   if (ast.type === 'number') return { coeff: ast.value, units: {} };
   if (ast.type === 'variable') {
-    if (!SI_BASE_UNITS.has(ast.name)) return null;
-    return { coeff: 1, units: { [ast.name]: 1 } };
+    if (SI_BASE_UNITS.has(ast.name)) return { coeff: 1, units: { [ast.name]: 1 } };
+    if (DERIVED_UNIT_EXPANSIONS[ast.name]) {
+      const d = DERIVED_UNIT_EXPANSIONS[ast.name];
+      return { coeff: d.coeff, units: { ...d.units } };
+    }
+    if (SCALED_UNIT_ATOMS[ast.name]) {
+      const d = SCALED_UNIT_ATOMS[ast.name];
+      return { coeff: d.coeff, units: { ...d.units } };
+    }
+    return null;
   }
   if (ast.type !== 'call') return null;
   const [a, b] = ast.args || [];
@@ -1129,6 +1273,11 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
       }
       if (ast.name === 'pi') return mk(Math.PI);    // π — always numeric, never a unit
       if (SI_BASE_UNITS.has(ast.name)) return ast; // unit symbol — always symbolic
+      if (DERIVED_UNIT_EXPANSIONS[ast.name] !== undefined) {
+        if (!CHEM_ONLY_UNITS.has(ast.name) || _activePhysicsChem) return ast;
+        // Chem-only unit (L, mL, μL) when chem mode is off — fall through to undefined
+      }
+      if (SCALED_UNIT_ATOMS[ast.name] !== undefined) return ast; // scaled unit — keep symbolic
       if (useSymbolic) return ast;                  // free variable — keep symbolic
       throw new Error(`Undefined variable '${ast.name}'`);
     }
@@ -1419,15 +1568,144 @@ function _termSignature(factors) {
     .join('*');
 }
 
-/** Merge terms with identical factor maps, drop zero-coefficient terms. */
-function _combineTerms(terms) {
-  const map = new Map();
+/** Expand a canonical term's factors to SI base units. Returns {coeff, siUnits} or null. */
+function _termToSISignature(term) {
+  let coeff = term.coeff;
+  const siUnits = {};
+  for (const [key, exp] of term.factors) {
+    if (SI_BASE_UNITS.has(key)) {
+      siUnits[key] = (siUnits[key] || 0) + exp;
+    } else if (DERIVED_UNIT_EXPANSIONS[key]) {
+      if (CHEM_ONLY_UNITS.has(key) && !_activePhysicsChem) return null;
+      const d = DERIVED_UNIT_EXPANSIONS[key];
+      coeff *= Math.pow(d.coeff, exp);
+      for (const [u, e] of Object.entries(d.units))
+        siUnits[u] = (siUnits[u] || 0) + e * exp;
+    } else if (SCALED_UNIT_ATOMS[key]) {
+      const d = SCALED_UNIT_ATOMS[key];
+      coeff *= Math.pow(d.coeff, exp);
+      for (const [u, e] of Object.entries(d.units))
+        siUnits[u] = (siUnits[u] || 0) + e * exp;
+    } else {
+      return null;
+    }
+  }
+  for (const k of Object.keys(siUnits)) if (siUnits[k] === 0) delete siUnits[k];
+  return { coeff, siUnits };
+}
+
+/** Canonical string key from SI units dict. */
+function _siSignatureKey(siUnits) {
+  return Object.entries(siUnits).filter(([, e]) => e !== 0).sort().map(([u, e]) => `${u}^${e}`).join('*');
+}
+
+/**
+ * Given a base unit name, its power, and the SI coefficient, return the best-scaled
+ * unit name and display coefficient, or null if no prefix gives a display coeff in [1, 1000).
+ * For m^3 when chem mode is active, liter units are preferred over length cubed.
+ */
+function _selectBestScale(baseName, power, siCoeff) {
+  if (baseName === 'm' && power === 3 && _activePhysicsChem) {
+    for (const { name, p } of [{ name: 'L', p: 1e-3 }, { name: 'mL', p: 1e-6 }, { name: 'μL', p: 1e-9 }]) {
+      const d = Math.abs(siCoeff) / p;
+      if (d >= 1 && d < 1000) return { name, power: 1, newCoeff: siCoeff / p };
+    }
+  }
+  const series = SCALABLE_UNITS_SERIES[baseName];
+  if (!series) return null;
+  // Scan from largest prefix to smallest — first candidate with |display coeff| in [1, 1000).
+  const sorted = [...series].sort((a, b) => b.p - a.p);
+  for (const { name, p } of sorted) {
+    const d = Math.abs(siCoeff) / Math.pow(p, power);
+    if (d >= 1 && d < 1000) return { name, power, newCoeff: siCoeff / Math.pow(p, power) };
+  }
+  // Coefficient is out of range for all prefixes — use the largest available unit.
+  const largest = sorted[0];
+  return { name: largest.name, power, newCoeff: siCoeff / Math.pow(largest.p, power) };
+}
+
+/** Rewrite a term to its best-scaled named unit form, or return it unchanged if no match. */
+function _simplifyTermUnits(term, atomMap) {
+  const si = _termToSISignature(term);
+  if (!si) return term;
+
+  // All dimensions cancel — pure dimensionless number.
+  const entries = Object.entries(si.siUnits).filter(([, e]) => e !== 0);
+  if (entries.length === 0) return { coeff: si.coeff, factors: new Map() };
+
+  let baseName, basePower, displayCoeff;
+
+  // Try matching to a non-chem derived unit (N, J, W, Hz, …).
+  // Require match.power >= 1 to avoid nonsensical units like Hz^{-1} for plain seconds.
+  const match = matchDerivedUnit({ coeff: si.coeff, units: si.siUnits });
+  if (match && match.power >= 1 && DERIVED_UNIT_EXPANSIONS[match.name] && !CHEM_ONLY_UNITS.has(match.name)) {
+    baseName = match.name;
+    basePower = match.power;
+    displayCoeff = match.coeff;
+  } else {
+    // Check if the SI expansion reduces to a single base unit raised to an integer power.
+    if (entries.length === 1) {
+      const [unit, power] = entries[0];
+      if (SI_BASE_UNITS.has(unit) && Number.isInteger(power)) {
+        baseName = unit;
+        basePower = power;
+        displayCoeff = si.coeff;
+      }
+    }
+  }
+
+  if (!baseName) return term;
+
+  const scaled = _selectBestScale(baseName, basePower, displayCoeff);
+  // If no ideal prefix found: fall back to base unit only when the original term has mixed
+  // factors (e.g. Mm²·kPa·m⁻¹·s² → kg). For single-factor terms (e.g. yr^{-1}), return
+  // the original so we don't force an ugly coefficient onto a derived unit (e.g. 3e-8 Hz).
+  const nonZeroFactors = [...term.factors.values()].filter(e => e !== 0).length;
+  const { name, power, newCoeff } = scaled ?? (nonZeroFactors >= 2
+    ? { name: baseName, power: basePower, newCoeff: displayCoeff }
+    : null) ?? { name: null };
+  if (!name) return term;
+  if (!atomMap.has(name)) atomMap.set(name, { type: 'variable', name });
+  return { coeff: newCoeff, factors: new Map([[name, power]]) };
+}
+
+/** Merge terms with identical factor maps; fall back to SI equivalence for unit terms. */
+function _combineTerms(terms, atomMap) {
+  const map = new Map();   // surfaceSig → term
+  const siMap = new Map(); // siKey → surfaceSig
+
   for (const t of terms) {
     const sig = _termSignature(t.factors);
-    const existing = map.get(sig);
-    if (existing) existing.coeff += t.coeff;
-    else map.set(sig, { coeff: t.coeff, factors: t.factors });
+    if (map.has(sig)) {
+      map.get(sig).coeff += t.coeff;
+      continue;
+    }
+
+    const si = _termToSISignature(t);
+    if (si !== null) {
+      const siKey = _siSignatureKey(si.siUnits);
+      const existSig = siMap.get(siKey);
+      if (existSig !== undefined) {
+        // SI-equivalent term exists — convert both to SI base units and combine
+        const existTerm = map.get(existSig);
+        const existSI = _termToSISignature(existTerm);
+        const siFactors = new Map(Object.entries(si.siUnits).map(([u, e]) => [u, e]));
+        for (const u of siFactors.keys())
+          if (!atomMap.has(u)) atomMap.set(u, { type: 'variable', name: u });
+        existTerm.coeff = existSI.coeff + si.coeff;
+        existTerm.factors = siFactors;
+        map.delete(existSig);
+        const newSig = _termSignature(siFactors);
+        map.set(newSig, existTerm);
+        siMap.set(siKey, newSig);
+        continue;
+      }
+      siMap.set(siKey, sig);
+    }
+
+    map.set(sig, { coeff: t.coeff, factors: new Map(t.factors) });
   }
+
   return [...map.values()].filter(t => t.coeff !== 0);
 }
 
@@ -1536,13 +1814,21 @@ function _simplifyAstFallback(ast) {
 
 // ── AST → LaTeX renderer (for preview) ───────────────────────────────────────
 
-function _numToLatex(v) {
+function _numToLatex(v, sigFigs = 6) {
   if (!isFinite(v)) return String(v);
-  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
-  if (Math.abs(v) >= 0.001 && Math.abs(v) < 1e6) return String(parseFloat(v.toPrecision(6)));
-  const exp = Math.floor(Math.log10(Math.abs(v)));
-  const m   = Math.round((v / Math.pow(10, exp)) * 1000) / 1000;
-  return `${m} \\times 10^{${exp}}`;
+  const absV = Math.abs(v);
+  if (Number.isInteger(v) && absV < 10000) return String(v);
+  if (absV >= 0.001 && absV < 10000) return String(parseFloat(v.toPrecision(sigFigs)));
+  if (absV < 0.001) {
+    // Standard scientific notation for very small numbers.
+    const exp = Math.floor(Math.log10(absV));
+    const m = parseFloat((v / Math.pow(10, exp)).toPrecision(sigFigs));
+    return `${m} \\times 10^{${exp}}`;
+  }
+  // Engineering notation for large numbers: exponent is a multiple of 3, mantissa in [1, 1000).
+  const exp3 = Math.floor(Math.log10(absV) / 3) * 3;
+  const m = parseFloat((v / Math.pow(10, exp3)).toPrecision(sigFigs));
+  return `${m} \\times 10^{${exp3}}`;
 }
 
 /** Wrap in parens only when ast is a sum, difference, or product — for use as pow base or neg operand. */
@@ -1650,10 +1936,11 @@ function _wrapUnitsInText(latex) {
 function simplifyAst(ast) {
   if (ast.type !== 'call') return ast;
   try {
-    const atomMap = new Map();
-    const terms   = _toCanonical(ast, atomMap);
-    const reduced = _combineTerms(terms);
-    const rebuilt = _fromCanonical(reduced, atomMap);
+    const atomMap  = new Map();
+    const terms    = _toCanonical(ast, atomMap);
+    const reduced  = _combineTerms(terms, atomMap);
+    const unitSimp = reduced.map(t => _simplifyTermUnits(t, atomMap));
+    const rebuilt  = _fromCanonical(unitSimp, atomMap);
     // Post-pass: clean up any residual mul(1,x), neg(neg(x)), etc.
     return _simplifyAstFallback(rebuilt);
   } catch (_) {
@@ -2066,17 +2353,20 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
   for (const pc of activeConstants) allValues.set(pc.varName, pc.value);
 
   // In units mode, build a parallel value map that stores number | ASTNode values.
-  // Derived unit symbols are expanded to base-unit ASTs so that e.g. N → kg·m·s⁻².
+  // Derived unit symbols are kept as symbolic atoms (not expanded to base units).
   // Physics constants are stored as unit ASTs (value × base-unit expression).
+  _activePhysicsChem = !!(usePhysicsConstants || usePhysicsChem);
   let unitValues = null;
   if (useUnits) {
     unitValues = new Map(allValues); // start with same physics constants (as numbers)
-    for (const [name, ast] of buildDerivedUnitParamMap()) {
-      if (!unitValues.has(name)) unitValues.set(name, ast);
-    }
     // Override physics constants with unit-carrying ASTs (value × SI base units).
     for (const pc of activeConstants) {
       unitValues.set(pc.varName, buildConstantUnitAst(pc.value, pc.unitDims || {}));
+    }
+    // Inject liter units as symbolic atoms when chemistry mode is active.
+    if (_activePhysicsChem) {
+      for (const name of ['μL', 'mL', 'L'])
+        if (!unitValues.has(name)) unitValues.set(name, { type: 'variable', name });
     }
   }
 
@@ -2356,4 +2646,3 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
 
   return results;
 }
-

@@ -683,7 +683,7 @@ Numeric evaluation is needed for calc boxes and for pre-computing constants befo
 - **`evaluateAst`** evaluates an AST to a numeric value given a map of variable values and function definitions. Throws on undefined variables.
 - **`evaluateAstSymbolic`** like `evaluateAst` but leaves unit symbols and (optionally) unknown variables as symbolic AST nodes rather than throwing. Returns a simplified AST node (may be a `number` node if fully numeric). Used by the units system.
 - **`differentiateAst`** symbolically differentiates an AST with respect to a variable, applying chain rule, product rule, etc.
-- **`simplifyAst`** normalizes to canonical sum-of-products form: flattens to `{ coeff, factors }` terms, combines like terms, reconstructs. Falls back to basic constant folding for unsupported structures. Works correctly on mixed numeric-and-variable expressions (unit symbols are treated as opaque atoms). Key correctness property: `pow(mul(a, b), n)` expands to `mul(pow(a,n), pow(b,n))` for single-term bases (crucial for unit exponentiation like `(kg·m)²` → `kg²·m²`).
+- **`simplifyAst`** normalizes to canonical sum-of-products form: flattens to `{ coeff, factors }` terms, combines like terms, reconstructs. Falls back to basic constant folding for unsupported structures. Works correctly on mixed numeric-and-variable expressions (unit symbols are treated as opaque atoms). Key correctness property: `pow(mul(a, b), n)` expands to `mul(pow(a,n), pow(b,n))` for single-term bases (crucial for unit exponentiation like `(kg·m)²` → `kg²·m²`). After combining terms, applies `_simplifyTermUnits` to each term: if the term's SI expansion matches a named derived unit, the term is rewritten to use it (e.g., `N·m → J`). Terms with non-unit atoms are skipped. Cross-unit combination (e.g., `5 N + 5 kg·m·s⁻²`) is handled in `_combineTerms` by SI-expanding both terms, combining, and then letting `_simplifyTermUnits` re-match the result.
 - **`astToLatex`** converts a simplified AST to a LaTeX string. Used for rendering unit results in the preview. Unit variable names are wrapped in `\text{...}`.
 
 ### Implementation
@@ -849,12 +849,12 @@ Evaluates a list of math expressions in dependency order, supporting variable de
 ### Implementation
 - `evaluateCalcExpressions(expressions, opts)` (math.js) — main evaluator
   - `opts.usePhysicsConstants` — inject PHYSICS_CONSTANTS into values map
-  - `opts.useUnits` — enable units mode: builds `unitValues` map (physics constants + derived unit ASTs), uses `evaluateAstSymbolic` for all evaluation
+  - `opts.useUnits` — enable units mode: builds `unitValues` map (physics constants as unit ASTs; derived units remain symbolic atoms), uses `evaluateAstSymbolic` for all evaluation
   - `opts.useSymbolic` — only meaningful with `useUnits`; keeps undefined non-unit variables symbolic rather than throwing
 - `findCalcOperatorAtDepth0(s)` (math.js) — finds `=`, `<`, `>`, `\leq`, `\geq`, `\neq` at brace-depth 0; returns `{ idx, len, op }` or `null`
 - `findEqAtDepth0(s)` (math.js) — finds `=` only
 
-**Units mode internal data flow:** When `useUnits` is true, a parallel `unitValues: Map<name, number|ASTNode>` is built alongside `allValues`. Derived unit names (N, J, W, etc.) are pre-loaded as ASTs via `buildDerivedUnitParamMap()`. Variable definitions are resolved into `unitValues` using `evaluateAstSymbolic`. The `evalToResult` helper (defined inside the expression loop) dispatches to either `evaluateAstSymbolic` or `evaluateAst` based on the mode.
+**Units mode internal data flow:** When `useUnits` is true, a parallel `unitValues: Map<name, number|ASTNode>` is built alongside `allValues`. Derived unit names (N, J, W, etc.) are NOT pre-expanded — they are kept as symbolic atoms by `evaluateAstSymbolic` (which recognizes them via `DERIVED_UNIT_EXPANSIONS`). Physics constants are stored as unit ASTs via `buildConstantUnitAst`. Variable definitions are resolved into `unitValues` using `evaluateAstSymbolic`. The `evalToResult` helper dispatches to either `evaluateAstSymbolic` or `evaluateAst` based on the mode.
 
 Reuses `parseLatexToAst` and `evaluateAst` / `evaluateAstSymbolic` from [LaTeX/AST Engine](#latexast-engine). Physics constants injected from [Physics Constants](#physics-constants). Symbolic units from [Units System](#units-system).
 
@@ -863,15 +863,17 @@ Reuses `parseLatexToAst` and `evaluateAst` / `evaluateAstSymbolic` from [LaTeX/A
 # Units System
 
 ## Motivation
-Extends calc boxes to track physical dimensions symbolically. When enabled, SI unit symbols (m, kg, s, A, K, mol, cd, and common derived units like N, J, Pa, Hz) are treated as symbolic atoms rather than undefined variables. Expressions like `5 kg * 9.8 m/s^2` simplify to `49 kg·m·s⁻²` (newtons, but in base units). Derived units are automatically expanded to base units so that `5 N * 2 m` simplifies to `10 kg·m²·s⁻²` rather than `10 N·m`.
+Extends calc boxes to track physical dimensions symbolically. When enabled, SI unit symbols (m, kg, s, A, K, mol, cd) and derived unit symbols (N, J, Pa, W, Hz, V, C, F, H, T, Wb) are treated as symbolic atoms rather than undefined variables. Derived units are kept as-is unless simplification requires it: `5 N * 2 m` simplifies to `10 J` (N·m matches joules), and `N / m^3` stays `N·m⁻³` rather than expanding to base SI. When combining terms with dimensionally equivalent but differently-expressed units (e.g., `5 N + 5 kg·m·s⁻²`), both are converted to SI base units for combination and then re-matched to a named derived unit if possible. After matching, the best-scaled prefix is selected: `5000 J → 5 kJ`, `3600 s → 1 hr`, `0.005 kg → 5 g`.
 
 ## Subfeature index
 None.
 
 ## Behaviour
-**Units toggle (per calc box):** Enables SI units mode. When on, any variable name matching an SI unit symbol is treated as a symbolic unit atom, not an undefined variable. Derived unit symbols (N, J, W, Pa, etc.) are expanded to base units before simplification.
+**Units toggle (per calc box):** Enables SI units mode. When on, any variable name matching a base, derived, or prefixed SI unit symbol is treated as a symbolic atom, not an undefined variable. Derived and prefixed units are kept symbolic and only resolved to SI base units when needed for combining non-trivially-equivalent terms.
 
 **Symbolic toggle (per calc box):** Only active when Units is on. When on, undefined variables that are *not* unit symbols are also kept symbolic rather than producing an error. Allows writing expressions like `F = m a` where `m` and `a` haven't been defined yet.
+
+**Auto-scaling:** After simplification, results are automatically displayed in the most human-readable scaled unit. `5000 J` → `5 kJ`, `0.001 m^2` → `10 cm^2`, `1e9 Hz` → `1 GHz`. The scale is chosen so the coefficient is in [1, 1000). If no clean scale exists (coefficient outside that range for all prefixes), the result is left as-is.
 
 **Result display:** Unit results are shown in the editor result area using:
 - Plain text with Unicode superscripts (`kg·m·s⁻²`) for expressions without division
@@ -881,25 +883,41 @@ In the preview, unit results use `astToLatex` output embedded directly in displa
 
 **Warnings:** When a transcendental function (`sin`, `cos`, `ln`, etc.) receives an argument that still contains unit variables after simplification, a warning is shown below the expression row: `⚠ sin([kg]) — unit mismatch`. This indicates a dimensional error in the expression.
 
-**Multi-letter unit entry:** Users type unit names normally in the MathQuill field. The tokenizer (not the parser) handles multi-letter unit names: `kg`, `mol`, `Pa`, `Hz`, `rad`, etc. are each tokenized as a single identifier. Adjacent multi-letter unit names must be separated with `\cdot` or similar; e.g., `Pa \cdot m` works but `Pam` would parse as `P·a·m` (not Pa·m).
+**Multi-letter unit entry:** Users type unit names normally in the MathQuill field. The tokenizer handles multi-letter unit names: `kg`, `mol`, `Pa`, `Hz`, `kHz`, `km`, `min`, `day`, etc. are each tokenized as a single identifier. Adjacent multi-letter unit names must be separated with `\cdot` or similar; e.g., `kPa \cdot m` works but `kPam` would not. `μ`-prefixed units (μm, μs, μA, μJ, etc.) are handled by a dedicated tokenizer branch matching the longest unit name starting with μ (U+00B5 or U+03BC). The parser also handles `\mu` + letter: if `\mu` is followed by a known unit letter it forms a combined μ-unit atom (e.g. `\mu J` → `μJ`).
+
+**Liter units (chemistry mode only):** `L`, `mL`, `μL` are enabled only when the Physics Chem constants group is active. This prevents `L` from conflicting with common physics variables. When chem mode is on, `1e-3 m^3` auto-scales to `1 L`. When off, volume stays in m³/cm³/mm³.
+
+**`g` (gram) vs `g` (gravity):** When the Classic Mechanics constants group is active, `g = 9.81 m/s²` shadows the gram unit. `mg` and `μg` are unaffected (multi-char atoms never confused with `m*g`).
 
 ## Implementation
-**Constants in graph.js:**
-- `SI_BASE_UNITS` (math.js) — `Set` of 7 base unit symbols: `m`, `s`, `kg`, `A`, `K`, `mol`, `cd`
-- `DERIVED_UNIT_EXPANSIONS` (math.js) — object mapping 12 derived unit names to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad
-- `SI_ALL_UNIT_NAMES` (math.js) — all unit names sorted longest-first; used by the tokenizer for greedy matching
+**Constants in math.js:**
+- `SI_BASE_UNITS` — `Set` of 7 base unit symbols: `m`, `s`, `kg`, `A`, `K`, `mol`, `cd`
+- `DERIVED_UNIT_EXPANSIONS` — maps 12 derived unit names + liter units (`L`, `mL`, `μL`) to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad, L, mL, μL
+- `CHEM_ONLY_UNITS` — `Set(['μL', 'mL', 'L'])` — gated behind chemistry mode
+- `SCALED_UNIT_ATOMS` — same format as `DERIVED_UNIT_EXPANSIONS`; all prefixed/scaled unit names not already in the base sets. Covers: nm/μm/mm/cm/km (km is max for distance), ns/μs/ms, min/hr/day/yr, μg/mg/g, μA/mA, nJ/μJ/mJ/kJ/MJ/GJ/TJ/PJ, nW/μW/mW/kW/MW/GW/TW, mN/kN/MN, kPa/MPa/GPa, kHz/MHz/GHz/THz, μV/mV/kV/MV, μC/mC, pF/nF/μF/mF, nH/μH/mH, μT/mT, μWb/mWb
+- `SCALABLE_UNITS_SERIES` — map from base unit name to `[{name, p}]` sorted ascending by scale factor `p`. Used by `_selectBestScale` to find the best-fit prefix.
+- `SI_ALL_UNIT_NAMES` — all unit names (base + derived + scaled) sorted longest-first; used by the tokenizer for greedy matching
+- `_activePhysicsChem` — module-level boolean set in `evaluateCalcExpressions`; gates liter unit recognition
 
-**Helper functions in graph.js:**
-- `buildDerivedUnitParamMap()` (math.js) — converts `DERIVED_UNIT_EXPANSIONS` into a `Map<name, ASTNode>` where each AST represents the base-unit expansion. E.g., N → `mul(kg, mul(m, pow(s, -2)))`. This map is merged into `unitValues` at the start of units-mode evaluation so that `substituteAst`-style substitution expands derived units automatically via `evaluateAstSymbolic`.
-- `collectUnitVarsInAst(ast)` (math.js) — walks an AST and returns a `Set` of SI base unit variable names found in it. Used to determine which units appear in a transcendental function's argument (for warnings).
-- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` (math.js) — symbolic evaluator (see [AST Evaluation & Simplification](#ast-evaluation--simplification))
+**Key functions in math.js:**
+- `buildDerivedUnitParamMap()` — converts `DERIVED_UNIT_EXPANSIONS` into a `Map<name, ASTNode>` of base-unit expansion ASTs. Used by `buildConstantUnitAst` but not injected into `unitValues` at eval time (derived units stay symbolic).
+- `collectUnitVarsInAst(ast)` — walks AST, returns `Set` of unit variable names (base, derived, and scaled). Used for transcendental-function unit warnings.
+- `_termToSISignature(term)` — expands a `{coeff, factors}` term to SI base units, returning `{coeff, siUnits}` or `null`. Handles `DERIVED_UNIT_EXPANSIONS`, `SCALED_UNIT_ATOMS`, and SI base units. Chem-only units (`L`, `mL`, `μL`) return `null` when chem mode is off.
+- `_siSignatureKey(siUnits)` — canonical string key from SI units dict; groups terms by dimensional equivalence.
+- `_selectBestScale(baseName, power, siCoeff)` — given a base unit name (`J`, `m`, `s`, `kg`, etc.), the power it appears at, and its SI coefficient, returns `{name, power, newCoeff}`. Scans the series from largest to smallest prefix; picks the first where `|newCoeff| ∈ [1, 1000)`. If no prefix fits (coefficient too large or too small for all entries), returns the largest prefix anyway rather than `null`. Special case: `baseName='m', power=3` with chem mode tries liter series first (returning power=1 result for L/mL/μL).
+- `_simplifyTermUnits(term, atomMap)` — after combination: (1) tries `matchDerivedUnit` (only `power >= 1` matches accepted, to avoid false Hz⁻¹ matches); (2) falls back to single-SI-base-unit terms; (3) calls `_selectBestScale` to choose best prefix; rewrites the term. For single-factor terms where `_selectBestScale` would be null (unit not in any series), returns the original term unchanged to avoid ugly forced coefficients.
+- `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` — symbolic evaluator; recognises `DERIVED_UNIT_EXPANSIONS` (with chem gating) and `SCALED_UNIT_ATOMS` variable nodes as unit atoms.
 
 **Display helpers in script.js (after `formatCalcResult`, script.js:~310):**
 - `toSuperscript(n)` — converts integer to Unicode superscript string (⁻², ³, etc.)
+- `_astNumStr(v, sigFigs)` — formats a number as plain text. Integers < 10000 as-is; |v| in [0.001, 10000) via `toPrecision`; |v| < 0.001 as standard scientific notation with Unicode superscripts; |v| ≥ 10000 as engineering notation (exponent is a multiple of 3, mantissa in [1, 1000)).
+- `_numToLatex(v, sigFigs)` — same thresholds as `_astNumStr` but returns a LaTeX string (`\times 10^{n}`). Used for preview panel rendering.
 - `buildAstText(ast)` — plain-text renderer; returns `null` if the AST contains a `div` node
 - `buildAstHtml(ast)` — DOM renderer; handles `div` nodes as `.inline-frac` CSS fractions
-- `renderUnitResult(resultSpan, unitAst, warnings)` — selects text vs HTML rendering and populates the result span
+- `renderUnitResult(resultSpan, unitAst, warnings)` — uses `buildAstText`/`buildAstHtml` directly on the already-simplified `unitAst`; does not re-process through `matchDerivedUnit`
 - `formatUnitWarnings(warnings)` — formats warning array to display string
+
+**preview.js unit result rendering:** Uses `astToLatex(result.unitAst, sigFigs)` directly. Does not call `matchDerivedUnit` on the result — the AST is already fully simplified by `_simplifyTermUnits` before reaching the display layer.
 
 **CSS (style.css):**
 - `.calc-unit-warning` — amber warning line below expression row
@@ -1100,7 +1118,7 @@ Constants are split into three independently toggleable groups, each with its ow
 When a group is enabled, its constants are injected as pre-defined variables in the calc box. Constants appear as hover tooltips on the toolbar buttons. A small badge displays the constant's value when recognized in an expression.
 
 ## Implementation
-**`PHYSICS_CONSTANTS_BASIC` / `PHYSICS_CONSTANTS_EM` / `PHYSICS_CONSTANTS_CHEM`** (math.js) — three arrays of `{ varName, value, label, description, unitDims }` objects. `PHYSICS_CONSTANTS` is their concatenation, used for legacy deserialization. `varName` must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps SI base unit names to exponents; dimensionless constants use `{}`.
+**`PHYSICS_CONSTANTS_BASIC` / `PHYSICS_CONSTANTS_EM` / `PHYSICS_CONSTANTS_CHEM`** (math.js) — three arrays of `{ varName, value, label, description, unitDims }` objects. `PHYSICS_CONSTANTS` is their concatenation, used for legacy deserialization. `varName` must match what `parseLatexToAst` produces for the corresponding LaTeX. `unitDims` maps unit names to exponents and may include derived unit names (J, W, N, C, F, H) as well as SI base unit names; dimensionless constants use `{}`. Constants are expressed in the most natural named units (e.g., `h` uses `{J:1, s:1}` rather than `{kg:1, m:2, s:-1}`).
 
 **In `evaluateCalcExpressions`** — accepts `usePhysicsBasic`, `usePhysicsEM`, `usePhysicsChem` (plus legacy `usePhysicsConstants`). Active constants from enabled groups are merged into `allValues` as plain numbers. In units mode, they are additionally merged into `unitValues` as unit ASTs via `buildConstantUnitAst(pc.value, pc.unitDims)`.
 

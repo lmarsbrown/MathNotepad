@@ -105,25 +105,7 @@ function createPreviewElement(box) {
           : (kind === 'bare' && box.showResultsBare !== false);
         if (shouldShow) {
           if (result.unitAst !== undefined) {
-            // Unit result: render via astToLatex for MathJax, or matched derived unit
-            const _match = matchDerivedUnit(astToUnitSignature(result.unitAst));
-            if (_match) {
-              const { name, power, coeff } = _match;
-              let s = '';
-              if (coeff === -1) s += '-';
-              else if (coeff !== 1) s += _numToLatex(coeff, box.sigFigs ?? 6) + ' \\, ';
-              if (name.includes('/')) {
-                const [num, den] = name.split('/');
-                s += `\\frac{\\text{${num}}}{\\text{${den}}}`;
-                if (power !== 1) s += `^{${power}}`;
-              } else {
-                s += `\\text{${name}}`;
-                if (power !== 1) s += `^{${power}}`;
-              }
-              resultLatex = s;
-            } else {
-              resultLatex = astToLatex(result.unitAst, box.sigFigs ?? 6);
-            }
+            resultLatex = astToLatex(result.unitAst, box.sigFigs ?? 6);
             showResult = true;
           } else {
             const formatted = formatCalcResultLatex(result, box.sigFigs ?? 6);

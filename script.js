@@ -73,9 +73,8 @@ let _activeFillColorPopupOutside = null;
 
 function formatConstantValue(v, sigFigs = 6) {
   if (!isFinite(v)) return null;
-  if (Number.isInteger(v) && Math.abs(v) < 1e15) return '= ' + v;
-  const s = parseFloat(v.toPrecision(sigFigs)).toString();
-  return '≈ ' + s;
+  if (Number.isInteger(v) && Math.abs(v) < 10000) return '= ' + v;
+  return '≈ ' + _astNumStr(v, sigFigs);
 }
 
 function buildPhysicsTooltip(group, label) {
@@ -330,18 +329,33 @@ function toSuperscript(n) {
 
 function _astNumStr(v, sigFigs = 6) {
   if (!isFinite(v)) return String(v);
-  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
-  return String(parseFloat(v.toPrecision(sigFigs)));
+  const absV = Math.abs(v);
+  if (Number.isInteger(v) && absV < 10000) return String(v);
+  if (absV >= 0.001 && absV < 10000) return String(parseFloat(v.toPrecision(sigFigs)));
+  if (absV < 0.001) {
+    const exp = Math.floor(Math.log10(absV));
+    const m = parseFloat((v / Math.pow(10, exp)).toPrecision(sigFigs));
+    return `${m}\u00D710${exp < 0 ? '\u207B' : ''}${String(Math.abs(exp)).split('').map(c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]).join('')}`;
+  }
+  const exp3 = Math.floor(Math.log10(absV) / 3) * 3;
+  const m = parseFloat((v / Math.pow(10, exp3)).toPrecision(sigFigs));
+  return `${m}\u00D710${String(exp3).split('').map(c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]).join('')}`;
 }
 
 /** Format a number as a LaTeX string, using \times 10^{n} for scientific notation. */
 function _numToLatex(v, sigFigs = 6) {
   if (!isFinite(v)) return String(v);
-  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
-  const s = parseFloat(v.toPrecision(sigFigs)).toString();
-  const m = s.match(/^(-?\d+(?:\.\d+)?)[eE]([+-]?\d+)$/);
-  if (m) return `${m[1]} \\times 10^{${parseInt(m[2], 10)}}`;
-  return s;
+  const absV = Math.abs(v);
+  if (Number.isInteger(v) && absV < 10000) return String(v);
+  if (absV >= 0.001 && absV < 10000) return String(parseFloat(v.toPrecision(sigFigs)));
+  if (absV < 0.001) {
+    const exp = Math.floor(Math.log10(absV));
+    const m = parseFloat((v / Math.pow(10, exp)).toPrecision(sigFigs));
+    return `${m} \\times 10^{${exp}}`;
+  }
+  const exp3 = Math.floor(Math.log10(absV) / 3) * 3;
+  const m = parseFloat((v / Math.pow(10, exp3)).toPrecision(sigFigs));
+  return `${m} \\times 10^{${exp3}}`;
 }
 
 /** Like formatCalcResult but returns a LaTeX string for use in the preview panel. */
@@ -350,7 +364,7 @@ function formatCalcResultLatex(result, sigFigs = 6) {
   if (result.boolValue !== undefined) return `\\text{${result.boolValue ? 'true' : 'false'}}`;
   if (result.value !== undefined) {
     if (!isFinite(result.value)) return null;
-    if (Number.isInteger(result.value) && Math.abs(result.value) < 1e15)
+    if (Number.isInteger(result.value) && Math.abs(result.value) < 10000)
       return `= ${result.value}`;
     return `\\approx ${_numToLatex(result.value, sigFigs)}`;
   }
@@ -475,21 +489,6 @@ function buildAstHtml(ast, sigFigs = 6) {
  */
 function renderUnitResult(resultSpan, unitAst, warnings, sigFigs = 6) {
   resultSpan.innerHTML = '';
-  const match = matchDerivedUnit(astToUnitSignature(unitAst));
-  if (match) {
-    const { name, power, coeff } = match;
-    let text = '= ';
-    if (coeff === -1) text += '\u2212';
-    else if (coeff !== 1) text += _astNumStr(coeff, sigFigs) + '\u2009';
-    if (power !== 1 && name.includes('/')) {
-      text += `(${name})` + toSuperscript(power);
-    } else {
-      text += name;
-      if (power !== 1) text += toSuperscript(power);
-    }
-    resultSpan.textContent = text;
-    return;
-  }
   if (_astHasDiv(unitAst)) {
     resultSpan.appendChild(document.createTextNode('= '));
     resultSpan.appendChild(buildAstHtml(unitAst, sigFigs));
