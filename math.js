@@ -311,6 +311,11 @@ function tokenize(src) {
       if (cmd === '\\') { // single non-alpha char after backslash
         cmd += src[i++];
       }
+      // Spacing commands — treat as whitespace, don't emit a token.
+      // Without this, \  between terms causes parseProduct to try implicit
+      // multiplication and then fail when the next token is + or -.
+      // \undefined is emitted by MathQuill when spaceBehavesLikeTab is false.
+      if (cmd === '\\ ' || cmd === '\\,' || cmd === '\\;' || cmd === '\\!' || cmd === '\\:' || cmd === '\\undefined') continue;
       // \operatorname{name} → emit as \name (e.g. \sin, \ln)
       if (cmd === '\\operatorname' && i < src.length && src[i] === '{') {
         i++; // skip {
@@ -864,18 +869,25 @@ function analyzeExpressions(classifiedList) {
   classifiedList = [...classifiedList, ...reclassified];
 
   // ── Collect and validate function definitions ─────────────────────────────
+  // Duplicate definitions (same function name) are reclassified as implicit
+  // equations so they get graphed as boolean curves rather than silently ignored.
   const funcDefs = new Map(); // name → { params, body, exprId }
+  const reclassifiedFuncs = [];
   for (const expr of classifiedList) {
     if (expr.kind !== 'funcdef') continue;
-    // Validate: params must not conflict with variable definitions
-    const conflict = expr.params.find(p => defsMap.has(p));
-    if (conflict) {
-      errors.set(expr.exprId, `Parameter '${conflict}' conflicts with existing definition`);
+    if (funcDefs.has(expr.name)) {
+      // Reconstruct lhs call node from name + params, treat as implicit equation
+      const lhs = { type: 'call', name: expr.name, args: expr.params.map(p => ({ type: 'variable', name: p })) };
+      const allVars = new Set([...collectVariables(lhs), ...collectVariables(expr.body)]);
+      const deps = new Set(allVars);
+      deps.delete('x');
+      deps.delete('y');
+      reclassifiedFuncs.push({ kind: 'implicit', lhs, rhs: expr.body, deps, allVars, exprId: expr.exprId });
       continue;
     }
-    if (funcDefs.has(expr.name)) continue; // first definition wins
     funcDefs.set(expr.name, { params: expr.params, body: expr.body, exprId: expr.exprId });
   }
+  classifiedList = [...classifiedList, ...reclassifiedFuncs];
 
   // Cycle detection for function definitions (DFS)
   {
@@ -2414,12 +2426,6 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       if (!lhsAst.args.every(a => a.type === 'variable')) continue; // args must be plain variables
       const funcName = lhsAst.name;
       const params = lhsAst.args.map(a => a.name);
-      // Error if any param shadows an existing variable definition
-      const conflict = params.find(p => allDefs.has(p));
-      if (conflict) {
-        funcErrors.set(e.id, `Parameter '${conflict}' conflicts with existing definition`);
-        continue;
-      }
       if (funcDefs.has(funcName)) continue; // first definition wins
       funcDefs.set(funcName, { params, body: parseLatexToAst(rhsStr), exprId: e.id });
     } catch (err) {

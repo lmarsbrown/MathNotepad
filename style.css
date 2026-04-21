@@ -1452,6 +1452,20 @@ html, body {
   flex-shrink: 0;
 }
 
+.calc-collapse-btn {
+  background: none;
+  border: none;
+  color: #a6adc8;
+  font-size: 14px;
+  padding: 0 2px;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.calc-collapse-btn:hover {
+  color: #cdd6f4;
+}
+
 /* Reposition CALC badge inline inside the toolbar (not absolutely on border) */
 .box-calc .box-type-label {
   position: static;
@@ -1490,6 +1504,17 @@ html, body {
   gap: 5px;
   padding: 8px 10px 4px;
   width: 100%;
+}
+
+/* In calc boxes, remove the gap and absorb it into wrapper padding so expression
+   hitboxes tile the list with no dead zones between rows. */
+.box-calc .calc-expr-list {
+  gap: 0;
+}
+
+.box-calc .expr-wrapper {
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 

@@ -299,6 +299,8 @@ function makeCalcBox(id) {
     physicsChem: false,
     useUnits: false,
     useSymbolic: false,
+    hidden: false,
+    collapsed: false,
     sigFigs: 6,
     expressions: [
       { id: 'ce' + (calcExprNextId++), latex: '', enabled: true },
@@ -483,18 +485,30 @@ function buildAstHtml(ast, sigFigs = 6) {
   }
 }
 
+const CALC_RESULT_MAX_CHARS = 50;
+
 /**
  * Given a { unitAst, warnings } result, populate a result span element.
  * Uses plain text with Unicode superscripts where possible, CSS fractions otherwise.
+ * If the result text exceeds CALC_RESULT_MAX_CHARS, displays "Too Bulky!" instead.
  */
 function renderUnitResult(resultSpan, unitAst, warnings, sigFigs = 6) {
   resultSpan.innerHTML = '';
   if (_astHasDiv(unitAst)) {
-    resultSpan.appendChild(document.createTextNode('= '));
-    resultSpan.appendChild(buildAstHtml(unitAst, sigFigs));
+    // Build into a temporary span to measure text length before committing
+    const tmp = document.createElement('span');
+    tmp.appendChild(document.createTextNode('= '));
+    tmp.appendChild(buildAstHtml(unitAst, sigFigs));
+    if (tmp.textContent.length > CALC_RESULT_MAX_CHARS) {
+      resultSpan.textContent = 'Too Bulky!';
+    } else {
+      resultSpan.appendChild(document.createTextNode('= '));
+      resultSpan.appendChild(buildAstHtml(unitAst, sigFigs));
+    }
   } else {
     const text = buildAstText(unitAst, sigFigs);
-    resultSpan.textContent = text !== null ? `= ${text}` : '= \u2026';
+    const full = text !== null ? `= ${text}` : '= \u2026';
+    resultSpan.textContent = full.length > CALC_RESULT_MAX_CHARS ? 'Too Bulky!' : full;
   }
 }
 
@@ -584,9 +598,11 @@ function serializeToLatex(boxArray) {
       const chemFlag     = b.physicsChem  ? '{physics_chem}'  : '';
       const unitsFlag    = b.useUnits    ? '{units}'    : '';
       const symbolicFlag = b.useSymbolic ? '{symbolic}' : '';
+      const hiddenFlag     = b.hidden     ? '{hidden}'     : '';
+      const collapsedFlag  = b.collapsed  ? '{collapsed}'  : '';
       const sfVal        = b.sigFigs ?? 6;
       const sfFlag       = sfVal !== 6 ? `{sf=${sfVal}}` : '';
-      serialized = `\\begin{calc}${defsFlag}${bareFlag}${basicFlag}${emFlag}${chemFlag}${unitsFlag}${symbolicFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+      serialized = `\\begin{calc}${defsFlag}${bareFlag}${basicFlag}${emFlag}${chemFlag}${unitsFlag}${symbolicFlag}${hiddenFlag}${collapsedFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
     }
     else if (b.type === 'image') {
       const modeFlag   = `{${b.mode || 'url'}}`;
@@ -711,6 +727,8 @@ function parseFromLatex(src) {
       const physicsChem  = legacyPhysics || line.includes('{physics_chem}');
       const useUnits    = line.includes('{units}');
       const useSymbolic = line.includes('{symbolic}');
+      const hidden      = line.includes('{hidden}');
+      const collapsed   = line.includes('{collapsed}');
       const sfMatch     = line.match(/\{sf=(\d+)\}/);
       const sigFigs     = sfMatch ? parseInt(sfMatch[1], 10) : 6;
       const expressions = [];
@@ -734,7 +752,7 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{calc}
-      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsBasic, physicsEM, physicsChem, useUnits, useSymbolic, sigFigs, expressions }));
+      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsBasic, physicsEM, physicsChem, useUnits, useSymbolic, hidden, collapsed, sigFigs, expressions }));
       continue;
     }
 
@@ -1191,6 +1209,13 @@ function createBoxElement(box) {
   let mousedownInMqField = false;
   div.addEventListener('mousedown', e => {
     mousedownInMqField = !!e.target.closest('.mq-editable-field');
+    // Prevent default for calc box clicks outside MQ fields / interactive controls so the
+    // currently-focused MQ field doesn't blur (causing the focused outline to flash off).
+    // The click handler re-focuses the correct expression explicitly.
+    if (box.type === 'calc' && !mousedownInMqField
+        && !e.target.closest('button') && !e.target.closest('input')) {
+      e.preventDefault();
+    }
   });
   div.addEventListener('click', e => {
     const wasMqDrag = mousedownInMqField;
@@ -1205,9 +1230,19 @@ function createBoxElement(box) {
       setFocused(box.id, div);
     } else if (box.type === 'calc') {
       if (wasMqDrag) return; // Don't steal focus when user was dragging to select in a MQ field
-      // Focus first expression field without scrolling (preventScroll bypasses MathQuill's native scroll-into-view)
-      const firstField = calcMqFields.get(box.id)?.values().next().value;
-      if (firstField) firstField.el().querySelector('textarea')?.focus({ preventScroll: true });
+      // Focus the expression nearest to the click position
+      const wrappers = [...div.querySelectorAll('.expr-wrapper')];
+      if (!wrappers.length) return;
+      let nearest = wrappers[0];
+      let minDist = Infinity;
+      for (const w of wrappers) {
+        const rect = w.getBoundingClientRect();
+        const cy = (rect.top + rect.bottom) / 2;
+        const d = Math.abs(e.clientY - cy);
+        if (d < minDist) { minDist = d; nearest = w; }
+      }
+      const field = calcMqFields.get(box.id)?.get(nearest.dataset.exprId);
+      if (field) field.el().querySelector('textarea')?.focus({ preventScroll: true });
     } else {
       const ta = div.querySelector('.text-input');
       if (ta) ta.focus();
@@ -1607,6 +1642,15 @@ function createBoxElement(box) {
     const toolbar = document.createElement('div');
     toolbar.className = 'calc-toolbar';
 
+    // ── Collapse button (leftmost in toolbar) ─────────────────────────────────
+    const collapseBtn = document.createElement('button');
+    collapseBtn.type = 'button';
+    collapseBtn.className = 'calc-collapse-btn';
+    collapseBtn.title = 'Collapse/expand expression list';
+    collapseBtn.textContent = box.collapsed ? '▸' : '▾';
+    collapseBtn.addEventListener('mousedown', e => e.preventDefault());
+    toolbar.appendChild(collapseBtn);
+
     const badge = document.createElement('span');
     badge.className = 'box-type-label';
     badge.textContent = 'CALC';
@@ -1703,6 +1747,14 @@ function createBoxElement(box) {
       scheduleCalcUpdate(box.id);
     });
     toolbar.appendChild(symbolicBtn);
+
+    // Hidden toggle — prevents the calc box from rendering anything in the preview
+    toolbar.appendChild(makeResultsToggle(
+      'Hidden',
+      'Hide this calc box from the preview (expressions still evaluate in the editor)',
+      () => !!(boxes.find(b => b.id === box.id)?.hidden),
+      (idx, val) => { boxes[idx].hidden = val; }
+    ));
 
     // Sig figs input
     const sigFigsLabel = document.createElement('label');
@@ -1825,20 +1877,25 @@ function createBoxElement(box) {
       warningLine.style.display = 'none';
       wrapper.appendChild(warningLine);
 
+      let copyFlashing = false; // true from first click until flash restore completes
       resultSpan.addEventListener('click', () => {
-        const val = resultSpan.textContent;
+        if (copyFlashing) return;
+        // Prefer the stored copy value (set when display is truncated), else fall back to visible text
+        const val = resultSpan.dataset.copyValue ?? resultSpan.textContent;
         if (!val) return;
         const num = val.replace(/^[=≈]\s*/, '');
+        const prevHtml = resultSpan.innerHTML;   // capture before async gap
+        const prevColor = resultSpan.style.color;
+        copyFlashing = true;
         navigator.clipboard.writeText(num).then(() => {
-          const prevHtml = resultSpan.innerHTML;
-          const prevColor = resultSpan.style.color;
           resultSpan.textContent = 'copied!';
           resultSpan.style.color = '#4ec9b0';
           setTimeout(() => {
             resultSpan.innerHTML = prevHtml;
             resultSpan.style.color = prevColor;
+            copyFlashing = false;
           }, 900);
-        });
+        }).catch(() => { copyFlashing = false; });
       });
 
       // Result update function for this row — always shows in-box; toggles only affect preview
@@ -1866,6 +1923,12 @@ function createBoxElement(box) {
           errorLine.style.display = 'none';
           wrapper.classList.remove('has-error');
           renderUnitResult(resultSpan, result.unitAst, result.warnings, boxes.find(b => b.id === box.id)?.sigFigs ?? 6);
+          // If renderUnitResult truncated to "Too Bulky!", stash the real value for copy
+          if (resultSpan.textContent === 'Too Bulky!') {
+            resultSpan.dataset.copyValue = buildAstText(result.unitAst, boxes.find(b => b.id === box.id)?.sigFigs ?? 6) ?? '';
+          } else {
+            delete resultSpan.dataset.copyValue;
+          }
           resultSpan.style.display = '';
           resultSpan.style.color = '';
           const warnText = formatUnitWarnings(result.warnings);
@@ -1878,7 +1941,13 @@ function createBoxElement(box) {
           const formatted = result ? formatCalcResult(result, currentBox?.sigFigs ?? 6) : null;
           if (formatted !== null && !suppress) {
             errorLine.style.display = 'none';
-            resultSpan.textContent = formatted;
+            if (formatted.length > CALC_RESULT_MAX_CHARS) {
+              resultSpan.textContent = 'Too Bulky!';
+              resultSpan.dataset.copyValue = formatted;
+            } else {
+              resultSpan.textContent = formatted;
+              delete resultSpan.dataset.copyValue;
+            }
             resultSpan.style.display = '';
             if (result.boolValue === true)  resultSpan.style.color = '#4ec9b0';
             else if (result.boolValue === false) resultSpan.style.color = '#f44747';
@@ -1921,6 +1990,24 @@ function createBoxElement(box) {
       if (addAfter) addAfter(null); // null = append at end
     });
     div.appendChild(addBtn);
+
+    // Apply initial collapsed state
+    if (box.collapsed) {
+      exprList.style.display = 'none';
+      addBtn.style.display = 'none';
+    }
+
+    // Wire collapse button now that exprList and addBtn exist
+    collapseBtn.addEventListener('click', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      boxes[idx].collapsed = !boxes[idx].collapsed;
+      const isCollapsed = boxes[idx].collapsed;
+      exprList.style.display = isCollapsed ? 'none' : '';
+      addBtn.style.display   = isCollapsed ? 'none' : '';
+      collapseBtn.textContent = isCollapsed ? '▸' : '▾';
+      syncToText();
+    });
 
     // ── Register the "add expression after" function ──────────────────────────
     const addExprAfter = (afterExprId) => {
@@ -2241,8 +2328,9 @@ function applyUndo() {
   const graphBoxIdx = graphModeBoxId ? boxes.findIndex(b => b.id === graphModeBoxId) : -1;
   if (graphModeBoxId) _teardownGraphModeUI();
   const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
+  const calcExprIdx = getFocusedCalcExprIdx();
   historyIndex--;
-  restoreSnapshot(history[historyIndex], focusIdx);
+  restoreSnapshot(history[historyIndex], focusIdx, calcExprIdx);
   if (graphBoxIdx >= 0 && graphBoxIdx < boxes.length && boxes[graphBoxIdx].type === 'graph') {
     enterGraphMode(boxes[graphBoxIdx].id);
   }
@@ -2253,14 +2341,34 @@ function applyRedo() {
   const graphBoxIdx = graphModeBoxId ? boxes.findIndex(b => b.id === graphModeBoxId) : -1;
   if (graphModeBoxId) _teardownGraphModeUI();
   const focusIdx = boxes.findIndex(b => b.id === focusedBoxId);
+  const calcExprIdx = getFocusedCalcExprIdx();
   historyIndex++;
-  restoreSnapshot(history[historyIndex], focusIdx);
+  restoreSnapshot(history[historyIndex], focusIdx, calcExprIdx);
   if (graphBoxIdx >= 0 && graphBoxIdx < boxes.length && boxes[graphBoxIdx].type === 'graph') {
     enterGraphMode(boxes[graphBoxIdx].id);
   }
 }
 
-function restoreSnapshot(snap, preferFocusIdx = -1) {
+/**
+ * Returns the index of the currently focused expression within the focused calc box, or -1.
+ * @returns {number}
+ */
+function getFocusedCalcExprIdx() {
+  if (!focusedBoxId) return -1;
+  const box = boxes.find(b => b.id === focusedBoxId);
+  if (!box || box.type !== 'calc') return -1;
+  const activeEl = document.activeElement;
+  const wrappers = [...boxList.querySelectorAll(`[data-id="${focusedBoxId}"] .expr-wrapper`)];
+  return wrappers.findIndex(w => w.contains(activeEl));
+}
+
+/**
+ * Restores a snapshot of the document state.
+ * @param {Object} snap - Snapshot object with latex and focusId fields.
+ * @param {number} preferFocusIdx - Index of the box to focus after restore.
+ * @param {number} preferCalcExprIdx - Index of the calc expression to focus (within a calc box), or -1.
+ */
+function restoreSnapshot(snap, preferFocusIdx = -1, preferCalcExprIdx = -1) {
   suppressHistory = true;
   suppressBoxSync = true;
   diffAndApply(parseFromLatex(snap.latex));
@@ -2273,7 +2381,18 @@ function restoreSnapshot(snap, preferFocusIdx = -1) {
   schedulePreview(150);
   // parseFromLatex always generates new IDs, so focus by position rather than ID
   if (preferFocusIdx >= 0 && boxes.length > 0) {
-    focusBox(boxes[Math.min(preferFocusIdx, boxes.length - 1)].id);
+    const targetBox = boxes[Math.min(preferFocusIdx, boxes.length - 1)];
+    // For calc boxes, restore focus to the same expression index without scrolling
+    if (preferCalcExprIdx >= 0 && targetBox.type === 'calc') {
+      const calcMap = calcMqFields.get(targetBox.id);
+      if (calcMap && calcMap.size > 0) {
+        const fields = [...calcMap.values()];
+        const field = fields[Math.min(preferCalcExprIdx, fields.length - 1)];
+        setTimeout(() => field.el().querySelector('textarea')?.focus({ preventScroll: true }), 0);
+        return;
+      }
+    }
+    focusBox(targetBox.id);
   }
 }
 

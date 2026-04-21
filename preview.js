@@ -74,6 +74,8 @@ function createPreviewElement(box) {
     const wrapper = document.createElement('div');
     wrapper.className = 'preview-calc-box';
     wrapper.dataset.boxId = box.id;
+    // Hidden calc boxes contribute nothing to the preview
+    if (box.hidden) return wrapper;
     const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
     for (const expr of (box.expressions || [])) {
       if (!expr.enabled) continue;
@@ -227,7 +229,7 @@ async function updatePreview() {
     // Graph boxes always bypass the cache (snapshot url changes independently).
     const needsCache = box.type !== 'graph' && box.type !== 'pagebreak' && box.type !== 'image';
     const cacheKey = box.type === 'calc'
-      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
+      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|h${box.hidden ? '1' : '0'}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
       : `${box.type}|${box.content}`;
     const cached = needsCache ? previewBoxCache.get(box.id) : null;
 

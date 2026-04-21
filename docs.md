@@ -733,7 +733,7 @@ A calc box contains a list of expression rows. Each row has:
 - A result display (right-aligned, monospace)
 - A delete button
 
-Expressions are evaluated in dependency order; results update as you type (rAF-debounced). The "Show Results" button in the box toolbar controls whether results appear in the preview. A disabled expression is skipped in evaluation but its variable definition is still available to other expressions.
+Expressions are evaluated in dependency order; results update as you type (rAF-debounced). The "Show Results" button in the box toolbar controls whether results appear in the preview. The "Hidden" toggle hides all preview output for the entire box (expressions still evaluate normally in the editor — useful for intermediate computations). A disabled expression is skipped in evaluation but its variable definition is still available to other expressions.
 
 Navigation: Enter in a row adds a new row after it; arrow keys at field edges cross between calc rows; Backspace on empty row deletes it.
 
@@ -747,6 +747,7 @@ Navigation: Enter in a row adds a new row after it; arrow keys at field edges cr
   physicsConstants: false, // inject SI physics constants
   useUnits: false,         // enable SI units mode (symbolic unit tracking)
   useSymbolic: false,      // keep undefined non-unit variables symbolic
+  hidden: false,           // suppress all preview output (expressions still evaluate in editor)
   sigFigs: 6,              // significant figures for numeric result display
   expressions: [{ id, latex, enabled }]
 }
@@ -783,6 +784,7 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
     .calc-show-results-btn  "Physics" toggle
     .calc-show-results-btn  "Units" toggle
     .calc-show-results-btn  "Symbolic" toggle (disabled when Units is off)
+    .calc-show-results-btn  "Hidden" toggle
     .calc-sigfigs-label     "sf:" label
       .calc-sigfigs-input   number input (1–15, default 6)
   .calc-expr-list

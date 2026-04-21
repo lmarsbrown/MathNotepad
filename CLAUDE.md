@@ -21,6 +21,8 @@ If you think there is a better way to implement something than what was asked, s
 
 Be as concise as possible. Tokens are a limited resource.
 
+Please add comments to every function you write in JS doc format explaining what the function does, what the inputs are, and what it returns. Also add comments giving a brief explanation of important things inside of functions
+
 **Codebase exploration:** When directing explore agents, have them start by looking at docs.md. Instruct them to use the Project Overview subfeature index to navigate to the relevant section, then read specific code files as needed. Ideally avoid reading the entireity of docs.md at once before you know what you are looking for. You should be able to navigate through it to just find the information that you want. Start by looking under #project-overview. If you find information missing from docs.md, add it so the search doesn't need to be repeated. If docs.md is hard to navigate or search efficiently, flag it to the user.
 
 If you are unsure how to follow a policy in this file, ask the user. After clarification, add a worked example under Policy Examples in docs.md explaining the confusion and resolution.
