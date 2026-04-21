@@ -14,6 +14,95 @@ const BB_SUBS = {
   'FF': '\\mathbb{F}',
   'HH': '\\mathbb{H}',
 };
+/**
+ * Splits a string by a single-character separator, ignoring separators inside
+ * parentheses or braces (depth > 0). Handles nested parens in matrix entries.
+ * @param {string} str
+ * @param {string} sep - single character
+ * @returns {string[]}
+ */
+function splitDepth0(str, sep) {
+  const parts = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (c === '(' || c === '{') depth++;
+    else if (c === ')' || c === '}') depth--;
+    else if (depth === 0 && c === sep) { parts.push(str.slice(start, i)); start = i + 1; }
+  }
+  parts.push(str.slice(start));
+  return parts;
+}
+
+/**
+ * Converts the interior of a mat() call to a LaTeX pmatrix string.
+ * Rows are separated by ';', columns by ',' in the input.
+ * Splits respect nested parentheses so entries like (a) or f(x,y) work correctly.
+ * @param {string} inner - content between the parens, e.g. "1,0;0,1"
+ * @returns {string} LaTeX \begin{pmatrix}...\end{pmatrix} string
+ */
+function matToLatex(inner) {
+  const rows = splitDepth0(inner, ';').map(row =>
+    splitDepth0(row, ',').map(cell => cell.trim()).join(' & ')
+  );
+  return `\\begin{pmatrix}${rows.join(' \\\\ ')}\\end{pmatrix}`;
+}
+
+/**
+ * Replaces mat(...) notation with LaTeX pmatrix in a LaTeX string.
+ * All three forms use balanced-paren scanning so nested parens in entries work:
+ *   - \operatorname{mat}\left(...\right)  (MathQuill with autoOperatorNames)
+ *   - mat\left(...\right)                 (MathQuill without autoOperatorNames)
+ *   - mat(...)                            (source editor)
+ * @param {string} latex
+ * @returns {string}
+ */
+function matrixSub(latex) {
+  let result = '';
+  let i = 0;
+  while (i < latex.length) {
+    // Determine which prefix (if any) starts at position i
+    let afterOpen, closeLen;
+    if (latex.startsWith('\\operatorname{mat}\\left(', i)) {
+      afterOpen = i + 24; closeLen = 7; // '\right)' length
+    } else if (latex.startsWith('mat\\left(', i)) {
+      afterOpen = i + 9; closeLen = 7;
+    } else if (latex.startsWith('mat(', i)) {
+      afterOpen = i + 4; closeLen = 1; // ')' length
+    } else {
+      result += latex[i++]; continue;
+    }
+
+    // Find the matching close, counting nested \left( / \right) or ( / )
+    let depth = 1, j = afterOpen;
+    if (closeLen === 7) {
+      // \left( ... \right) scanning
+      while (j < latex.length && depth > 0) {
+        if (latex.startsWith('\\left(', j))  { depth++; j += 6; }
+        else if (latex.startsWith('\\right)', j)) { depth--; if (depth > 0) j += 7; }
+        else j++;
+      }
+    } else {
+      // plain ( ... ) scanning
+      while (j < latex.length && depth > 0) {
+        if (latex[j] === '(') depth++;
+        else if (latex[j] === ')') depth--;
+        if (depth > 0) j++;
+      }
+    }
+
+    if (depth === 0) {
+      result += matToLatex(latex.slice(afterOpen, j));
+      i = j + closeLen;
+    } else {
+      // Unbalanced — emit the prefix literally and keep scanning
+      result += latex.slice(i, afterOpen);
+      i = afterOpen;
+    }
+  }
+  return result;
+}
+
 function applyBBSubs(latex) {
   let out = latex;
   out = out.replace(/<=/g, '\\leq ');
@@ -22,6 +111,7 @@ function applyBBSubs(latex) {
   out = out.replace(/<-/g, '\\leftarrow ');
   out = out.replace(/!=/g, '\\neq ');
   for (const [key, val] of Object.entries(BB_SUBS)) out = out.replaceAll(key, val);
+  out = matrixSub(out);
   return out;
 }
 

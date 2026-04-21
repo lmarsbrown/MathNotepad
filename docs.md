@@ -106,12 +106,16 @@ None.
 ### Behaviour
 Renders as a MathQuill editable field. Enter key inserts a new box of the default type after it. Arrow keys at the field edge move focus to adjacent boxes. Backspace on empty math box deletes it. The `h` key toggles the highlight state (see [Highlight Feature](#highlight-feature)).
 
+**Matrix notation:** Write `mat(cols;rows)` to render a matrix in the preview. Columns are separated by `,` and rows by `;`. Example: `mat(1,0;0,1)` renders as a 2×2 identity matrix. MathQuill displays the `mat(...)` call as-is; the matrix only renders in the preview (MathJax). This notation also works in text box inline math (`$mat(...)$`).
+
 ### Implementation
 **Data:** `{ id, type: 'math', content: '<latex string>' }`. Content is raw LaTeX, e.g. `\frac{1}{2}`.
 
 **MathQuill:** `MQ.MathField(span, opts)` created inside `createBoxElement` (script.js:619). Field instance stored in `mqFields` map. `edit` handler calls `syncToText()` (after `suppressBoxSync` check). `enter` handler calls `appendBox(defaultBoxType)`.
 
 **Serialization:** `\[content\]` block. See [Serialization Format](#serialization-format).
+
+**Matrix preprocessing:** `matrixSub(latex)` in `preview.js` (called from `applyBBSubs`) replaces `mat(...)` with `\begin{pmatrix}...\end{pmatrix}` before MathJax renders. Handles both `mat\left(...\right)` (MathQuill output) and `mat(...)` (source editor). Implemented via `matToLatex(inner)` which splits on `;` for rows and `,` for columns. Nested parentheses in entries (e.g. `mat((a),(b))`) are handled via balanced-paren scanning.
 
 ---
 

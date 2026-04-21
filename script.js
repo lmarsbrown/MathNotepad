@@ -1301,6 +1301,7 @@ function createBoxElement(box) {
     const field = MQ.MathField(mqSpan, {
       spaceBehavesLikeTab: false,
       autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec hbar nabla '+greekLetters,
+      autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp mat',
       handlers: {
         edit: () => {
           const idx = boxes.findIndex(b => b.id === box.id);
@@ -2295,13 +2296,13 @@ function focusBoxAtEdge(id, edge) {
     setTimeout(() => field.focus(), 0);
     return;
   }
-  // Calc box: focus first or last expression field
+  // Calc box: focus first or last expression field using DOM order
   const calcMap = calcMqFields.get(id);
   if (calcMap && calcMap.size > 0) {
-    const fields = [...calcMap.values()];
-    const target = edge === 'start' ? fields[0] : fields[fields.length - 1];
-    setTimeout(() => target.focus(), 0);
-    return;
+    const wrappers = [...boxList.querySelectorAll(`[data-id="${id}"] .expr-wrapper`)];
+    const targetWrapper = edge === 'start' ? wrappers[0] : wrappers[wrappers.length - 1];
+    const target = targetWrapper ? calcMap.get(targetWrapper.dataset.exprId) : null;
+    if (target) { setTimeout(() => target.focus(), 0); return; }
   }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
   if (el) {

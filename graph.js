@@ -685,11 +685,17 @@ void main() {
     float negVal = -1e20;
     float posVal = 1e20;
 
-    // Sample a 7x7 subpixel grid to detect zero crossings
-    for (int yD = -3; yD < 4; yD++) {
-        for (int xD = -3; xD < 4; xD++) {
-            vec2 off = vec2(float(xD) / 6.0 * worldPixSize.x,
-                            float(yD) / 6.0 * worldPixSize.y);
+    // Sample a nxn subpixel grid to detect zero crossings.
+    // Higher resolution subsampling may improve accuracy for curves with multiple lines very close together
+    // (like a high frequency sin function) at the cost of worse performance
+    
+
+    int sampleRes = 3;
+
+    for (int yD = -(sampleRes-1)/2; yD < (sampleRes+1)/2; yD++) {
+        for (int xD = -(sampleRes-1)/2; xD < (sampleRes+1)/2; xD++) {
+            vec2 off = vec2(float(xD) / (float(sampleRes+1)/2.0) * worldPixSize.x,
+                            float(yD) / (float(sampleRes+1)/2.0) * worldPixSize.y);
             float val = F(x + off.x, y + off.y);
             if (val <= 0.0 && val > negVal) { negVal = val; negPos = off; hasNeg = true; }
             if (val >= 0.0 && val < posVal) { posVal = val; posPos = off; hasPos = true; }
