@@ -60,11 +60,7 @@ function enterGraphMode(boxId) {
 
   // Set up click-to-focus: clicking a curve focuses its expression row
   renderer._onPick = exprId => {
-    const listEl = document.getElementById('graph-expr-list');
-    if (!listEl) return;
-    const wrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
-    const idx = wrappers.findIndex(w => w.dataset.exprId === exprId);
-    if (idx !== -1) focusGraphExpr(idx, 'start');
+    focusExprRowById(graphMqFields, exprId);
   };
 
   // Snap coordinate tooltip
@@ -98,6 +94,7 @@ function _teardownGraphModeUI() {
   if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; }
   graphMqFields.clear();
   graphExprUpdateFns.clear();
+  graphSliderFns.clear();
   focusedGraphExprId = null;
   closeColorPopup();
   document.getElementById('graph-expr-list').innerHTML = '';
@@ -107,6 +104,7 @@ function _teardownGraphModeUI() {
   document.getElementById('graph-toolbar').style.display = 'none';
 
   graphModeBoxId = null;
+  _graphCtx = null;
   previewContent.classList.remove('graph-mode');
   // Remove crop overlay if present
   const overlay = document.getElementById('graph-crop-overlay');
@@ -152,291 +150,150 @@ function exitGraphMode() {
   if (isPreviewOpen) schedulePreview(0);
 }
 
-function renderGraphExprList(box) {
-  const listEl = document.getElementById('graph-expr-list');
-  listEl.innerHTML = '';
-  graphMqFields.clear();
-  graphExprUpdateFns.clear();
-  // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
-  for (const expr of (box.expressions || [])) {
-    const m = expr.id.match(/^ge(\d+)$/);
-    if (m) graphExprNextId = Math.max(graphExprNextId, parseInt(m[1]) + 1);
+/** Active graph mode context — built in renderGraphExprList, used by _createGraphRow. */
+let _graphCtx = null;
+
+/**
+ * Refreshes UI controls for a graph expression row (color swatch, toggle, slider, const badge).
+ * Uses precompiledAnalysis if provided (fast path); otherwise runs a full recompile (slow path).
+ *
+ * @param {string} latex - Current LaTeX of the expression.
+ * @param {Object|null} precompiledAnalysis - From renderer._lastAnalysis, or null to recompile.
+ * @param {string} exprId - Id of the expression row being updated.
+ * @param {HTMLElement} colorSwatch
+ * @param {HTMLElement} toggle
+ * @param {Function} showSlider
+ * @param {Function} hideSlider
+ * @param {HTMLElement} constValueSpan
+ */
+function updateGraphingControls(latex, precompiledAnalysis, exprId, colorSwatch, toggle, showSlider, hideSlider, constValueSpan) {
+  let isGraphable = false;
+  let isNumericConst = false;
+  let constValue = null;
+  let constEvalValue = null;
+  if (latex.trim() !== '' && graphModeBoxId) {
+    let analysis;
+    if (precompiledAnalysis) {
+      // Fast path: reuse the analysis already computed by renderer.updateExpressions().
+      // _compiledExprs only has enabled expressions, so for disabled rows preserve last-known state.
+      analysis = precompiledAnalysis;
+      const renderer = getGraphRenderer();
+      const enabledAndCompiled = renderer._compiledExprs.some(e => e.exprId === exprId && e.shaderInfo);
+      isGraphable = enabledAndCompiled || (toggle.style.display !== 'none');
+    } else {
+      // Slow path: full recompile (used on initial render and when user actively edits this field)
+      const box = boxes.find(b => b.id === graphModeBoxId);
+      const allExprs = (box ? box.expressions || [] : []).map(e =>
+        e.id === exprId ? { ...e, latex, enabled: true } : e
+      );
+      if (!allExprs.find(e => e.id === exprId)) {
+        allExprs.push({ id: exprId, latex, color: '#000', enabled: true, thickness: 2 });
+      }
+      const result = compileGraphExpressions(allExprs);
+      analysis = result.analysis;
+      isGraphable = result.renderExprs.some(re => re.exprId === exprId);
+    }
+    if (!isGraphable) {
+      const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
+      if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
+        const constName = nameMatch[1];
+        const constInfo = analysis.constants.find(c => c.name === constName);
+        const eqIdx = latex.indexOf('=');
+        const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
+        if (constInfo && constInfo.depth === 0 && /^-?\d+(\.\d+)?$/.test(rhs)) {
+          isNumericConst = true;
+          constValue = analysis.constantValues.get(constName);
+        }
+        if (constInfo) {
+          const evalVal = analysis.constantValues.get(constName);
+          if (evalVal !== undefined && !/^-?\d+(\.\d+)?$/.test(rhs)) constEvalValue = evalVal;
+        }
+      } else {
+        const trimmed = latex.trim();
+        if (findEqAtDepth0(trimmed) === -1) {
+          try {
+            const ast = parseLatexToAst(trimmed);
+            const vars = collectVariables(ast);
+            if (!vars.has('x') && !vars.has('y')) {
+              const val = evaluateAst(ast, analysis.constantValues, analysis.funcDefs || new Map());
+              if (isFinite(val) && !/^-?\d+(\.\d+)?$/.test(trimmed)) constEvalValue = val;
+            }
+          } catch (e) { /* not evaluable */ }
+        }
+      }
+    }
   }
-  for (const expr of (box.expressions || [])) {
-    listEl.appendChild(createGraphExprRow(expr));
-  }
-  // Reflow MathQuill fields after they're mounted in the DOM
-  for (const field of graphMqFields.values()) {
-    field.reflow();
+  colorSwatch.style.display = isGraphable ? '' : 'none';
+  toggle.style.display = isGraphable ? '' : 'none';
+  if (!isGraphable) toggle.setAttribute('aria-pressed', 'true');
+  if (isNumericConst && constValue !== null) showSlider(constValue); else hideSlider();
+  const formatted = constEvalValue !== null ? formatConstantValue(constEvalValue) : null;
+  if (formatted !== null) {
+    constValueSpan.textContent = formatted;
+    constValueSpan.style.display = 'block';
+  } else {
+    constValueSpan.style.display = 'none';
   }
 }
 
-// Focus a graph expression by its index in the DOM list, placing cursor at 'start' or 'end'.
-function focusGraphExpr(idx, edge) {
-  const listEl = document.getElementById('graph-expr-list');
-  if (!listEl) return;
-  const wrappers = listEl.querySelectorAll('.expr-wrapper');
-  if (idx < 0 || idx >= wrappers.length) return;
-  const exprId = wrappers[idx].dataset.exprId;
-  const field = graphMqFields.get(exprId);
-  if (field) setTimeout(() => field.focus(), 0);
-}
-
-// Delete a graph expression by id, focusing adjacent expression or nothing.
-function deleteGraphExpr(exprId) {
-  const listEl = document.getElementById('graph-expr-list');
-  if (!listEl) return;
-  const wrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
-  const idx = wrappers.findIndex(w => w.dataset.exprId === exprId);
-  const focusIdx = idx > 0 ? idx - 1 : (wrappers.length > 1 ? 1 : -1);
-
-  clearTimeout(graphCommitTimer);
-  const boxIdx = boxes.findIndex(b => b.id === graphModeBoxId);
-  if (boxIdx !== -1) {
-    boxes[boxIdx].expressions = boxes[boxIdx].expressions.filter(e => e.id !== exprId);
-  }
-  graphMqFields.delete(exprId);
-  graphExprUpdateFns.delete(exprId);
-  wrappers[idx].remove();
-  updateGraphBoxCount(graphModeBoxId);
-  syncToText();
-  scheduleGraphRender();
-  if (focusIdx >= 0) focusGraphExpr(focusIdx, 'end');
-}
-
-function createGraphExprRow(expr) {
-  // Slider row (shown only for numeric constant expressions)
-  const sliderRow = document.createElement('div');
-  sliderRow.className = 'graph-expr-slider-row';
-  sliderRow.style.display = 'none';
-
-  const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.className = 'graph-expr-slider';
-  slider.step = 'any';
-
-  const minInput = document.createElement('input');
-  minInput.type = 'number';
-  minInput.className = 'graph-expr-slider-min';
-  minInput.title = 'Min';
-
-  const maxInput = document.createElement('input');
-  maxInput.type = 'number';
-  maxInput.className = 'graph-expr-slider-max';
-  maxInput.title = 'Max';
-
-  sliderRow.appendChild(minInput);
-  sliderRow.appendChild(slider);
-  sliderRow.appendChild(maxInput);
-
-  let sliderDragging = false;
-
-  // Color swatch — passed as rightSlot to createExprRow
+/**
+ * Creates a single graph expression row using createCalcExprRow, attaches graph-specific elements.
+ * Requires _graphCtx to be set by renderGraphExprList before calling.
+ *
+ * @param {{ id, latex, color, thickness, enabled, sliderMin, sliderMax }} expr
+ * @returns {HTMLElement} The wrapper element.
+ */
+function _createGraphRow(expr) {
+  // Color swatch — passed as rightSlot (graph rows show color, not numeric results)
   const colorSwatch = document.createElement('div');
   colorSwatch.className = 'graph-expr-color-swatch';
   colorSwatch.style.background = expr.color || '#3b82f6';
   colorSwatch.title = 'Color & thickness';
 
-  // Constant value badge — appended to wrapper below the main row
+  // Constant value badge — shown below the row for derived constant expressions
   const constValueSpan = document.createElement('span');
   constValueSpan.className = 'graph-expr-const-value';
   constValueSpan.style.display = 'none';
 
-  const greekLetters = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega';
-
-  const { wrapper, row, mqField: field, toggle, mqSpan, handle } = createExprRow(expr, {
+  const { wrapper, field, mqSpan, handle } = createCalcExprRow(expr, _graphCtx, {
     rightSlot: colorSwatch,
-    autoCommands: 'sqrt sum int prod infty partial ' + greekLetters,
     showDragHandle: true,
-    onToggle: () => {
-      commitGraphEditorToBox(graphModeBoxId);
-      scheduleGraphRender();
-    },
-    onDelete: () => deleteGraphExpr(expr.id),
-    onBackspaceEmpty: () => deleteGraphExpr(expr.id),
-    onEdit: (latex) => {
-      updateGraphingControls(latex);
-      clearTimeout(graphCommitTimer);
-      graphCommitTimer = setTimeout(() => {
-        commitGraphEditorToBox(graphModeBoxId);
-        scheduleGraphRender();
-      }, GRAPH_RENDER_DEBOUNCE_MS);
-    },
-    onEnter: () => addGraphExpressionAfter(expr.id),
-    onMoveOut: (dir) => {
-      const listEl = document.getElementById('graph-expr-list');
-      if (!listEl) return;
-      const wrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
-      const idx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-      if (dir === 1 && idx < wrappers.length - 1) focusGraphExpr(idx + 1, 'start');
-      else if (dir === -1 && idx > 0)              focusGraphExpr(idx - 1, 'end');
+    //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
+    autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega',
+    customUpdate: (analysisArg, controls) => {
+      updateGraphingControls(controls.field.latex(), analysisArg, expr.id, colorSwatch, controls.toggle, controls.showSlider, controls.hideSlider, constValueSpan);
     },
   });
 
-  wrapper.dataset.sliderMin = expr.sliderMin != null ? expr.sliderMin : 0;
-  wrapper.dataset.sliderMax = expr.sliderMax != null ? expr.sliderMax : 10;
   wrapper.dataset.color = expr.color || '#3b82f6';
   wrapper.dataset.thickness = expr.thickness != null ? expr.thickness : 2.0;
-
-  slider.min = wrapper.dataset.sliderMin;
-  slider.max = wrapper.dataset.sliderMax;
-  minInput.value = wrapper.dataset.sliderMin;
-  maxInput.value = wrapper.dataset.sliderMax;
-
-  function applySliderValue(val) {
-    const currentLatex = field.latex();
-    const nameMatch = currentLatex.match(/^([a-zA-Z]\w*)\s*=/);
-    if (!nameMatch) return;
-    const rounded = parseFloat(val.toPrecision(6));
-    field.latex(`${nameMatch[1]}=${rounded}`);
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  }
-
-  slider.addEventListener('mousedown', () => { sliderDragging = true; });
-  slider.addEventListener('mouseup',   () => { sliderDragging = false; });
-  slider.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
-  slider.addEventListener('touchend',   () => { sliderDragging = false; });
-  slider.addEventListener('input', () => applySliderValue(parseFloat(slider.value)));
-
-  minInput.addEventListener('change', () => {
-    const min = parseFloat(minInput.value);
-    if (isNaN(min)) return;
-    slider.min = min;
-    wrapper.dataset.sliderMin = min;
-    commitGraphEditorToBox(graphModeBoxId);
-  });
-
-  maxInput.addEventListener('change', () => {
-    const max = parseFloat(maxInput.value);
-    if (isNaN(max)) return;
-    slider.max = max;
-    wrapper.dataset.sliderMax = max;
-    commitGraphEditorToBox(graphModeBoxId);
-  });
 
   colorSwatch.addEventListener('click', (e) => {
     e.stopPropagation();
     openColorPopup(colorSwatch, expr.id);
   });
 
-  /**
-   * Refresh the UI controls for this expression row (color swatch, toggle, slider, const badge).
-   * When precompiledAnalysis is provided (from renderGraphPreview), reuse it instead of
-   * running a full compile — avoids recompiling every expression on every render frame.
-   *
-   * @param {string} latex - Current LaTeX of this expression
-   * @param {Object|null} precompiledAnalysis - analysis object from renderer._lastAnalysis, or null to recompile
-   */
-  function updateGraphingControls(latex, precompiledAnalysis = null) {
-    let isGraphable = false;
-    let isNumericConst = false;
-    let constValue = null;
-    let constEvalValue = null;
-    if (latex.trim() !== '' && graphModeBoxId) {
-      let analysis;
-      if (precompiledAnalysis) {
-        // Fast path: use the analysis already computed by renderer.updateExpressions().
-        // _compiledExprs only has enabled expressions, so for disabled expressions we preserve
-        // the last-known graphable state from the initial (slow-path) call via toggle.style.display.
-        analysis = precompiledAnalysis;
-        const renderer = getGraphRenderer();
-        const enabledAndCompiled = renderer._compiledExprs.some(e => e.exprId === expr.id && e.shaderInfo);
-        isGraphable = enabledAndCompiled || (toggle.style.display !== 'none');
-      } else {
-        // Slow path: full recompile (used when the user is actively editing this field)
-        const box = boxes.find(b => b.id === graphModeBoxId);
-        const allExprs = (box ? box.expressions || [] : []).map(e =>
-          e.id === expr.id ? { ...e, latex, enabled: true } : e
-        );
-        if (!allExprs.find(e => e.id === expr.id)) {
-          allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
-        }
-        const result = compileGraphExpressions(allExprs);
-        analysis = result.analysis;
-        isGraphable = result.renderExprs.some(re => re.exprId === expr.id);
-      }
-      if (!isGraphable) {
-        const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
-        if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
-          const constName = nameMatch[1];
-          const constInfo = analysis.constants.find(c => c.name === constName);
-          const eqIdx = latex.indexOf('=');
-          const rhs = eqIdx >= 0 ? latex.slice(eqIdx + 1).trim() : '';
-          if (constInfo && constInfo.depth === 0 && /^-?\d+(\.\d+)?$/.test(rhs)) {
-            isNumericConst = true;
-            constValue = analysis.constantValues.get(constName);
-          }
-          if (constInfo) {
-            const evalVal = analysis.constantValues.get(constName);
-            if (evalVal !== undefined && !/^-?\d+(\.\d+)?$/.test(rhs)) {
-              constEvalValue = evalVal;
-            }
-          }
-        } else {
-          const trimmed = latex.trim();
-          if (findEqAtDepth0(trimmed) === -1) {
-            try {
-              const ast = parseLatexToAst(trimmed);
-              const vars = collectVariables(ast);
-              if (!vars.has('x') && !vars.has('y')) {
-                const val = evaluateAst(ast, analysis.constantValues, analysis.funcDefs || new Map());
-                if (isFinite(val) && !/^-?\d+(\.\d+)?$/.test(trimmed)) {
-                  constEvalValue = val;
-                }
-              }
-            } catch (e) { /* not evaluable */ }
-          }
-        }
-      }
-    }
-    colorSwatch.style.display = isGraphable ? '' : 'none';
-    toggle.style.display = isGraphable ? '' : 'none';
-    if (!isGraphable) toggle.setAttribute('aria-pressed', 'true');
-    sliderRow.style.display = isNumericConst ? '' : 'none';
-    if (isNumericConst && constValue !== null && !sliderDragging) {
-      slider.value = constValue;
-    }
-    const formatted = constEvalValue !== null ? formatConstantValue(constEvalValue) : null;
-    if (formatted !== null) {
-      constValueSpan.textContent = formatted;
-      constValueSpan.style.display = 'block';
-    } else {
-      constValueSpan.style.display = 'none';
-    }
-  }
-  updateGraphingControls(expr.latex || '');
+  constValueSpan.addEventListener('click', () => {
+    navigator.clipboard.writeText(constValueSpan.textContent.replace(/^[≈=]\s*/, '')).catch(() => {});
+  });
+  wrapper.appendChild(constValueSpan);
 
-  if (expr.latex) field.latex(expr.latex);
-  graphMqFields.set(expr.id, field);
-  graphExprUpdateFns.set(expr.id, (analysis) => updateGraphingControls(field.latex(), analysis));
-
+  // Undo/redo shortcuts inside the MathQuill field
   mqSpan.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       if (e.shiftKey) applyRedo(); else applyUndo();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       applyRedo();
     }
   }, true);
 
-  constValueSpan.addEventListener('click', () => {
-    const raw = constValueSpan.textContent.replace(/^[≈=]\s*/, '');
-    navigator.clipboard.writeText(raw).catch(() => {});
-  });
-
-  wrapper.appendChild(sliderRow);
-  wrapper.appendChild(constValueSpan);
-
-  // Drag-to-reorder
+  // Drag-to-reorder within the graph expression list
   handle.addEventListener('mousedown', e => {
     e.preventDefault();
-    const list = document.getElementById('graph-expr-list');
-    if (!list) return;
+    const list = _graphCtx.exprList;
 
     const allWrappers = () => Array.from(list.querySelectorAll('.expr-wrapper'));
     const startY = e.clientY;
@@ -463,27 +320,19 @@ function createGraphExprRow(expr) {
 
     function onMove(ev) {
       ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
-
       const siblings = allWrappers().filter(w => w !== wrapper);
       let inserted = false;
       for (const sib of siblings) {
         const r = sib.getBoundingClientRect();
-        const mid = r.top + r.height / 2;
-        if (ev.clientY < mid) {
-          if (currentTarget !== sib) {
-            sib.before(placeholder);
-            currentTarget = sib;
-          }
+        if (ev.clientY < r.top + r.height / 2) {
+          if (currentTarget !== sib) { sib.before(placeholder); currentTarget = sib; }
           inserted = true;
           break;
         }
       }
       if (!inserted) {
         const last = siblings[siblings.length - 1];
-        if (last && currentTarget !== null) {
-          list.appendChild(placeholder);
-          currentTarget = null;
-        }
+        if (last && currentTarget !== null) { list.appendChild(placeholder); currentTarget = null; }
       }
     }
 
@@ -500,26 +349,58 @@ function createGraphExprRow(expr) {
     document.addEventListener('mouseup', onUp);
   });
 
-  // Track focus for render-on-top highlight
+  // Track focused expression for render-on-top highlight
   wrapper.addEventListener('focusin', () => {
-    if (focusedGraphExprId !== expr.id) {
-      focusedGraphExprId = expr.id;
-      scheduleGraphRender();
-    }
+    if (focusedGraphExprId !== expr.id) { focusedGraphExprId = expr.id; scheduleGraphRender(); }
   });
   wrapper.addEventListener('focusout', e => {
     if (!wrapper.contains(e.relatedTarget)) {
       const leavingId = expr.id;
       setTimeout(() => {
-        if (focusedGraphExprId === leavingId) {
-          focusedGraphExprId = null;
-          scheduleGraphRender();
-        }
+        if (focusedGraphExprId === leavingId) { focusedGraphExprId = null; scheduleGraphRender(); }
       }, 0);
     }
   });
 
+  // Initial state — run slow-path recompile to set initial control visibility
+  const updateFn = graphExprUpdateFns.get(expr.id);
+  if (updateFn) updateFn(null);
+
   return wrapper;
+}
+
+function renderGraphExprList(box) {
+  const listEl = document.getElementById('graph-expr-list');
+  listEl.innerHTML = '';
+  graphMqFields.clear();
+  graphExprUpdateFns.clear();
+  graphSliderFns.clear();
+  // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
+  for (const expr of (box.expressions || [])) {
+    const m = expr.id.match(/^ge(\d+)$/);
+    if (m) graphExprNextId = Math.max(graphExprNextId, parseInt(m[1]) + 1);
+  }
+
+  _graphCtx = {
+    boxId: box.id,
+    fieldMap: graphMqFields,
+    updateFns: graphExprUpdateFns,
+    exprList: listEl,
+    focusRowById: (exprId) => focusExprRowById(graphMqFields, exprId),
+    addExpr: (afterId) => addGraphExpressionAfter(afterId),
+    commitBox: () => commitGraphEditorToBox(graphModeBoxId),
+    scheduleUpdate: () => scheduleGraphRender(),
+    onAfterDelete: (exprId) => {
+      graphSliderFns.delete(exprId);
+      updateGraphBoxCount(graphModeBoxId);
+      syncToText();
+    },
+  };
+
+  for (const expr of (box.expressions || [])) {
+    listEl.appendChild(_createGraphRow(expr));
+  }
+  for (const field of graphMqFields.values()) field.reflow();
 }
 
 let _activeColorPopup = null;
@@ -796,11 +677,10 @@ function updateGraphBoxCount(boxId) {
 }
 
 function addGraphExpression() {
-  if (!graphModeBoxId) return;
+  if (!graphModeBoxId || !_graphCtx) return;
   const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const listEl = document.getElementById('graph-expr-list');
-  const row = createGraphExprRow(newExpr);
-  listEl.appendChild(row);
+  const wrapper = _createGraphRow(newExpr);
+  _graphCtx.exprList.appendChild(wrapper);
   const field = graphMqFields.get(newExpr.id);
   if (field) field.reflow();
   commitGraphEditorToBox(graphModeBoxId);
@@ -808,14 +688,14 @@ function addGraphExpression() {
 }
 
 function addGraphExpressionAfter(afterId) {
-  if (!graphModeBoxId) return;
+  if (!graphModeBoxId || !_graphCtx) return;
   clearTimeout(graphCommitTimer);
   commitGraphEditorToBox(graphModeBoxId);
 
   const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const listEl  = document.getElementById('graph-expr-list');
+  const listEl = _graphCtx.exprList;
   const afterWrapper = listEl.querySelector(`.expr-wrapper[data-expr-id="${afterId}"]`);
-  const newWrapper = createGraphExprRow(newExpr);
+  const newWrapper = _createGraphRow(newExpr);
 
   if (afterWrapper) {
     listEl.insertBefore(newWrapper, afterWrapper.nextSibling);

@@ -412,10 +412,20 @@ body {
 #graph-expr-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 10px;
+  margin: 8px 16px;
+  padding: 8px 10px 4px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 0;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 6px;
+}
+
+/* Match .box-calc .expr-wrapper row padding */
+#graph-expr-list .expr-wrapper {
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 #graph-expr-list::-webkit-scrollbar { width: 6px; }
