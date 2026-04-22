@@ -19,6 +19,7 @@ Math Notepad is a browser-based document editor for composing structured mathema
 - [Project Persistence](#project-persistence) — localStorage projects and draft auto-save; ZIP export for image projects
 - [Physics Constants](#physics-constants) — built-in SI constants available in calc boxes
 - [Units System](#units-system) — symbolic SI unit tracking and simplification in calc boxes
+- [Box Debug Logging](#box-debug-logging) — temporary diagnostic system; remove when no longer needed
 
 ## Behaviour
 The app has three panels: a raw LaTeX source editor on the left, a visual box editor in the middle, and a document preview on the right. The two editors stay in sync — edits in either direction propagate to the other. The document is made of "boxes", each representing one content element (equation, text block, heading, graph, or computation). The preview renders the document as letter-sized pages with MathJax typesetting. The app is entirely client-side; all state is in memory and localStorage.
@@ -950,7 +951,7 @@ None.
 - A second **align cycle button** cycles: `⇤ Left → ↔ Center → ⇥ Right`. Controls horizontal alignment of the image within the box (and preview).
 - **URL mode:** A text input is always visible. Typing a URL and pressing Enter or blurring displays the image below the input. The toggle locks as soon as a URL is set; clearing the input unlocks it. No X button — just edit or clear the URL input directly.
 - **File mode:** A dashed drag-and-drop zone is shown. Clicking also opens the OS file picker. Once a file is uploaded, the image replaces the dropzone and an X button appears at the top-right of the image. Clicking X deletes the IDB record, clears the box, and unlocks the mode toggle.
-- If an image box is loaded from a project but its IDB entry is missing (e.g. different device), an error state is shown with an X button to reset the box.
+- If an image box is loaded but the image can't be found: for disk-backed projects (no IDB copy or workspace not connected), a **"Reconnect folder"** button is shown — clicking it calls `reconnectWorkspace()` then `retryAllDiskImages()` to reload all failed boxes. For browser projects with a missing IDB entry, an X button is shown to reset the box.
 - In the preview panel, URL images render synchronously; file images load asynchronously from IDB (a "Loading image…" placeholder is shown until resolved).
 - In the editor, images are always displayed at natural size, capped at 500px wide and constrained to fit the box, preserving aspect ratio. They are horizontally centered. The user-set W/H dimensions have no effect on the editor display — they only affect the preview.
 - When an image is loaded, **W and H pixel inputs** appear below the image. Leaving both empty means natural size. The fit mode determines behavior:
@@ -963,7 +964,7 @@ None.
 ```js
 { id, type: 'image', mode: 'url'|'file', locked: bool, src: string, filename: string, alt: string, width: number, height: number, fit: 'locked'|'crop'|'scale' }
 ```
-- `src`: full URL (URL mode) or IDB key `"${projectId}/${filename}"` (file mode)
+- `src`: full URL (URL mode); IDB key `"${projectId}/${filename}"` (file mode, browser project); or `"${assetFolder}/${filename}"` (file mode, disk-backed project)
 - `filename`: original filename in file mode; empty string in URL mode
 - `locked`: `true` once an image is set; prevents mode toggle
 - `width`/`height`: pixel dimensions; `0` means natural size
@@ -999,7 +1000,10 @@ None.
 | `cleanupImageBox(boxId)` | Revokes stored blob object URL; does NOT delete IDB record (~line 818) |
 | `initImageDb()` | Opens IndexedDB on startup (~line 3208) |
 | `idbSaveImage(projectId, filename, mimeType, arrayBuffer)` | Writes image record to IDB |
-| `idbLoadImageAsObjectURL(key)` | Reads record, returns a blob object URL |
+| `loadImageAsObjectURL(box)` | Tries disk (if workspace connected) then IDB fallback; returns blob URL or null |
+| `reconnectWorkspace()` | Requests workspace permission with user gesture; sets `currentWorkspaceHandle` |
+| `retryAllDiskImages()` | Re-renders all file-mode boxes missing from cache; calls `renderBoxes()` once if any succeed |
+| `idbLoadImageAsObjectURL(key)` | Reads IDB record, returns a blob object URL |
 | `idbGetImageRecord(key)` | Returns full record (used by ZIP export) |
 | `idbDeleteImage(key)` | Deletes one record |
 | `idbGetAllImagesForProject(projectId)` | Returns all records for a project (used by ZIP export) |
@@ -1016,6 +1020,8 @@ None.
 **Blob object URL lifecycle:** When a file image is displayed in the editor, a blob URL is created and stored in `imageObjectUrls: Map<boxId, string>`. `cleanupImageBox(boxId)` revokes it. Object URLs for the preview panel are short-lived (not tracked) — the IDB read fires on each preview re-render since image boxes bypass the preview cache.
 
 **Startup / IDB initialization:** `initImageDb()` is async. The `init()` startup function is called via `.then(init)` so it only runs after the IDB is open. This ensures file-mode image boxes can load their blob URLs from IDB during initial render. (`init` must be a function declaration, not an IIFE, for this to work.)
+
+**Disk-backed image storage:** For workspace projects (`proj.onDisk`), images are written to `{assetFolder}/{filename}` on disk AND to IDB under key `{projectId}/{filename}` as a reload fallback. `loadImageAsObjectURL` tries disk first (if `currentWorkspaceHandle` is set), then falls back to IDB. The IDB copy ensures images survive page reloads when the browser hasn't auto-granted workspace permission. Old images uploaded before dual-storage was added have no IDB copy; those show the "Reconnect folder" button instead.
 
 **Draft / unsaved project:** Before a project has been saved for the first time, `currentProjectId` is `null`. File uploads use `"draft"` as the project ID prefix. When the project is first saved and assigned an ID, `idbMigrateImageKeys('draft', newId)` re-keys all records and updates `box.src` in the live `boxes` array, then calls `syncToText()`.
 
@@ -1135,6 +1141,37 @@ When a group is enabled, its constants are injected as pre-defined variables in 
 **`buildPhysicsTooltip(group, label)`** (script.js:81) — generates tooltip string for a constants group button.
 
 **No symbol conflicts with SI units:** Physics constant `varName` values do not overlap with `SI_BASE_UNITS` or `DERIVED_UNIT_EXPANSIONS` keys. `m_e` / `m_p` (electron/proton mass) have subscripts and do not conflict with `m` (meter).
+
+---
+
+# Box Debug Logging
+
+## Motivation
+A temporary diagnostic system added to help track down intermittent box duplication and desync bugs that were difficult to reproduce. Can be removed once the bugs are confirmed resolved.
+
+## Subfeature index
+None.
+
+## Behaviour
+When enabled, logs every significant box lifecycle event to a circular buffer and the console. A MutationObserver watches `#box-list` for unexpected DOM changes. After each `rebuildBoxList` / `diffAndApply` call, the DOM child IDs are validated against `boxes[]` and a warning is printed if they diverge.
+
+Three console helpers are exposed:
+- `window.startDebug()` — enables logging and clears the buffer.
+- `window.dumpDebugLog()` — prints and returns the full buffer.
+- `window.checkBoxState()` — prints a table of current `boxes[]` vs DOM alignment without needing the buffer.
+
+## Implementation
+**Location:** `script.js`, immediately after the DOM refs block (~line 276). The block is clearly delimited with `// ── Debug logging ──` and ends before `// ── ID generation ──`.
+
+**Key pieces:**
+- `_dbgBuf` — circular array (max 800 entries); `_dbg(event, data)` appends to it.
+- `_dbgObserver` — `MutationObserver` on `#box-list`; logs `MUT_BOX_ADDED` / `MUT_BOX_REMOVED` with an `inRebuild` flag.
+- `_dbgDomCheck(where)` — called at the end of `rebuildBoxList` and `diffAndApply`; checks for duplicate IDs, orphan DOM nodes, and missing DOM nodes.
+- `_dbgInRebuild` — boolean set around `rebuildBoxList` / `diffAndApply` to flag whether a mutation was expected.
+
+**Instrumented functions:** `createBoxElement`, `rebuildBoxList`, `diffAndApply`, `setFocused`, `clearFocused`, `focusBox`, `insertBoxAfter`, `appendBox`, `syncToText`, `restoreSnapshot`, and the debounced text-sync timer.
+
+**To remove:** delete the entire `// ── Debug logging ──` block in script.js and all `_dbg(...)` / `_dbgDomCheck(...)` / `_dbgInRebuild` calls in the instrumented functions. The `_wasInRebuild` locals and the `_dbgInRebuild = ...` assignments around `rebuildBoxList` / `diffAndApply` should also be removed.
 
 ---
 

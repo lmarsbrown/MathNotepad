@@ -32,9 +32,12 @@ let previewZoomIndex = 4; // 100%
 
 // ── Project state ────────────────────────────────────────────────────────────
 const PROJ_KEY     = 'mathnotepad_projects';
-const DRAFT_KEY    = 'mathnotepad_draft';
-const UI_STATE_KEY = 'mathnotepad_ui';
+const DRAFT_KEY          = 'mathnotepad_draft';
+const UI_STATE_KEY       = 'mathnotepad_ui';
+const WORKSPACE_KEY      = '__workspace__';      // IDB key for the single global workspace handle
+const WORKSPACE_NAME_KEY = 'mathnotepad_workspace_name'; // localStorage key for workspace display name
 let currentProjectId = null;
+let currentWorkspaceHandle = null; // FileSystemDirectoryHandle for the single global workspace folder
 let isDirty = false;
 
 // ── Graph mode ───────────────────────────────────────────────────────────────
@@ -269,6 +272,103 @@ const previewZoomOutBtn = document.getElementById('preview-zoom-out-btn');
 const previewZoomLabel  = document.getElementById('preview-zoom-label');
 const highlightBtn      = document.getElementById('highlight-btn');
 const fillColorBtn      = document.getElementById('fill-color-btn');
+
+// ── Debug logging ─────────────────────────────────────────────────────────────
+// Enable via: window.startDebug()   Dump via: window.dumpDebugLog()
+// Each entry: { t, seq, event, data, stack }
+const _dbgBuf = [];
+const _DBG_MAX = 800;
+let   _dbgSeq = 0;
+let   _dbgInRebuild = false; // reentrancy guard for rebuildBoxList/diffAndApply
+
+/**
+ * Appends an event to the circular debug buffer and logs it to the console.
+ * @param {string} event - Short event name.
+ * @param {Object} [data] - Arbitrary key/value payload.
+ */
+function _dbg(event, data = {}) {
+  if (!window.DEBUG_BOXES) return;
+  // Capture 3 frames above _dbg itself for a useful call site.
+  const raw = new Error().stack.split('\n').slice(2, 5).map(s => s.trim());
+  const entry = { t: Date.now(), seq: _dbgSeq++, event, data, stack: raw };
+  _dbgBuf.push(entry);
+  if (_dbgBuf.length > _DBG_MAX) _dbgBuf.shift();
+  console.log(`[DBG #${entry.seq}] ${event}`, data);
+}
+
+/**
+ * Snapshot DOM children IDs vs boxes[] and warn on discrepancies.
+ * @param {string} where - Label for the call site shown in warnings.
+ */
+function _dbgDomCheck(where) {
+  if (!window.DEBUG_BOXES) return;
+  const domIds  = [...boxList.children].map(el => el.dataset.id);
+  const boxIds  = boxes.map(b => b.id);
+  const dupes   = domIds.filter((id, i) => domIds.indexOf(id) !== i);
+  const orphans = domIds.filter(id => !boxIds.includes(id));
+  const missing = boxIds.filter(id => !domIds.includes(id));
+  const ok = !dupes.length && !orphans.length && !missing.length;
+  _dbg('DOM_CHECK', { where, ok, domLen: domIds.length, boxLen: boxIds.length,
+                      dupes, orphans, missing, domIds, boxIds });
+  if (!ok) console.warn(`[DBG DOM VIOLATION] at "${where}"`, { dupes, orphans, missing });
+}
+
+// MutationObserver: fires on every direct child change of #box-list
+const _dbgObserver = new MutationObserver(mutations => {
+  if (!window.DEBUG_BOXES) return;
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (node.nodeType === 1 && node.classList?.contains('box')) {
+        _dbg('MUT_BOX_ADDED', { id: node.dataset.id, domLen: boxList.children.length,
+                                 inRebuild: _dbgInRebuild });
+      }
+    }
+    for (const node of m.removedNodes) {
+      if (node.nodeType === 1 && node.classList?.contains('box')) {
+        _dbg('MUT_BOX_REMOVED', { id: node.dataset.id, domLen: boxList.children.length,
+                                   inRebuild: _dbgInRebuild });
+      }
+    }
+  }
+});
+_dbgObserver.observe(boxList, { childList: true });
+
+/** Start debug logging. */
+window.startDebug = () => {
+  window.DEBUG_BOXES = true;
+  _dbgBuf.length = 0;
+  _dbgSeq = 0;
+  console.log('%c[DEBUG] Box debug logging started. Use window.dumpDebugLog() to view.',
+              'color: lime; font-weight: bold');
+};
+
+/** Print and return the full debug log. */
+window.dumpDebugLog = () => {
+  console.group('=== BOX DEBUG LOG ===');
+  _dbgBuf.forEach(e => {
+    const badge = e.event.includes('VIOLATION') || e.event.includes('ERROR')
+      ? `%c[#${e.seq}] ${e.event}`
+      : `[#${e.seq}] ${e.event}`;
+    const style = 'color: red; font-weight: bold';
+    if (badge.startsWith('%c')) console.log(badge, style, e.data);
+    else                        console.log(badge, e.data);
+  });
+  console.groupEnd();
+  return _dbgBuf;
+};
+
+/** Snapshot current DOM vs boxes[] state without logging. */
+window.checkBoxState = () => {
+  const domIds = [...boxList.children].map(el => el.dataset.id);
+  const boxIds = boxes.map(b => b.id);
+  console.table(boxes.map((b, i) => ({
+    i, id: b.id, type: b.type, domId: domIds[i] ?? '(none)',
+    match: domIds[i] === b.id ? '✓' : '✗'
+  })));
+  if (domIds.length !== boxIds.length)
+    console.warn('DOM child count', domIds.length, '≠ boxes.length', boxIds.length);
+  return { domIds, boxIds };
+};
 
 // ── ID generation ─────────────────────────────────────────────────────────────
 function genId() { return 'b' + (nextId++); }
@@ -1098,22 +1198,38 @@ function createImageBoxElement(box, div) {
       body.appendChild(display);
       body.appendChild(makeSizeRow(img));
 
-      // Load from IDB
+      // Load from IDB or disk
       const existing = imageObjectUrls.get(box.id);
       if (existing) {
         img.src = existing;
       } else {
-        idbLoadImageAsObjectURL(box.src).then(objUrl => {
+        loadImageAsObjectURL(box).then(objUrl => {
           if (objUrl) {
             imageObjectUrls.set(box.id, objUrl);
             img.src = objUrl;
           } else {
-            // IDB entry missing — show error state
+            // Image not found — check if disk-backed (no IDB copy) vs truly missing
             display.remove();
             const missing = document.createElement('div');
             missing.className = 'image-missing';
-            missing.textContent = 'Image file not found — click × to clear';
-            missing.appendChild(clearBtn);
+            const allProjs = loadProjects();
+            const proj = (currentProjectId ? allProjs.find(p => p.id === currentProjectId) : null)
+                      || allProjs.find(p => p.onDisk && p.assetFolder && box.src?.startsWith(p.assetFolder + '/'));
+            const isDiskBacked = !!(proj?.onDisk && proj.assetFolder && box.src?.startsWith(proj.assetFolder + '/'));
+            if (isDiskBacked) {
+              missing.textContent = 'Workspace folder not connected — ';
+              const reconnectBtn = document.createElement('button');
+              reconnectBtn.className = 'image-reconnect-btn';
+              reconnectBtn.textContent = 'Reconnect folder';
+              reconnectBtn.addEventListener('click', async () => {
+                const ok = await reconnectWorkspace();
+                if (ok) retryAllDiskImages();
+              });
+              missing.appendChild(reconnectBtn);
+            } else {
+              missing.textContent = 'Image file not found — click × to clear';
+              missing.appendChild(clearBtn);
+            }
             body.appendChild(missing);
           }
         });
@@ -1149,18 +1265,40 @@ function createImageBoxElement(box, div) {
   }
 
   async function handleFileUpload(file) {
-    const projId = currentProjectId || 'draft';
-    const buf    = await file.arrayBuffer();
-    await idbSaveImage(projId, file.name, file.type, buf);
-    const key    = `${projId}/${file.name}`;
-    cleanupImageBox(box.id); // revoke any old URL
-    const objUrl = URL.createObjectURL(new Blob([buf], { type: file.type }));
+    cleanupImageBox(box.id);
+    const objUrl = URL.createObjectURL(file);
     imageObjectUrls.set(box.id, objUrl);
-    box.src      = key;
     box.filename = file.name;
     box.locked   = true;
     urlBtn.classList.add('locked-btn');
     fileBtn.classList.add('locked-btn');
+
+    const projects = loadProjects();
+    const proj = currentProjectId ? projects.find(p => p.id === currentProjectId) : null;
+
+    if (proj?.onDisk && currentWorkspaceHandle && proj.assetFolder) {
+      // Save image to workspace asset folder
+      try {
+        const assetDir = await currentWorkspaceHandle.getDirectoryHandle(proj.assetFolder, { create: true });
+        const fh = await assetDir.getFileHandle(file.name, { create: true });
+        const writable = await fh.createWritable();
+        await writable.write(file);
+        await writable.close();
+      } catch (err) {
+        console.warn('Failed to write image to workspace:', err);
+      }
+      box.src = `${proj.assetFolder}/${file.name}`;
+      // Also save to IDB as fallback for when workspace permission isn't restored on reload
+      const buf = await file.arrayBuffer();
+      await idbSaveImage(currentProjectId, file.name, file.type, buf);
+    } else {
+      // Save to IndexedDB
+      const projId = currentProjectId || 'draft';
+      const buf = await file.arrayBuffer();
+      await idbSaveImage(projId, file.name, file.type, buf);
+      box.src = `${projId}/${file.name}`;
+    }
+
     renderBody();
     syncToText();
   }
@@ -1183,6 +1321,16 @@ function createImageBoxElement(box, div) {
 
 // ── Box → DOM ─────────────────────────────────────────────────────────────────
 function createBoxElement(box) {
+  const _existingDomEl = boxList.querySelector(`[data-id="${box.id}"]`);
+  _dbg('CREATE_BOX_ELEMENT', {
+    id: box.id, type: box.type,
+    alreadyInDom: !!_existingDomEl,
+    inRebuild: _dbgInRebuild,
+    boxesHasId: boxes.some(b => b.id === box.id),
+  });
+  if (_existingDomEl) {
+    console.warn(`[DBG] createBoxElement called for id="${box.id}" which already exists in DOM!`);
+  }
   const div = document.createElement('div');
   div.className = 'box' + (box.commented ? ' commented' : '') + (box.highlighted ? ' box-is-highlighted' : '');
   div.dataset.id = box.id;
@@ -2076,6 +2224,11 @@ function reflowBox(box){
 }
 
 function setFocused(id, el) {
+  _dbg('SET_FOCUSED', {
+    id, prev: focusedBoxId,
+    idInBoxes: boxes.some(b => b.id === id),
+    idInDom: !!boxList.querySelector(`[data-id="${id}"]`),
+  });
   if (focusedBoxId && focusedBoxId !== id) {
     const prevEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
     if (prevEl) prevEl.classList.remove('focused');
@@ -2089,6 +2242,7 @@ function setFocused(id, el) {
 }
 
 function clearFocused(id, el) {
+  _dbg('CLEAR_FOCUSED', { id, wasFocused: focusedBoxId === id });
   if (focusedBoxId === id) focusedBoxId = null;
   el.classList.remove('focused');
   updateSourceHighlight(-1, -1);
@@ -2143,6 +2297,12 @@ function insertBoxAfter(afterId, type = 'math') {
                : type === 'image' ? makeImageBox()
                : { id: genId(), type, content: '' };
   const idx = boxes.findIndex(b => b.id === afterId);
+  _dbg('INSERT_BOX_AFTER', {
+    afterId, type, newId: newBox.id,
+    afterIdFound: idx !== -1,
+    insertPos: idx === -1 ? boxes.length : idx + 1,
+    focusedBoxId,
+  });
   if (idx === -1) {
     boxes.push(newBox);
   } else {
@@ -2154,6 +2314,7 @@ function insertBoxAfter(afterId, type = 'math') {
 }
 
 function appendBox(type = 'math') {
+  _dbg('APPEND_BOX', { type, focusedBoxId, boxCount: boxes.length });
   if (focusedBoxId) {
     const idx = boxes.findIndex(b => b.id === focusedBoxId);
     if (idx !== -1) {
@@ -2178,18 +2339,21 @@ function appendBox(type = 'math') {
           focusBox(focusedBoxId);
           return;
         }
-        // Convert the empty box to the new type in-place
-        mqFields.delete(focusedBoxId);
-        boxResizers.delete(focusedBoxId);
-        const oldEl = boxList.querySelector(`[data-id="${focusedBoxId}"]`);
+        // Convert the empty box to the new type in-place.
+        // Snapshot the id before oldEl.remove() — Chrome fires focusout synchronously
+        // during DOM removal, which calls clearFocused() and nulls focusedBoxId.
+        const convertId = focusedBoxId;
+        mqFields.delete(convertId);
+        boxResizers.delete(convertId);
+        const oldEl = boxList.querySelector(`[data-id="${convertId}"]`);
         if (oldEl) oldEl.remove();
-        boxes[idx] = type === 'graph' ? makeGraphBox(focusedBoxId)
-                   : type === 'calc'  ? makeCalcBox(focusedBoxId)
-                   : type === 'image' ? makeImageBox(focusedBoxId)
-                   : { id: focusedBoxId, type, content: '' };
+        boxes[idx] = type === 'graph' ? makeGraphBox(convertId)
+                   : type === 'calc'  ? makeCalcBox(convertId)
+                   : type === 'image' ? makeImageBox(convertId)
+                   : { id: convertId, type, content: '' };
         rebuildBoxList();
         syncToText();
-        focusBox(focusedBoxId);
+        focusBox(convertId);
         return;
       }
     }
@@ -2236,6 +2400,15 @@ function toggleComment(id) {
 
 // Efficient rebuild: only touch the DOM, reuse MQ fields where possible
 function rebuildBoxList() {
+  _dbg('REBUILD_BOX_LIST_START', {
+    boxIds: boxes.map(b => b.id),
+    domIds: [...boxList.children].map(el => el.dataset.id),
+    focusedBoxId,
+    suppressBoxSync, suppressTextSync, suppressHistory,
+  });
+  const _wasInRebuild = _dbgInRebuild;
+  _dbgInRebuild = true;
+
   // Collect all existing box elements by id
   const existing = new Map();
   for (const el of boxList.children) {
@@ -2269,10 +2442,24 @@ function rebuildBoxList() {
       reflowBox(box);
     }
   }
+
+  _dbgInRebuild = _wasInRebuild;
+  _dbg('REBUILD_BOX_LIST_END', {
+    boxIds: boxes.map(b => b.id),
+    domIds: [...boxList.children].map(el => el.dataset.id),
+  });
+  _dbgDomCheck('rebuildBoxList');
 }
 
 // ── Focus a box ───────────────────────────────────────────────────────────────
 function focusBox(id) {
+  _dbg('FOCUS_BOX', {
+    id,
+    hasMqField: mqFields.has(id),
+    hasCalcMap: calcMqFields.has(id),
+    hasTextInput: !!boxList.querySelector(`[data-id="${id}"] .text-input`),
+    idInBoxes: boxes.some(b => b.id === id),
+  });
   const field = mqFields.get(id);
   if (field) {
     setTimeout(() => field.focus(), 0);
@@ -2370,6 +2557,13 @@ function getFocusedCalcExprIdx() {
  * @param {number} preferCalcExprIdx - Index of the calc expression to focus (within a calc box), or -1.
  */
 function restoreSnapshot(snap, preferFocusIdx = -1, preferCalcExprIdx = -1) {
+  _dbg('RESTORE_SNAPSHOT', {
+    preferFocusIdx, preferCalcExprIdx,
+    historyIndex,
+    domIds: [...boxList.children].map(el => el.dataset.id),
+    boxIds: boxes.map(b => b.id),
+    focusedBoxId,
+  });
   suppressHistory = true;
   suppressBoxSync = true;
   diffAndApply(parseFromLatex(snap.latex));
@@ -2404,6 +2598,7 @@ function restoreSnapshot(snap, preferFocusIdx = -1, preferCalcExprIdx = -1) {
  *   Pass false when the change doesn't affect preview output (e.g. collapse state).
  */
 function syncToText(triggerPreview = true) {
+  _dbg('SYNC_TO_TEXT', { suppressed: !!suppressBoxSync, triggerPreview, focusedBoxId });
   if (suppressBoxSync) return;
   suppressTextSync = true;
   let latex = serializeToLatex(boxes);
@@ -2423,6 +2618,11 @@ latexSource.addEventListener('input', () => {
   updateLineNumbers();
   clearTimeout(textSyncTimer);
   textSyncTimer = setTimeout(() => {
+    _dbg('TEXT_SYNC_TIMER_FIRED', {
+      domIds: [...boxList.children].map(el => el.dataset.id),
+      boxIds: boxes.map(b => b.id),
+      focusedBoxId,
+    });
     suppressBoxSync = true;
     const parsed = parseFromLatex(latexSource.value);
     diffAndApply(parsed);
@@ -2449,6 +2649,17 @@ latexSource.addEventListener('keyup',   onSourceCursorChange);
 latexSource.addEventListener('select',  onSourceCursorChange);
 
 function diffAndApply(newBoxes) {
+  _dbg('DIFF_AND_APPLY_START', {
+    newBoxIds: newBoxes.map(b => b.id),
+    newBoxTypes: newBoxes.map(b => b.type),
+    oldBoxIds: boxes.map(b => b.id),
+    domIds: [...boxList.children].map(el => el.dataset.id),
+    focusedBoxId,
+    suppressBoxSync, suppressTextSync, suppressHistory,
+  });
+  const _wasInRebuild = _dbgInRebuild;
+  _dbgInRebuild = true;
+
   // Strategy: match by position; preserve IDs where type/content match
   const result = newBoxes.map((nb, i) => {
     const existing = boxes[i];
@@ -2477,6 +2688,7 @@ function diffAndApply(newBoxes) {
     mqFields.delete(last.dataset.id);
     boxResizers.delete(last.dataset.id);
     cleanupCalcBox(last.dataset.id);
+    cleanupImageBox(last.dataset.id);
     boxList.removeChild(last);
   }
 
@@ -2512,20 +2724,38 @@ function diffAndApply(newBoxes) {
         }
       }
     } else {
-      // Insert new element
+      // Insert new element — existingEl has wrong id (type mismatch) or doesn't exist
+      _dbg('DIFF_INSERT_NEW', {
+        i, boxId: box.id, boxType: box.type,
+        displacedId: existingEl?.dataset.id ?? null,
+      });
       const newEl = createBoxElement(box);
       if (existingEl) {
         boxList.insertBefore(newEl, existingEl);
-        // Remove the displaced element if it's for a different id
-        if (existingEl.dataset.id !== box.id) {
-          // It'll be cleaned up in the next pass or is already accounted for
-        }
       } else {
         boxList.appendChild(newEl);
       }
       reflowBox(box);
     }
   }
+
+  // A type-mismatch insertion above shifts displaced elements to the tail; trim them now.
+  while (boxList.children.length > boxes.length) {
+    const last = boxList.lastElementChild;
+    _dbg('DIFF_TRIM_TAIL', { removedId: last.dataset.id });
+    mqFields.delete(last.dataset.id);
+    boxResizers.delete(last.dataset.id);
+    cleanupCalcBox(last.dataset.id);
+    cleanupImageBox(last.dataset.id);
+    boxList.removeChild(last);
+  }
+
+  _dbgInRebuild = _wasInRebuild;
+  _dbg('DIFF_AND_APPLY_END', {
+    boxIds: boxes.map(b => b.id),
+    domIds: [...boxList.children].map(el => el.dataset.id),
+  });
+  _dbgDomCheck('diffAndApply');
 }
 
 // ── Line numbers + highlight overlay ─────────────────────────────────────────
@@ -2923,16 +3153,47 @@ document.addEventListener('mouseup', () => {
 
 function initImageDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('mathnotepad_imagedb', 1);
+    const req = indexedDB.open('mathnotepad_imagedb', 2);
     req.onupgradeneeded = e => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains('images')) {
         const store = db.createObjectStore('images', { keyPath: 'key' });
         store.createIndex('by_project', 'projectId', { unique: false });
       }
+      // v2: store FileSystemDirectoryHandle objects keyed by project ID
+      if (!db.objectStoreNames.contains('handles')) {
+        db.createObjectStore('handles', { keyPath: 'projectId' });
+      }
     };
     req.onsuccess = e => { imageDb = e.target.result; resolve(); };
     req.onerror   = e => { console.warn('ImageDB open failed', e.target.error); resolve(); };
+  });
+}
+
+/**
+ * Persists the single global workspace FileSystemDirectoryHandle to IDB.
+ * @param {FileSystemDirectoryHandle} handle
+ */
+function idbSaveWorkspace(handle) {
+  if (!imageDb) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const tx = imageDb.transaction('handles', 'readwrite');
+    tx.objectStore('handles').put({ projectId: WORKSPACE_KEY, handle });
+    tx.oncomplete = resolve;
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+/**
+ * Retrieves the global workspace FileSystemDirectoryHandle from IDB.
+ * @returns {Promise<FileSystemDirectoryHandle|null>}
+ */
+function idbGetWorkspace() {
+  if (!imageDb) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const req = imageDb.transaction('handles', 'readonly').objectStore('handles').get(WORKSPACE_KEY);
+    req.onsuccess = e => resolve(e.target.result?.handle || null);
+    req.onerror = e => reject(e.target.error);
   });
 }
 
@@ -2958,6 +3219,82 @@ function idbLoadImageAsObjectURL(key) {
     };
     req.onerror = e => reject(e.target.error);
   });
+}
+
+/**
+ * Loads a file-mode image as a blob URL from either the global workspace asset folder or IDB.
+ * Disk-backed projects store images in workspace/{title}_assets/filename (box.src = "{title}_assets/filename").
+ * Browser projects use IDB (box.src = "projectId/filename").
+ * Finds the matching disk project by assetFolder prefix rather than relying solely on currentProjectId,
+ * so it works even when currentProjectId is stale (e.g. after openWorkspaceFolder assigns new IDs).
+ * @param {object} box - image box with src and filename fields
+ * @returns {Promise<string|null>} blob URL or null if not found
+ */
+async function loadImageAsObjectURL(box) {
+  if (!box.src) return null;
+  const allProjs = loadProjects();
+  // Find by current project first; fall back to matching any disk project by assetFolder prefix
+  const proj = (currentProjectId ? allProjs.find(p => p.id === currentProjectId) : null)
+            || allProjs.find(p => p.onDisk && p.assetFolder && box.src.startsWith(p.assetFolder + '/'));
+  if (proj?.onDisk && proj.assetFolder && box.src.startsWith(proj.assetFolder + '/')) {
+    const filename = box.src.slice(proj.assetFolder.length + 1);
+    // Try disk first if workspace handle is available
+    if (currentWorkspaceHandle) {
+      try {
+        const assetDir = await currentWorkspaceHandle.getDirectoryHandle(proj.assetFolder);
+        const fh = await assetDir.getFileHandle(filename);
+        const file = await fh.getFile();
+        return URL.createObjectURL(file);
+      } catch {}
+    }
+    // IDB fallback — written at upload time; key uses proj.id (stable even if currentProjectId is stale)
+    return idbLoadImageAsObjectURL(`${proj.id}/${filename}`);
+  }
+  return idbLoadImageAsObjectURL(box.src);
+}
+
+/**
+ * Requests readwrite permission for the stored workspace handle (requires a user gesture).
+ * If no handle is stored, prompts the user to pick a folder.
+ * @returns {Promise<boolean>} true if workspace is now accessible
+ */
+async function reconnectWorkspace() {
+  let handle = currentWorkspaceHandle;
+  if (!handle) handle = await idbGetWorkspace().catch(() => null);
+  if (handle) {
+    try {
+      const perm = await handle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') return false;
+      currentWorkspaceHandle = handle;
+      await idbSaveWorkspace(handle);
+      return true;
+    } catch { return false; }
+  }
+  // No stored handle — ask user to pick
+  try {
+    handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    currentWorkspaceHandle = handle;
+    await idbSaveWorkspace(handle);
+    localStorage.setItem(WORKSPACE_NAME_KEY, handle.name);
+    return true;
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('Directory picker error:', e);
+    return false;
+  }
+}
+
+/**
+ * After workspace reconnect, re-renders all boxes so image loading is retried with the
+ * workspace now connected. Boxes that already have cached blob URLs are unaffected.
+ * Suppresses sync and history during the rebuild to avoid marking the project dirty.
+ */
+function retryAllDiskImages() {
+  suppressBoxSync = true;
+  suppressHistory = true;
+  renderBoxes();
+  suppressBoxSync = false;
+  suppressHistory = false;
+  markClean();
 }
 
 function idbGetImageRecord(key) {
@@ -3031,6 +3368,131 @@ function idbMigrateImageKeys(oldId, newId) {
   });
 }
 
+// ── Disk / workspace helpers ──────────────────────────────────────────────────
+
+/**
+ * Strips characters invalid in file/folder names on Windows/macOS/Linux.
+ * @param {string} name
+ * @returns {string}
+ */
+function sanitizeName(name) {
+  return name.replace(/[\\/:*?"<>|]/g, '-').trim() || 'Untitled';
+}
+
+/**
+ * Writes latex to a named .tex file inside the workspace folder.
+ * @param {FileSystemDirectoryHandle} workspaceHandle
+ * @param {string} texFilename  e.g. "MyProject.tex"
+ * @param {string} latex
+ */
+async function writeToDisk(workspaceHandle, texFilename, latex) {
+  const fh = await workspaceHandle.getFileHandle(texFilename, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(latex);
+  await writable.close();
+}
+
+/**
+ * Reads and returns the text content of a .tex file from the workspace folder.
+ * Returns '' if the file doesn't exist.
+ * @param {FileSystemDirectoryHandle} workspaceHandle
+ * @param {string} texFilename
+ * @returns {Promise<string>}
+ */
+async function readTexFromDisk(workspaceHandle, texFilename) {
+  try {
+    const fh = await workspaceHandle.getFileHandle(texFilename);
+    return await (await fh.getFile()).text();
+  } catch { return ''; }
+}
+
+/**
+ * Opens a directory picker to set the single global workspace folder. Clears all
+ * existing disk-backed projects (they belonged to the previous workspace), reads all
+ * .tex files from the selected folder, and adds them as projects. Stores the handle
+ * globally in IDB and the folder name in localStorage for display.
+ */
+async function openWorkspaceFolder() {
+  let workspaceHandle;
+  try {
+    workspaceHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('Directory picker error:', e);
+    return;
+  }
+
+  // Set as the global workspace
+  currentWorkspaceHandle = workspaceHandle;
+  await idbSaveWorkspace(workspaceHandle);
+  localStorage.setItem(WORKSPACE_NAME_KEY, workspaceHandle.name);
+
+  // Remove all previous disk-backed projects; they belonged to the old workspace
+  let projects = loadProjects().filter(p => !p.onDisk);
+
+  // Read all .tex files in the new workspace and add as projects
+  let addedCount = 0;
+  for await (const [name, entry] of workspaceHandle.entries()) {
+    if (entry.kind !== 'file' || !name.endsWith('.tex')) continue;
+    const title = name.slice(0, -4);
+    const assetFolder = sanitizeName(title) + '_assets';
+    const latex = await readTexFromDisk(workspaceHandle, name);
+    const id = Date.now().toString() + addedCount++;
+    projects.push({ id, title, latex, onDisk: true, texFilename: name, assetFolder });
+  }
+
+  saveProjects(projects);
+  renderProjectsList();
+  openProjectsPanel();
+}
+
+/**
+ * Saves a project to the global workspace folder as a .tex file. If no workspace is
+ * set, prompts the user to pick one (which becomes the new global workspace, clearing
+ * any old disk-backed projects). Called from the "Save to disk" dropdown item.
+ * @param {string} projectId
+ */
+async function saveProjectToDisk(projectId) {
+  if (!currentWorkspaceHandle) {
+    // No workspace set — pick folder and establish it as global workspace
+    try {
+      currentWorkspaceHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (e) {
+      if (e.name !== 'AbortError') console.warn('Directory picker error:', e);
+      return;
+    }
+    await idbSaveWorkspace(currentWorkspaceHandle);
+    localStorage.setItem(WORKSPACE_NAME_KEY, currentWorkspaceHandle.name);
+    // Clear other onDisk projects — they belonged to the previous workspace
+    const filtered = loadProjects().filter(p => !p.onDisk || p.id === projectId);
+    saveProjects(filtered);
+  }
+
+  const perm = await currentWorkspaceHandle.requestPermission({ mode: 'readwrite' });
+  if (perm !== 'granted') { alert('Permission denied — cannot write to folder.'); return; }
+
+  const projects = loadProjects();
+  const proj = projects.find(p => p.id === projectId);
+  if (!proj) return;
+
+  const texFilename = sanitizeName(proj.title) + '.tex';
+  const assetFolder = sanitizeName(proj.title) + '_assets';
+  const latex = projectId === currentProjectId ? latexSource.value : proj.latex;
+
+  await writeToDisk(currentWorkspaceHandle, texFilename, latex);
+
+  proj.onDisk      = true;
+  proj.texFilename = texFilename;
+  proj.assetFolder = assetFolder;
+  proj.latex       = latex;
+  saveProjects(projects);
+
+  if (projectId === currentProjectId) {
+    markClean();
+    saveDraftNow();
+  }
+  renderProjectsList();
+}
+
 function loadProjects() {
   return JSON.parse(localStorage.getItem(PROJ_KEY) || '[]');
 }
@@ -3092,7 +3554,7 @@ function restoreFromLatex(latex) {
   updatePreview();
 }
 
-function saveCurrentProject() {
+async function saveCurrentProject() {
   const projects = loadProjects();
   const latex = latexSource.value;
 
@@ -3103,19 +3565,43 @@ function saveCurrentProject() {
       saveProjects(projects);
       markClean();
       saveDraftNow();
+      // Also persist to disk if project is disk-backed
+      if (projects[idx].onDisk && currentWorkspaceHandle && projects[idx].texFilename) {
+        writeToDisk(currentWorkspaceHandle, projects[idx].texFilename, latex)
+          .catch(err => console.warn('Disk write failed:', err));
+      }
       renderProjectsList();
     }
   } else {
     const title = prompt('Project title:')?.trim();
     if (!title) return;
     const id = Date.now().toString();
-    projects.push({ id, title, latex });
+    const texFilename = sanitizeName(title) + '.tex';
+    const assetFolder = sanitizeName(title) + '_assets';
+    const proj = { id, title, latex };
+
+    // If a workspace is set, automatically save to disk
+    if (currentWorkspaceHandle) {
+      try {
+        const perm = await currentWorkspaceHandle.requestPermission({ mode: 'readwrite' });
+        if (perm === 'granted') {
+          await writeToDisk(currentWorkspaceHandle, texFilename, latex);
+          proj.onDisk      = true;
+          proj.texFilename = texFilename;
+          proj.assetFolder = assetFolder;
+        }
+      } catch (err) {
+        console.warn('Disk write failed:', err);
+      }
+    }
+
+    projects.push(proj);
     saveProjects(projects);
     currentProjectId = id;
     projectTitleLabel.textContent = title;
     markClean();
-    idbMigrateImageKeys('draft', id).then(() => syncToText());
-    saveDraft();
+    await idbMigrateImageKeys('draft', id).then(() => syncToText());
+    saveDraftNow();
     renderProjectsList();
   }
 }
@@ -3135,10 +3621,10 @@ async function downloadCurrentProject() {
     return;
   }
 
-  // ZIP download — rewrite IDB keys to images/<filename> in the .tex content
+  // ZIP download — rewrite IDB keys to images/<filename>; disk-backed are already in that form
   let texContent = latexSource.value;
   for (const box of fileImageBoxes) {
-    if (box.src && box.filename) {
+    if (box.src && box.filename && !box.src.startsWith('images/')) {
       texContent = texContent.replaceAll(`% ${box.src}`, `% images/${box.filename}`);
     }
   }
@@ -3147,9 +3633,27 @@ async function downloadCurrentProject() {
   zip.file(title + '.tex', texContent);
 
   for (const box of fileImageBoxes) {
-    const rec = await idbGetImageRecord(box.src).catch(() => null);
-    if (rec) {
-      zip.folder('images').file(rec.filename, rec.data, { binary: true });
+    if (currentWorkspaceHandle && currentProjectId) {
+      const diskProj = loadProjects().find(p => p.id === currentProjectId);
+      if (diskProj?.onDisk && diskProj.assetFolder && box.src.startsWith(diskProj.assetFolder + '/')) {
+        // Disk-backed image — read from workspace asset folder
+        try {
+          const assetDir = await currentWorkspaceHandle.getDirectoryHandle(diskProj.assetFolder);
+          const filename = box.src.slice(diskProj.assetFolder.length + 1);
+          const fh = await assetDir.getFileHandle(filename);
+          const file = await fh.getFile();
+          const buf = await file.arrayBuffer();
+          zip.folder('images').file(file.name, buf, { binary: true });
+        } catch {}
+        continue;
+      }
+    }
+    {
+      // IDB-backed image
+      const rec = await idbGetImageRecord(box.src).catch(() => null);
+      if (rec) {
+        zip.folder('images').file(rec.filename, rec.data, { binary: true });
+      }
     }
   }
 
@@ -3160,12 +3664,30 @@ async function downloadCurrentProject() {
   URL.revokeObjectURL(url);
 }
 
-function openProject(id) {
+async function openProject(id) {
   if (isDirty && !confirm('You have unsaved changes. Open anyway?')) return;
   const projects = loadProjects();
   const proj = projects.find(p => p.id === id);
   if (!proj) return;
-  restoreFromLatex(proj.latex);
+
+  if (proj.onDisk) {
+    // Ensure the global workspace handle is set and accessible (user gesture available here)
+    if (!currentWorkspaceHandle) {
+      const handle = await idbGetWorkspace().catch(() => null);
+      if (handle) {
+        try {
+          const perm = await handle.requestPermission({ mode: 'readwrite' });
+          if (perm === 'granted') currentWorkspaceHandle = handle;
+        } catch {}
+      }
+    }
+    // Re-read .tex file from disk for latest content
+    if (currentWorkspaceHandle && proj.texFilename) {
+      try { proj.latex = await readTexFromDisk(currentWorkspaceHandle, proj.texFilename); } catch {}
+    }
+  }
+
+  restoreFromLatex(proj.latex || '');
   currentProjectId = id;
   projectTitleLabel.textContent = proj.title;
   markClean();
@@ -3176,7 +3698,7 @@ function openProject(id) {
 }
 
 function deleteProject(id) {
-  if (!confirm('Delete this project?')) return;
+  if (!confirm('Delete this project? (Only removes from recent list — files on disk are not deleted.)')) return;
   let projects = loadProjects();
   projects = projects.filter(p => p.id !== id);
   saveProjects(projects);
@@ -3221,9 +3743,20 @@ function renderProjectsList() {
     handle.textContent = '⠿';
     handle.title = 'Drag to reorder';
 
-    const title = document.createElement('span');
-    title.className = 'project-title';
-    title.textContent = proj.title;
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'project-title-wrap';
+
+    const titleText = document.createElement('span');
+    titleText.className = 'project-title';
+    titleText.textContent = proj.title;
+    titleWrap.appendChild(titleText);
+
+    if (proj.onDisk) {
+      const pathText = document.createElement('span');
+      pathText.className = 'project-disk-path';
+      pathText.textContent = proj.texFilename || 'Saved on disk';
+      titleWrap.appendChild(pathText);
+    }
 
     const menuBtn = document.createElement('button');
     menuBtn.className = 'project-menu-btn';
@@ -3240,6 +3773,18 @@ function renderProjectsList() {
       dropdown.classList.remove('open');
       renameProject(proj.id);
     });
+
+    // "Save to disk" only shown in Chrome/Edge (File System Access API available)
+    if (window.showDirectoryPicker) {
+      const saveToDiskBtn = document.createElement('button');
+      saveToDiskBtn.textContent = 'Save to disk';
+      saveToDiskBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        dropdown.classList.remove('open');
+        saveProjectToDisk(proj.id);
+      });
+      dropdown.appendChild(saveToDiskBtn);
+    }
 
     const deleteBtn = document.createElement('button');
     deleteBtn.textContent = 'Delete';
@@ -3261,7 +3806,7 @@ function renderProjectsList() {
     });
 
     item.appendChild(handle);
-    item.appendChild(title);
+    item.appendChild(titleWrap);
     item.appendChild(menuBtn);
     item.appendChild(dropdown);
 
@@ -3322,6 +3867,21 @@ function newProject() {
 function openProjectsPanel() {
   projectsPanel.classList.add('open');
   projectsOverlay.classList.add('visible');
+  const openBtn = document.getElementById('open-project-btn');
+  const unsupportedMsg = document.getElementById('fs-unsupported-msg');
+  const workspaceInfo = document.getElementById('workspace-info');
+  if (window.showDirectoryPicker) {
+    openBtn.hidden = false;
+    unsupportedMsg.hidden = true;
+    // Show the current workspace folder name, if set
+    const name = currentWorkspaceHandle?.name || localStorage.getItem(WORKSPACE_NAME_KEY);
+    workspaceInfo.textContent = name ? `Folder: ${name}` : '';
+    workspaceInfo.hidden = !name;
+  } else {
+    openBtn.hidden = true;
+    unsupportedMsg.hidden = false;
+    workspaceInfo.hidden = true;
+  }
   renderProjectsList();
 }
 
@@ -3346,6 +3906,7 @@ projectsBtn.addEventListener('click', () => {
 closeProjectsBtn.addEventListener('click', closeProjectsPanel);
 projectsOverlay.addEventListener('click', closeProjectsPanel);
 document.getElementById('new-project-btn').addEventListener('click', newProject);
+document.getElementById('open-project-btn').addEventListener('click', openWorkspaceFolder);
 saveBtn.addEventListener('click', saveCurrentProject);
 downloadBtn.addEventListener('click', downloadCurrentProject);
 
@@ -3431,7 +3992,30 @@ function init() {
     currentProjectId = draft.projectId || null;
     if (currentProjectId) {
       const proj = loadProjects().find(p => p.id === currentProjectId);
-      if (proj) projectTitleLabel.textContent = proj.title;
+      if (proj) {
+        projectTitleLabel.textContent = proj.title;
+        // Passively try to restore the global workspace handle (queryPermission needs no gesture)
+        idbGetWorkspace().then(async handle => {
+          if (!handle) return;
+          try {
+            const perm = await handle.queryPermission({ mode: 'readwrite' });
+            if (perm === 'granted') {
+              currentWorkspaceHandle = handle;
+              retryAllDiskImages();
+            } else {
+              // Permission needs a user gesture — reconnect on the next interaction
+              const reconnectOnInteraction = async () => {
+                document.removeEventListener('click',   reconnectOnInteraction, true);
+                document.removeEventListener('keydown', reconnectOnInteraction, true);
+                const ok = await reconnectWorkspace();
+                if (ok) retryAllDiskImages();
+              };
+              document.addEventListener('click',   reconnectOnInteraction, true);
+              document.addEventListener('keydown', reconnectOnInteraction, true);
+            }
+          } catch {}
+        }).catch(() => {});
+      }
     }
   } else {
     boxes = [{ id: genId(), type: 'math', content: '' }];

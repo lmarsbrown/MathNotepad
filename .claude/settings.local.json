@@ -4,7 +4,8 @@
       "Bash(ls:*)",
       "Bash(node:*)",
       "Bash(grep *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "WebSearch"
     ]
   }
 }

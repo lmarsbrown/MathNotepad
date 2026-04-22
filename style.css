@@ -263,7 +263,6 @@ body {
 }
 
 .project-title {
-  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -328,6 +327,64 @@ body {
 
 .project-dropdown button:hover {
   background: #45475a;
+}
+
+#projects-panel-footer {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-top: 1px solid #313244;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#open-project-btn {
+  width: 100%;
+  padding: 7px 12px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: center;
+  transition: background 0.15s;
+}
+
+#open-project-btn:hover {
+  background: #45475a;
+}
+
+#workspace-info {
+  margin: 0;
+  font-size: 11px;
+  color: #585b70;
+  text-align: center;
+}
+
+#fs-unsupported-msg {
+  margin: 0;
+  font-size: 11px;
+  color: #585b70;
+  text-align: center;
+}
+
+.project-title-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.project-disk-path {
+  font-size: 10px;
+  color: #45475a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #divider {
@@ -1307,8 +1364,8 @@ body {
   text-align: center;
   color: #1a1a1a;
   overflow-x: auto;
+  overflow-y: clip;
   max-width: 100%;
-  contain:paint;
 }
 
 /* MathJax injects margin:1em 0 on display containers by default — override to a
@@ -1373,7 +1430,7 @@ body {
   #divider2,
   .panel-header { display: none !important; }
 
-  body, html { background: white; }
+  body, html { background: white; height: auto; overflow: visible; }
 
   #app { display: block; }
 
@@ -1388,6 +1445,9 @@ body {
     padding: 0;
     background: white;
     overflow: visible;
+    height: auto;
+    max-height: none;
+    flex: none;
   }
 
   .preview-page {
@@ -1908,6 +1968,21 @@ body {
   color: #f38ba8;
   font-size: 12px;
   gap: 8px;
+}
+
+.image-reconnect-btn {
+  background: transparent;
+  border: 1px solid #f38ba8;
+  border-radius: 4px;
+  color: #f38ba8;
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.image-reconnect-btn:hover {
+  background: rgba(243, 139, 168, 0.15);
 }
 
 /* Preview image box */

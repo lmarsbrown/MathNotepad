@@ -247,7 +247,7 @@ function createPreviewElement(box) {
       placeholder.className = 'preview-image-placeholder';
       placeholder.textContent = 'Loading image…';
       wrapper.appendChild(placeholder);
-      idbLoadImageAsObjectURL(box.src).then(objUrl => {
+      loadImageAsObjectURL(box).then(objUrl => {
         if (objUrl) {
           placeholder.remove();
           const img = document.createElement('img');

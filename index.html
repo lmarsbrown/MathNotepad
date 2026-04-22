@@ -23,19 +23,24 @@
 <body>
   <div id="projects-panel">
     <div class="projects-header">
-      <span>Projects</span>
+      <span>Recent Projects</span>
       <div class="projects-header-actions">
         <button id="new-project-btn" title="New project">+ New</button>
         <button id="close-projects-btn">×</button>
       </div>
     </div>
     <div id="projects-list"></div>
+    <div id="projects-panel-footer">
+      <p id="workspace-info" hidden></p>
+      <button id="open-project-btn" hidden>Open Folder</button>
+      <p id="fs-unsupported-msg" hidden>Open Folder requires Chrome or Edge.</p>
+    </div>
   </div>
   <div id="projects-overlay"></div>
 
   <div id="top-bar">
     <div class="header-left">
-      <button id="projects-btn" title="Projects">☰</button>
+      <button id="projects-btn" title="Recent Projects">☰</button>
       <span id="project-title-label">Untitled</span>
     </div>
     <div class="toolbar">
