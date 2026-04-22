@@ -100,6 +100,7 @@ class GraphRenderer {
       }));
       this._constantValues = analysis.constantValues;
       this._compiledErrors = analysis.errors;
+      this._lastAnalysis   = analysis; // cached for UI badge updates
 
       const newShaderKey = this._compiledExprs
         .map(e => e.shaderInfo ? e.shaderInfo.shaderKey : '')

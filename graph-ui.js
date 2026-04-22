@@ -320,21 +320,42 @@ function createGraphExprRow(expr) {
     openColorPopup(colorSwatch, expr.id);
   });
 
-  function updateGraphingControls(latex) {
+  /**
+   * Refresh the UI controls for this expression row (color swatch, toggle, slider, const badge).
+   * When precompiledAnalysis is provided (from renderGraphPreview), reuse it instead of
+   * running a full compile — avoids recompiling every expression on every render frame.
+   *
+   * @param {string} latex - Current LaTeX of this expression
+   * @param {Object|null} precompiledAnalysis - analysis object from renderer._lastAnalysis, or null to recompile
+   */
+  function updateGraphingControls(latex, precompiledAnalysis = null) {
     let isGraphable = false;
     let isNumericConst = false;
     let constValue = null;
     let constEvalValue = null;
     if (latex.trim() !== '' && graphModeBoxId) {
-      const box = boxes.find(b => b.id === graphModeBoxId);
-      const allExprs = (box ? box.expressions || [] : []).map(e =>
-        e.id === expr.id ? { ...e, latex, enabled: true } : e
-      );
-      if (!allExprs.find(e => e.id === expr.id)) {
-        allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
+      let analysis;
+      if (precompiledAnalysis) {
+        // Fast path: use the analysis already computed by renderer.updateExpressions().
+        // _compiledExprs only has enabled expressions, so for disabled expressions we preserve
+        // the last-known graphable state from the initial (slow-path) call via toggle.style.display.
+        analysis = precompiledAnalysis;
+        const renderer = getGraphRenderer();
+        const enabledAndCompiled = renderer._compiledExprs.some(e => e.exprId === expr.id && e.shaderInfo);
+        isGraphable = enabledAndCompiled || (toggle.style.display !== 'none');
+      } else {
+        // Slow path: full recompile (used when the user is actively editing this field)
+        const box = boxes.find(b => b.id === graphModeBoxId);
+        const allExprs = (box ? box.expressions || [] : []).map(e =>
+          e.id === expr.id ? { ...e, latex, enabled: true } : e
+        );
+        if (!allExprs.find(e => e.id === expr.id)) {
+          allExprs.push({ id: expr.id, latex, color: '#000', enabled: true, thickness: 2 });
+        }
+        const result = compileGraphExpressions(allExprs);
+        analysis = result.analysis;
+        isGraphable = result.renderExprs.some(re => re.exprId === expr.id);
       }
-      const { renderExprs, analysis } = compileGraphExpressions(allExprs);
-      isGraphable = renderExprs.some(re => re.exprId === expr.id);
       if (!isGraphable) {
         const nameMatch = latex.trim().match(/^([a-zA-Z]\w*)\s*=/);
         if (nameMatch && !['x', 'y'].includes(nameMatch[1]) && analysis.constantValues.has(nameMatch[1])) {
@@ -388,7 +409,7 @@ function createGraphExprRow(expr) {
 
   if (expr.latex) field.latex(expr.latex);
   graphMqFields.set(expr.id, field);
-  graphExprUpdateFns.set(expr.id, () => updateGraphingControls(field.latex()));
+  graphExprUpdateFns.set(expr.id, (analysis) => updateGraphingControls(field.latex(), analysis));
 
   mqSpan.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {

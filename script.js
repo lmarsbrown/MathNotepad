@@ -110,8 +110,10 @@ function renderGraphPreview() {
   renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
   updateGraphCropOverlay();
 
-  // Refresh all expression row badges now that constants may have changed
-  for (const fn of graphExprUpdateFns.values()) fn();
+  // Refresh expression row badges using the already-compiled analysis — avoids recompiling per frame.
+  // Pass null if no analysis is cached yet so each fn falls back to its own recompile.
+  const cachedAnalysis = renderer._lastAnalysis || null;
+  for (const fn of graphExprUpdateFns.values()) fn(cachedAnalysis);
 }
 
 /** Update error indicators on graph expression rows. */
