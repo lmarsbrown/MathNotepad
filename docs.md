@@ -752,6 +752,7 @@ Navigation: Enter in a row adds a new row after it; arrow keys at field edges cr
   physicsConstants: false, // inject SI physics constants
   useUnits: false,         // enable SI units mode (symbolic unit tracking)
   useSymbolic: false,      // keep undefined non-unit variables symbolic
+  useBaseUnits: false,     // expand all unit results to SI base units (m, kg, s, A, K, mol, cd)
   hidden: false,           // suppress all preview output (expressions still evaluate in editor)
   sigFigs: 6,              // significant figures for numeric result display
   expressions: [{ id, latex, enabled }]
@@ -789,6 +790,7 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
     .calc-show-results-btn  "Physics" toggle
     .calc-show-results-btn  "Units" toggle
     .calc-show-results-btn  "Symbolic" toggle (disabled when Units is off)
+    .calc-show-results-btn  "Base Units" toggle (disabled when Units is off)
     .calc-show-results-btn  "Hidden" toggle
     .calc-sigfigs-label     "sf:" label
       .calc-sigfigs-input   number input (1–15, default 6)
@@ -816,7 +818,7 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 
 **Serialization:**
 ```
-\begin{calc}{showdefs}{showbare}{physics}{units}{symbolic}{sf=3}
+\begin{calc}{showdefs}{showbare}{physics}{units}{symbolic}{baseunits}{sf=3}
 % ce1 on x=5
 % ce2 off y=x^{2}
 \end{calc}
@@ -880,6 +882,8 @@ None.
 
 **Symbolic toggle (per calc box):** Only active when Units is on. When on, undefined variables that are *not* unit symbols are also kept symbolic rather than producing an error. Allows writing expressions like `F = m a` where `m` and `a` haven't been defined yet.
 
+**Base Units toggle (per calc box):** Only active when Units is on. When on, all unit results are expanded fully to SI base units (m, kg, s, A, K, mol, cd) instead of being collapsed to named derived units (N, J, Pa, …) or scaled prefixed units. Implemented via `simplifyAstToBase` (math.js) which calls `_expandTermToBaseUnits` instead of `_simplifyTermUnits` during canonical simplification.
+
 **Auto-scaling:** After simplification, results are automatically displayed in the most human-readable scaled unit. `5000 J` → `5 kJ`, `0.001 m^2` → `10 cm^2`, `1e9 Hz` → `1 GHz`. The scale is chosen so the coefficient is in [1, 1000). If no clean scale exists (coefficient outside that range for all prefixes), the result is left as-is.
 
 **Result display:** Unit results are shown in the editor result area using:
@@ -905,6 +909,7 @@ In the preview, unit results use `astToLatex` output embedded directly in displa
 - `SCALABLE_UNITS_SERIES` — map from base unit name to `[{name, p}]` sorted ascending by scale factor `p`. Used by `_selectBestScale` to find the best-fit prefix.
 - `SI_ALL_UNIT_NAMES` — all unit names (base + derived + scaled) sorted longest-first; used by the tokenizer for greedy matching
 - `_activePhysicsChem` — module-level boolean set in `evaluateCalcExpressions`; gates liter unit recognition
+- `COMPOUND_UNIT_SIMPLIFICATIONS` — list of `{ name, units, factors }` entries for common multi-unit expressions that aren't named derived units (V/m, m/s, m/s², kg·m/s). `units` is the SI base signature; `factors` is the component atoms to use for display. Matched by `_simplifyTermUnits` after single-unit matching fails.
 
 **Key functions in math.js:**
 - `buildDerivedUnitParamMap()` — converts `DERIVED_UNIT_EXPANSIONS` into a `Map<name, ASTNode>` of base-unit expansion ASTs. Used by `buildConstantUnitAst` but not injected into `unitValues` at eval time (derived units stay symbolic).
@@ -912,7 +917,7 @@ In the preview, unit results use `astToLatex` output embedded directly in displa
 - `_termToSISignature(term)` — expands a `{coeff, factors}` term to SI base units, returning `{coeff, siUnits}` or `null`. Handles `DERIVED_UNIT_EXPANSIONS`, `SCALED_UNIT_ATOMS`, and SI base units. Chem-only units (`L`, `mL`, `μL`) return `null` when chem mode is off.
 - `_siSignatureKey(siUnits)` — canonical string key from SI units dict; groups terms by dimensional equivalence.
 - `_selectBestScale(baseName, power, siCoeff)` — given a base unit name (`J`, `m`, `s`, `kg`, etc.), the power it appears at, and its SI coefficient, returns `{name, power, newCoeff}`. Scans the series from largest to smallest prefix; picks the first where `|newCoeff| ∈ [1, 1000)`. If no prefix fits (coefficient too large or too small for all entries), returns the largest prefix anyway rather than `null`. Special case: `baseName='m', power=3` with chem mode tries liter series first (returning power=1 result for L/mL/μL).
-- `_simplifyTermUnits(term, atomMap)` — after combination: (1) tries `matchDerivedUnit` (only `power >= 1` matches accepted, to avoid false Hz⁻¹ matches); (2) falls back to single-SI-base-unit terms; (3) calls `_selectBestScale` to choose best prefix; rewrites the term. For single-factor terms where `_selectBestScale` would be null (unit not in any series), returns the original term unchanged to avoid ugly forced coefficients.
+- `_simplifyTermUnits(term, atomMap)` — after combination: (1) tries `matchDerivedUnit` (only `power >= 1` matches accepted, to avoid false Hz⁻¹ matches); (2) falls back to single-SI-base-unit terms; (3) checks `COMPOUND_UNIT_SIMPLIFICATIONS` for an exact SI signature match (e.g. V/m, m/s, m/s², kg·m/s) and rewrites the term to the named component factors; (4) calls `_selectBestScale` to choose best prefix; rewrites the term. For single-factor terms where `_selectBestScale` would be null (unit not in any series), returns the original term unchanged to avoid ugly forced coefficients. Compound unit matches have no prefix scaling.
 - `evaluateAstSymbolic(ast, valueMap, funcDefs, opts)` — symbolic evaluator; recognises `DERIVED_UNIT_EXPANSIONS` (with chem gating) and `SCALED_UNIT_ATOMS` variable nodes as unit atoms.
 
 **Display helpers in script.js (after `formatCalcResult`, script.js:~310):**

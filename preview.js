@@ -166,7 +166,7 @@ function createPreviewElement(box) {
     wrapper.dataset.boxId = box.id;
     // Hidden calc boxes contribute nothing to the preview
     if (box.hidden) return wrapper;
-    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
+    const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
     for (const expr of (box.expressions || [])) {
       if (!expr.enabled) continue;
       const latex = (expr.latex || '').trim();

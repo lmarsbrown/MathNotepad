@@ -399,6 +399,7 @@ function makeCalcBox(id) {
     physicsChem: false,
     useUnits: false,
     useSymbolic: false,
+    useBaseUnits: false,
     hidden: false,
     collapsed: false,
     sigFigs: 6,
@@ -499,7 +500,10 @@ function buildAstText(ast, sigFigs = 6) {
       // number × unit: use space; unit × unit: use center dot
       return a.type === 'number' ? `${la}\u2009${rb}` : `${la}\u00B7${rb}`;
     }
-    case 'div':  return null; // signal: need HTML fraction
+    case 'div': {
+      const la = buildAstText(a, sigFigs), rb = buildAstText(b, sigFigs);
+      return (la && rb) ? `${la}/${rb}` : null;
+    }
     case 'pow': {
       const base = buildAstText(a, sigFigs);
       if (!base) return null;
@@ -646,7 +650,7 @@ function scheduleCalcUpdate(boxId) {
 function updateCalcResults(boxId) {
   const box = boxes.find(b => b.id === boxId);
   if (!box || box.type !== 'calc') return;
-  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic });
+  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
   const updateFns = calcUpdateFnsMap.get(boxId);
   if (!updateFns) return;
   for (const fn of updateFns.values()) fn(results);
@@ -696,13 +700,14 @@ function serializeToLatex(boxArray) {
       const basicFlag    = b.physicsBasic ? '{physics_basic}' : '';
       const emFlag       = b.physicsEM    ? '{physics_em}'    : '';
       const chemFlag     = b.physicsChem  ? '{physics_chem}'  : '';
-      const unitsFlag    = b.useUnits    ? '{units}'    : '';
-      const symbolicFlag = b.useSymbolic ? '{symbolic}' : '';
-      const hiddenFlag     = b.hidden     ? '{hidden}'     : '';
-      const collapsedFlag  = b.collapsed  ? '{collapsed}'  : '';
+      const unitsFlag      = b.useUnits     ? '{units}'      : '';
+      const symbolicFlag   = b.useSymbolic  ? '{symbolic}'   : '';
+      const baseUnitsFlag  = b.useBaseUnits ? '{baseunits}'  : '';
+      const hiddenFlag     = b.hidden       ? '{hidden}'     : '';
+      const collapsedFlag  = b.collapsed    ? '{collapsed}'  : '';
       const sfVal        = b.sigFigs ?? 6;
       const sfFlag       = sfVal !== 6 ? `{sf=${sfVal}}` : '';
-      serialized = `\\begin{calc}${defsFlag}${bareFlag}${basicFlag}${emFlag}${chemFlag}${unitsFlag}${symbolicFlag}${hiddenFlag}${collapsedFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
+      serialized = `\\begin{calc}${defsFlag}${bareFlag}${basicFlag}${emFlag}${chemFlag}${unitsFlag}${symbolicFlag}${baseUnitsFlag}${hiddenFlag}${collapsedFlag}${sfFlag}\n${exprLines.join('\n')}\n\\end{calc}`;
     }
     else if (b.type === 'image') {
       const modeFlag   = `{${b.mode || 'url'}}`;
@@ -825,8 +830,9 @@ function parseFromLatex(src) {
       const physicsBasic = legacyPhysics || line.includes('{physics_basic}');
       const physicsEM    = legacyPhysics || line.includes('{physics_em}');
       const physicsChem  = legacyPhysics || line.includes('{physics_chem}');
-      const useUnits    = line.includes('{units}');
-      const useSymbolic = line.includes('{symbolic}');
+      const useUnits     = line.includes('{units}');
+      const useSymbolic  = line.includes('{symbolic}');
+      const useBaseUnits = line.includes('{baseunits}');
       const hidden      = line.includes('{hidden}');
       const collapsed   = line.includes('{collapsed}');
       const sfMatch     = line.match(/\{sf=(\d+)\}/);
@@ -852,7 +858,7 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{calc}
-      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsBasic, physicsEM, physicsChem, useUnits, useSymbolic, hidden, collapsed, sigFigs, expressions }));
+      result.push(applyPending({ id: genId(), type: 'calc', content: '', showResultsDefs, showResultsBare, physicsBasic, physicsEM, physicsChem, useUnits, useSymbolic, useBaseUnits, hidden, collapsed, sigFigs, expressions }));
       continue;
     }
 
@@ -1870,9 +1876,11 @@ function createBoxElement(box) {
       if (idx === -1) return;
       boxes[idx].useUnits = !boxes[idx].useUnits;
       unitsBtn.classList.toggle('active', boxes[idx].useUnits);
-      // Disable symbolic button when units mode is off
+      // Disable dependent buttons when units mode is off
       symbolicBtn.disabled = !boxes[idx].useUnits;
       symbolicBtn.classList.toggle('btn-disabled', !boxes[idx].useUnits);
+      baseUnitsBtn.disabled = !boxes[idx].useUnits;
+      baseUnitsBtn.classList.toggle('btn-disabled', !boxes[idx].useUnits);
       syncToText();
       scheduleCalcUpdate(box.id);
     });
@@ -1896,6 +1904,25 @@ function createBoxElement(box) {
       scheduleCalcUpdate(box.id);
     });
     toolbar.appendChild(symbolicBtn);
+
+    // Base Units toggle (only meaningful when units mode is on)
+    const baseUnitsBtn = document.createElement('button');
+    baseUnitsBtn.type = 'button';
+    const baseActive = box.useUnits && box.useBaseUnits;
+    baseUnitsBtn.className = 'calc-show-results-btn' + (baseActive ? ' active' : '') + (!box.useUnits ? ' btn-disabled' : '');
+    baseUnitsBtn.disabled = !box.useUnits;
+    baseUnitsBtn.title = 'Base units mode: expand all results to SI base units (m, kg, s, A, K, mol, cd)';
+    baseUnitsBtn.textContent = 'Base Units';
+    baseUnitsBtn.addEventListener('mousedown', e => e.preventDefault());
+    baseUnitsBtn.addEventListener('click', () => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1 || !boxes[idx].useUnits) return;
+      boxes[idx].useBaseUnits = !boxes[idx].useBaseUnits;
+      baseUnitsBtn.classList.toggle('active', boxes[idx].useBaseUnits);
+      syncToText();
+      scheduleCalcUpdate(box.id);
+    });
+    toolbar.appendChild(baseUnitsBtn);
 
     // Hidden toggle — prevents the calc box from rendering anything in the preview
     toolbar.appendChild(makeResultsToggle(
@@ -2072,12 +2099,8 @@ function createBoxElement(box) {
           errorLine.style.display = 'none';
           wrapper.classList.remove('has-error');
           renderUnitResult(resultSpan, result.unitAst, result.warnings, boxes.find(b => b.id === box.id)?.sigFigs ?? 6);
-          // If renderUnitResult truncated to "Too Bulky!", stash the real value for copy
-          if (resultSpan.textContent === 'Too Bulky!') {
-            resultSpan.dataset.copyValue = buildAstText(result.unitAst, boxes.find(b => b.id === box.id)?.sigFigs ?? 6) ?? '';
-          } else {
-            delete resultSpan.dataset.copyValue;
-          }
+          // Always stash a plain-text copy value — textContent of CSS fractions drops the '/'
+          resultSpan.dataset.copyValue = buildAstText(result.unitAst, boxes.find(b => b.id === box.id)?.sigFigs ?? 6) ?? '';
           resultSpan.style.display = '';
           resultSpan.style.color = '';
           const warnText = formatUnitWarnings(result.warnings);

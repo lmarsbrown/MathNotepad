@@ -190,8 +190,12 @@ const SCALABLE_UNITS_SERIES = {
 // Compound unit simplifications — matched at display time (power=1 only).
 // These are not expanded during evaluation; they only affect how a base-unit
 // result is labelled when it exactly matches the given signature.
+// `units` is the SI base-unit signature; `factors` is the simplified form to display.
 const COMPOUND_UNIT_SIMPLIFICATIONS = [
-  { name: 'V/m', units: { kg: 1, m: 1, s: -3, A: -1 } },
+  { name: 'V/m',    units: { kg: 1, m: 1, s: -3, A: -1 },  factors: { V: 1, m: -1 } },
+  { name: 'm/s',    units: { m: 1, s: -1 },                  factors: { m: 1, s: -1 } },
+  { name: 'kg·m/s', units: { kg: 1, m: 1, s: -1 },          factors: { kg: 1, m: 1, s: -1 } },
+  { name: 'm/s²',   units: { m: 1, s: -2 },                  factors: { m: 1, s: -2 } },
 ];
 
 // All unit names sorted longest-first for greedy tokenizer matching.
@@ -1666,7 +1670,22 @@ function _simplifyTermUnits(term, atomMap) {
     }
   }
 
-  if (!baseName) return term;
+  if (!baseName) {
+    // Check compound unit simplifications (e.g. V/m, m/s).
+    for (const cu of COMPOUND_UNIT_SIMPLIFICATIONS) {
+      const cuEntries = Object.entries(cu.units).filter(([, e]) => e !== 0);
+      if (cuEntries.length === entries.length &&
+          entries.every(([u, e]) => cu.units[u] === e)) {
+        const factors = new Map();
+        for (const [atom, exp] of Object.entries(cu.factors)) {
+          if (!atomMap.has(atom)) atomMap.set(atom, { type: 'variable', name: atom });
+          factors.set(atom, exp);
+        }
+        return { coeff: si.coeff, factors };
+      }
+    }
+    return term;
+  }
 
   const scaled = _selectBestScale(baseName, basePower, displayCoeff);
   // If no ideal prefix found: fall back to base unit only when the original term has mixed
@@ -1729,25 +1748,42 @@ function _fromCanonical(terms, atomMap) {
   if (terms.length === 0) return mkNum(0);
 
   function termToAst(t) {
-    // Build factor nodes, filtering out zero-exponent entries.
-    const factorNodes = [];
-    for (const [key, exp] of [...t.factors.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    // Split factors into positive and negative exponents for fraction display.
+    const sorted = [...t.factors.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    const posNodes = [];
+    const negNodes = [];
+    for (const [key, exp] of sorted) {
       if (exp === 0) continue;
       const atomAst = atomMap.get(key);
       if (!atomAst) throw new Error(`unknown atom: ${key}`);
-      factorNodes.push(exp === 1 ? atomAst : mkCall('pow', atomAst, mkNum(exp)));
+      if (exp > 0) {
+        posNodes.push(exp === 1 ? atomAst : mkCall('pow', atomAst, mkNum(exp)));
+      } else {
+        const absExp = -exp;
+        negNodes.push(absExp === 1 ? atomAst : mkCall('pow', atomAst, mkNum(absExp)));
+      }
     }
 
     const absCoeff = Math.abs(t.coeff);
     const isNeg = t.coeff < 0;
 
     let node;
-    if (factorNodes.length === 0) {
+    if (posNodes.length === 0 && negNodes.length === 0) {
       node = mkNum(t.coeff);
-    } else {
-      // Combine factor nodes with mul.
-      node = factorNodes.reduce((acc, f) => mkCall('mul', acc, f));
+    } else if (negNodes.length === 0) {
+      // All positive exponents — no fraction needed.
+      node = posNodes.reduce((acc, f) => mkCall('mul', acc, f));
       if (absCoeff !== 1) node = mkCall('mul', mkNum(absCoeff), node);
+      if (isNeg) node = mkCall('neg', node);
+    } else {
+      // Mixed exponents — emit as coeff * div(numerator, denominator) so the
+      // coefficient appears beside the fraction rather than inside the numerator.
+      const numNode = posNodes.length > 0
+        ? posNodes.reduce((acc, f) => mkCall('mul', acc, f))
+        : mkNum(1);
+      const denNode = negNodes.reduce((acc, f) => mkCall('mul', acc, f));
+      const fracNode = mkCall('div', numNode, denNode);
+      node = absCoeff !== 1 ? mkCall('mul', mkNum(absCoeff), fracNode) : fracNode;
       if (isNeg) node = mkCall('neg', node);
     }
     return node;
@@ -1954,6 +1990,46 @@ function simplifyAst(ast) {
     const unitSimp = reduced.map(t => _simplifyTermUnits(t, atomMap));
     const rebuilt  = _fromCanonical(unitSimp, atomMap);
     // Post-pass: clean up any residual mul(1,x), neg(neg(x)), etc.
+    return _simplifyAstFallback(rebuilt);
+  } catch (_) {
+    return _simplifyAstFallback(ast);
+  }
+}
+
+/**
+ * Expand a canonical term fully to SI base units, or return it unchanged if it contains
+ * symbolic (non-unit) factors. Used by simplifyAstToBase.
+ * @param {{coeff: number, factors: Map<string,number>}} term
+ * @param {Map<string,object>} atomMap - atom name → AST node (mutated to add base unit entries)
+ * @returns {{coeff: number, factors: Map<string,number>}}
+ */
+function _expandTermToBaseUnits(term, atomMap) {
+  const si = _termToSISignature(term);
+  if (!si) return term; // contains symbolic non-unit variables — can't expand
+  const entries = Object.entries(si.siUnits).filter(([, e]) => e !== 0);
+  if (entries.length === 0) return { coeff: si.coeff, factors: new Map() };
+  const factors = new Map();
+  for (const [u, e] of entries) {
+    if (!atomMap.has(u)) atomMap.set(u, { type: 'variable', name: u });
+    factors.set(u, e);
+  }
+  return { coeff: si.coeff, factors };
+}
+
+/**
+ * Like simplifyAst but expands all unit terms to SI base units instead of
+ * collapsing them to named derived units (N, J, Pa, …).
+ * @param {object} ast - AST node
+ * @returns {object} simplified AST with all units in SI base form
+ */
+function simplifyAstToBase(ast) {
+  if (ast.type !== 'call') return ast;
+  try {
+    const atomMap = new Map();
+    const terms   = _toCanonical(ast, atomMap);
+    const reduced = _combineTerms(terms, atomMap);
+    const expanded = reduced.map(t => _expandTermToBaseUnits(t, atomMap));
+    const rebuilt  = _fromCanonical(expanded, atomMap);
     return _simplifyAstFallback(rebuilt);
   } catch (_) {
     return _simplifyAstFallback(ast);
@@ -2347,7 +2423,7 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
  * - Equalities where LHS is not a single identifier produce
  *   { boolValue: true|false } using epsilon=1e-9 for floating-point tolerance
  */
-function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false, useUnits = false, useSymbolic = false } = {}) {
+function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false, useUnits = false, useSymbolic = false, useBaseUnits = false } = {}) {
   const results  = new Map();   // exprId → { value } | { boolValue } | { error } | { unitAst, warnings }
   const allValues = new Map();  // variable name → number (includes disabled defs)
 
@@ -2521,7 +2597,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         const val = evaluateAstSymbolic(ast, unitValues, funcDefs, { useSymbolic, warnings });
         if (val.type === 'number') return { value: val.value };
         let unitAst = val;
-        try { unitAst = simplifyAst(val); } catch (_) {}
+        try { unitAst = useBaseUnits ? simplifyAstToBase(val) : simplifyAst(val); } catch (_) {}
         return { unitAst, warnings };
       }
       const val = evaluateAst(ast, allValues, funcDefs);
@@ -2558,7 +2634,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         if (useUnits && unitValues.has(lhsVarName)) {
           const v = unitValues.get(lhsVarName);
           if (typeof v === 'number') results.set(e.id, { value: v });
-          else { let unitAst = v; try { unitAst = simplifyAst(v); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
+          else { let unitAst = v; try { unitAst = useBaseUnits ? simplifyAstToBase(v) : simplifyAst(v); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
         } else if (!useUnits && allValues.has(lhsVarName)) {
           results.set(e.id, { value: allValues.get(lhsVarName) });
         } else {
