@@ -170,7 +170,13 @@ function createPreviewElement(box) {
     for (const expr of (box.expressions || [])) {
       if (!expr.enabled) continue;
       const latex = (expr.latex || '').trim();
-      if (!latex) continue;
+      if (!latex) {
+        // Blank expression acts as a vertical spacer line
+        const spacer = document.createElement('div');
+        spacer.className = 'preview-calc-spacer';
+        wrapper.appendChild(spacer);
+        continue;
+      }
       const result = results.get(expr.id);
       const div = document.createElement('div');
       div.className = 'preview-math';
@@ -395,6 +401,17 @@ async function updatePreview() {
       }
     }
   }
+
+  // Unwrap calc box wrappers so each expression is a direct page child.
+  // Children are cloned so the cached wrapper element keeps its rendered content
+  // for reuse on the next update cycle. Cloned SVGs display correctly since
+  // MathJax embeds all dimensions in attributes.
+  pageDiv.querySelectorAll('.preview-calc-box').forEach(wrapper => {
+    const parent = wrapper.parentNode;
+    if (!parent) return;
+    Array.from(wrapper.children).forEach(c => parent.insertBefore(c.cloneNode(true), wrapper));
+    parent.removeChild(wrapper);
+  });
 
   paginatePreview();  // split content across separate page divs
   applyPreviewZoom(); // apply after MathJax renders so it measures at natural size

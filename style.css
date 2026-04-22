@@ -1718,6 +1718,10 @@ body {
   margin: 0;
 }
 
+.preview-calc-spacer {
+  height: 1em;
+}
+
 /* ── Image box ── */
 .box-image {
   flex-direction: column;

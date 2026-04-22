@@ -27,6 +27,9 @@ Please add comments to every function you write in JS doc format explaining what
 
 If you are unsure how to follow a policy in this file, ask the user. After clarification, add a worked example under Policy Examples in docs.md explaining the confusion and resolution.
 
+## commit.md
+Every time you make a change, add a brief summary of that change to commit.md in the style of a git commit message. Commit.md will become a commit message eventually. When updating commit.md make sure that it stays up to date. If you do something, and then undo it before making the commit there should not be two separate items in commit.md saying you added the thing and then deleted it. Instead, you should just the part of the commit message corresponding to what was later removed. 
+
 ## docs.md
 
 docs.md is a file containing all of the relevant information for what this code base does, how it works, and how to modify, maintain, and add to it. The purpose of this file is to act as a reference to help you understand how to edit the code or add new features without having to read through the entire code base. docs.md will be maintained entirely by you. Update it when you make a change that would substantially affect your future workflow, or that invalidates something already documented. Minor bug fixes or small style tweaks do not require a docs.md update. 
