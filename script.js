@@ -55,9 +55,12 @@ const imageObjectUrls = new Map();        // boxId → blob object URL (revoke o
 
 // ── Calc box state ────────────────────────────────────────────────────────────
 let calcExprNextId = 1;
+let calcTextNextId = 1;
 let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
+let calcTextAreaMap = new Map();    // boxId → Map<exprId, HTMLTextAreaElement>
 let calcUpdateFnsMap = new Map();   // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns = new Map();     // boxId → (afterExprId?: string) => void
+let calcAddTextFns = new Map();     // boxId → (afterExprId?: string) => void
 let calcPendingUpdate = new Set();  // boxIds with a pending rAF update
 
 const GRAPH_RENDER_DEBOUNCE_MS = 300; // debounce delay (ms) between typing in a graph expression and re-rendering
@@ -667,6 +670,11 @@ function commitCalcBox(boxId) {
   const expressions = [];
   for (const row of rows) {
     const exprId = row.dataset.exprId;
+    if (row.dataset.rowType === 'text') {
+      const ta = row.querySelector('.calc-text-input');
+      expressions.push({ id: exprId, type: 'text', text: ta ? ta.value : '', latex: '' });
+      continue;
+    }
     const toggle = row.querySelector('.expr-toggle');
     const enabled = toggle ? toggle.getAttribute('aria-pressed') === 'true' : true;
     const field = fieldMap.get(exprId);
@@ -679,8 +687,10 @@ function commitCalcBox(boxId) {
 
 function cleanupCalcBox(boxId) {
   calcMqFields.delete(boxId);
+  calcTextAreaMap.delete(boxId);
   calcUpdateFnsMap.delete(boxId);
   calcAddExprFns.delete(boxId);
+  calcAddTextFns.delete(boxId);
   calcPendingUpdate.delete(boxId);
 }
 
@@ -694,9 +704,14 @@ function serializeToLatex(boxArray) {
     else if (b.type === 'h3') serialized = `\\subsubsection{${b.content}}`;
     else if (b.type === 'pagebreak') serialized = '\\newpage';
     else if (b.type === 'calc') {
-      const exprLines = (b.expressions || []).map(e =>
-        `% ${e.id} ${e.enabled ? 'on' : 'off'} ${e.latex}`
-      );
+      const exprLines = (b.expressions || []).map(e => {
+        if (e.type === 'text') {
+          // Encode backslashes then newlines so the format stays single-line
+          const encoded = (e.text || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n');
+          return `% ${e.id} text ${encoded}`;
+        }
+        return `% ${e.id} ${e.enabled ? 'on' : 'off'} ${e.latex}`;
+      });
       const defsFlag     = b.showResultsDefs !== false ? '{showdefs}' : '';
       const bareFlag     = b.showResultsBare !== false ? '{showbare}' : '';
       const basicFlag    = b.physicsBasic ? '{physics_basic}' : '';
@@ -844,17 +859,25 @@ function parseFromLatex(src) {
       while (i < lines.length && !lines[i].startsWith('\\end{calc}')) {
         const el = lines[i].trim();
         if (el.startsWith('% ')) {
-          // format: "<id> <on|off> <latex...>"
           const rest = el.slice(2);
           const parts = rest.split(' ');
           if (parts.length >= 2) {
-            const exprId  = parts[0];
-            const enabled = parts[1] === 'on';
-            const latex   = parts.slice(2).join(' ');
-            expressions.push({ id: exprId, latex, enabled });
-            // Keep calcExprNextId above all parsed ids
-            const m = exprId.match(/^ce(\d+)$/);
-            if (m) calcExprNextId = Math.max(calcExprNextId, parseInt(m[1]) + 1);
+            const exprId = parts[0];
+            if (parts[1] === 'text') {
+              // Text row: "% <id> text <encoded-text>"
+              const encoded = parts.slice(2).join(' ');
+              const text = encoded.replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
+              expressions.push({ id: exprId, type: 'text', text, latex: '', enabled: true });
+              const m = exprId.match(/^ct(\d+)$/);
+              if (m) calcTextNextId = Math.max(calcTextNextId, parseInt(m[1]) + 1);
+            } else {
+              // Expression row: "% <id> <on|off> <latex...>"
+              const enabled = parts[1] === 'on';
+              const latex   = parts.slice(2).join(' ');
+              expressions.push({ id: exprId, latex, enabled });
+              const m = exprId.match(/^ce(\d+)$/);
+              if (m) calcExprNextId = Math.max(calcExprNextId, parseInt(m[1]) + 1);
+            }
           }
         }
         i++;
@@ -1368,8 +1391,9 @@ function createBoxElement(box) {
     // Prevent default for calc box clicks outside MQ fields / interactive controls so the
     // currently-focused MQ field doesn't blur (causing the focused outline to flash off).
     // The click handler re-focuses the correct expression explicitly.
+    // Exclude textarea so calc text rows can receive focus naturally.
     if (box.type === 'calc' && !mousedownInMqField
-        && !e.target.closest('button') && !e.target.closest('input')) {
+        && !e.target.closest('button') && !e.target.closest('input') && !e.target.closest('textarea')) {
       e.preventDefault();
     }
   });
@@ -1377,7 +1401,7 @@ function createBoxElement(box) {
     const wasMqDrag = mousedownInMqField;
     mousedownInMqField = false;
     if (e.target.closest('.delete-btn') || e.target.closest('.box-drag-handle')) return;
-    if (e.target.closest('.mq-editable-field') || e.target.closest('.text-input')) return;
+    if (e.target.closest('.mq-editable-field') || e.target.closest('.text-input') || e.target.closest('.calc-text-input')) return;
     if (e.target.closest('.calc-toolbar') || e.target.closest('.calc-expr-result')) return;
     if (box.type === 'math') {
       const field = mqFields.get(box.id);
@@ -1386,7 +1410,7 @@ function createBoxElement(box) {
       setFocused(box.id, div);
     } else if (box.type === 'calc') {
       if (wasMqDrag) return; // Don't steal focus when user was dragging to select in a MQ field
-      // Focus the expression nearest to the click position
+      // Focus the expression/text row nearest to the click position
       const wrappers = [...div.querySelectorAll('.expr-wrapper')];
       if (!wrappers.length) return;
       let nearest = wrappers[0];
@@ -1397,8 +1421,12 @@ function createBoxElement(box) {
         const d = Math.abs(e.clientY - cy);
         if (d < minDist) { minDist = d; nearest = w; }
       }
-      const field = calcMqFields.get(box.id)?.get(nearest.dataset.exprId);
-      if (field) field.el().querySelector('textarea')?.focus({ preventScroll: true });
+      if (nearest.dataset.rowType === 'text') {
+        nearest.querySelector('.calc-text-input')?.focus();
+      } else {
+        const field = calcMqFields.get(box.id)?.get(nearest.dataset.exprId);
+        if (field) field.el().querySelector('textarea')?.focus({ preventScroll: true });
+      }
     } else {
       const ta = div.querySelector('.text-input');
       if (ta) ta.focus();
@@ -1968,9 +1996,27 @@ function createBoxElement(box) {
     exprList.className = 'calc-expr-list';
 
     const calcFieldMap = new Map();   // exprId → MQField
+    const calcTaMap   = new Map();    // exprId → HTMLTextAreaElement
     const calcUpdateFns = new Map();  // exprId → (resultMap) => void
     calcMqFields.set(box.id, calcFieldMap);
+    calcTextAreaMap.set(box.id, calcTaMap);
     calcUpdateFnsMap.set(box.id, calcUpdateFns);
+
+    /**
+     * Focus a calc row (expression or text) by exprId.
+     * @param {string} exprId - The expression/text row id to focus.
+     * @param {number} dir - 1 = arriving from above (focus start), -1 = arriving from below (focus end).
+     */
+    function focusCalcRowById(exprId, dir) {
+      const field = calcFieldMap.get(exprId);
+      if (field) { field.focus(); return; }
+      const ta = calcTaMap.get(exprId);
+      if (ta) {
+        ta.focus();
+        const pos = dir === -1 ? ta.value.length : 0;
+        ta.selectionStart = ta.selectionEnd = pos;
+      }
+    }
 
     // ── Helper: create one expression row ────────────────────────────────────
     function createCalcExprRow(expr) {
@@ -2014,9 +2060,9 @@ function createBoxElement(box) {
           const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
           const idx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
           if (dir === 1 && idx < wrappers.length - 1) {
-            calcFieldMap.get(wrappers[idx + 1].dataset.exprId)?.focus();
+            focusCalcRowById(wrappers[idx + 1].dataset.exprId, 1);
           } else if (dir === -1 && idx > 0) {
-            calcFieldMap.get(wrappers[idx - 1].dataset.exprId)?.focus();
+            focusCalcRowById(wrappers[idx - 1].dataset.exprId, -1);
           } else {
             const boxIdx = boxes.findIndex(b => b.id === box.id);
             if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
@@ -2028,7 +2074,7 @@ function createBoxElement(box) {
           const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
           if (wrappers.length > 1) {
             const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
-            calcFieldMap.get(focusTarget)?.focus();
+            focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
           }
           const idx = boxes.findIndex(b => b.id === box.id);
           if (idx !== -1) {
@@ -2041,6 +2087,13 @@ function createBoxElement(box) {
           commitCalcBox(box.id);
           scheduleCalcUpdate(box.id);
         },
+      });
+
+      // Double-click → scroll preview to this specific expression and blink it
+      wrapper.addEventListener('dblclick', e => {
+        if (!isPreviewOpen) return;
+        e.stopPropagation();
+        scrollAndHighlightPreview(box.id, expr.id);
       });
 
       // Error line (shown below the main row when this expression has an error)
@@ -2147,38 +2200,161 @@ function createBoxElement(box) {
       return wrapper;
     }
 
+    // ── Helper: create one text annotation row ────────────────────────────────
+    /**
+     * Creates a text annotation row inside a calc box.
+     * Renders as a plain textarea with inline-LaTeX support (same as a text box).
+     * @param {{ id: string, text: string }} expr - The text row data.
+     * @returns {HTMLElement} The wrapper element.
+     */
+    function createCalcTextRow(expr) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'expr-wrapper';
+      wrapper.dataset.exprId = expr.id;
+      wrapper.dataset.rowType = 'text';
+
+      // Double-click → scroll preview to this specific text row and blink it
+      wrapper.addEventListener('dblclick', e => {
+        if (!isPreviewOpen) return;
+        e.stopPropagation();
+        scrollAndHighlightPreview(box.id, expr.id);
+      });
+
+      const row = document.createElement('div');
+      row.className = 'calc-text-row';
+
+      const ta = document.createElement('textarea');
+      ta.className = 'calc-text-input';
+      ta.rows = 1;
+      ta.value = expr.text || '';
+      ta.placeholder = 'Text…';
+
+      const autoResize = () => {
+        ta.style.height = '1px';
+        ta.style.height = ta.scrollHeight + 'px';
+      };
+      requestAnimationFrame(autoResize);
+
+      ta.addEventListener('input', () => {
+        autoResize();
+        // Directly update this expression in boxes[], then sync — same pattern as regular text boxes
+        const boxIdx = boxes.findIndex(b => b.id === box.id);
+        if (boxIdx !== -1) {
+          const exprIdx = boxes[boxIdx].expressions?.findIndex(e => e.id === expr.id) ?? -1;
+          if (exprIdx !== -1) boxes[boxIdx].expressions[exprIdx].text = ta.value;
+        }
+        syncToText();
+      });
+
+      ta.addEventListener('keydown', e => {
+        // Enter → add expression row after this text row
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const addAfter = calcAddExprFns.get(box.id);
+          if (addAfter) addAfter(expr.id);
+          return;
+        }
+        // Backspace on empty → delete row, focus adjacent
+        if (e.key === 'Backspace' && ta.value === '') {
+          e.preventDefault();
+          const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+          const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+          if (wrappers.length > 1) {
+            const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+            focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
+          }
+          const idx = boxes.findIndex(b => b.id === box.id);
+          if (idx !== -1) {
+            const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+            if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+          }
+          calcTaMap.delete(expr.id);
+          wrapper.remove();
+          commitCalcBox(box.id);
+          return;
+        }
+        // Arrow up at start → move to previous row
+        if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+          e.preventDefault();
+          const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+          const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+          if (rowIdx > 0) {
+            focusCalcRowById(wrappers[rowIdx - 1].dataset.exprId, -1);
+          } else {
+            const boxIdx = boxes.findIndex(b => b.id === box.id);
+            if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+          }
+          return;
+        }
+        // Arrow down at end → move to next row
+        if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+          e.preventDefault();
+          const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+          const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+          if (rowIdx < wrappers.length - 1) {
+            focusCalcRowById(wrappers[rowIdx + 1].dataset.exprId, 1);
+          } else {
+            const boxIdx = boxes.findIndex(b => b.id === box.id);
+            if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+          }
+          return;
+        }
+      });
+
+      ta.addEventListener('focusin',  () => setFocused(box.id, div));
+      ta.addEventListener('focusout', (e) => {
+        if (!div.contains(e.relatedTarget)) clearFocused(box.id, div);
+      });
+
+      calcTaMap.set(expr.id, ta);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'expr-delete';
+      delBtn.textContent = '×';
+      delBtn.addEventListener('mousedown', e => e.preventDefault());
+      delBtn.addEventListener('click', () => {
+        const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
+        const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+        if (wrappers.length > 1) {
+          const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+          focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
+        }
+        const idx = boxes.findIndex(b => b.id === box.id);
+        if (idx !== -1) {
+          const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+          if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+        }
+        calcTaMap.delete(expr.id);
+        wrapper.remove();
+        commitCalcBox(box.id);
+      });
+
+      row.appendChild(ta);
+      row.appendChild(delBtn);
+      wrapper.appendChild(row);
+      return wrapper;
+    }
+
     // Populate expression list
     for (const expr of (box.expressions || [])) {
-      exprList.appendChild(createCalcExprRow(expr));
+      exprList.appendChild(expr.type === 'text' ? createCalcTextRow(expr) : createCalcExprRow(expr));
     }
     div.appendChild(exprList);
 
     // ── Add expression button ─────────────────────────────────────────────────
-    const addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.className = 'calc-add-btn';
-    addBtn.textContent = '+ Expression';
-    addBtn.addEventListener('mousedown', e => e.preventDefault());
-    addBtn.addEventListener('click', () => {
-      const addAfter = calcAddExprFns.get(box.id);
-      if (addAfter) addAfter(null); // null = append at end
-    });
-    div.appendChild(addBtn);
-
     // Apply initial collapsed state
     if (box.collapsed) {
       exprList.style.display = 'none';
-      addBtn.style.display = 'none';
     }
 
-    // Wire collapse button now that exprList and addBtn exist
+    // Wire collapse button now that exprList exists
     collapseBtn.addEventListener('click', () => {
       const idx = boxes.findIndex(b => b.id === box.id);
       if (idx === -1) return;
       boxes[idx].collapsed = !boxes[idx].collapsed;
       const isCollapsed = boxes[idx].collapsed;
-      exprList.style.display = isCollapsed ? 'none' : '';
-      addBtn.style.display   = isCollapsed ? 'none' : '';
+      exprList.style.display  = isCollapsed ? 'none' : '';
       collapseBtn.textContent = isCollapsed ? '▸' : '▾';
       syncToText(false); // collapsed state doesn't affect preview output
     });
@@ -2195,7 +2371,6 @@ function createBoxElement(box) {
         } else {
           boxes[idx].expressions.push(newExpr);
         }
-        // Insert into DOM after the correct row
         const afterRow = exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
         const newRow = createCalcExprRow(newExpr);
         if (afterRow) {
@@ -2207,7 +2382,6 @@ function createBoxElement(box) {
         boxes[idx].expressions.push(newExpr);
         exprList.appendChild(createCalcExprRow(newExpr));
       }
-      // Reflow + focus
       const newField = calcFieldMap.get(newExpr.id);
       if (newField) {
         newField.reflow();
@@ -2217,6 +2391,35 @@ function createBoxElement(box) {
       scheduleCalcUpdate(box.id);
     };
     calcAddExprFns.set(box.id, addExprAfter);
+
+    // ── Register the "add text row after" function ────────────────────────────
+    const addTextAfter = (afterExprId) => {
+      const idx = boxes.findIndex(b => b.id === box.id);
+      if (idx === -1) return;
+      const newExpr = { id: 'ct' + (calcTextNextId++), type: 'text', text: '', latex: '' };
+      if (afterExprId) {
+        const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+        if (exprIdx !== -1) {
+          boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+        } else {
+          boxes[idx].expressions.push(newExpr);
+        }
+        const afterRow = exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
+        const newRow = createCalcTextRow(newExpr);
+        if (afterRow) {
+          exprList.insertBefore(newRow, afterRow.nextSibling);
+        } else {
+          exprList.appendChild(newRow);
+        }
+      } else {
+        boxes[idx].expressions.push(newExpr);
+        exprList.appendChild(createCalcTextRow(newExpr));
+      }
+      const newTa = calcTaMap.get(newExpr.id);
+      if (newTa) setTimeout(() => newTa.focus(), 0);
+      commitCalcBox(box.id);
+    };
+    calcAddTextFns.set(box.id, addTextAfter);
 
     div.appendChild(deleteBtn);
 
@@ -2508,13 +2711,25 @@ function focusBoxAtEdge(id, edge) {
     setTimeout(() => field.focus(), 0);
     return;
   }
-  // Calc box: focus first or last expression field using DOM order
-  const calcMap = calcMqFields.get(id);
-  if (calcMap && calcMap.size > 0) {
-    const wrappers = [...boxList.querySelectorAll(`[data-id="${id}"] .expr-wrapper`)];
+  // Calc box: focus first or last row (expression or text) using DOM order
+  const wrappers = [...boxList.querySelectorAll(`[data-id="${id}"] .expr-wrapper`)];
+  if (wrappers.length > 0) {
     const targetWrapper = edge === 'start' ? wrappers[0] : wrappers[wrappers.length - 1];
-    const target = targetWrapper ? calcMap.get(targetWrapper.dataset.exprId) : null;
-    if (target) { setTimeout(() => target.focus(), 0); return; }
+    const exprId = targetWrapper.dataset.exprId;
+    if (targetWrapper.dataset.rowType === 'text') {
+      const ta = targetWrapper.querySelector('.calc-text-input');
+      if (ta) {
+        setTimeout(() => {
+          ta.focus();
+          const pos = edge === 'start' ? 0 : ta.value.length;
+          ta.setSelectionRange(pos, pos);
+        }, 0);
+        return;
+      }
+    } else {
+      const target = calcMqFields.get(id)?.get(exprId);
+      if (target) { setTimeout(() => target.focus(), 0); return; }
+    }
   }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
   if (el) {
@@ -3057,7 +3272,23 @@ function pasteBox() {
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (e.altKey && !e.ctrlKey && !e.metaKey) {
-    if (e.key === 't') { e.preventDefault(); appendBox('text'); return; }
+    if (e.key === 't') {
+      e.preventDefault();
+      // Inside a calc box: insert a text row after the focused row
+      if (focusedBoxId) {
+        const focusedBox = boxes.find(b => b.id === focusedBoxId);
+        if (focusedBox && focusedBox.type === 'calc') {
+          const exprIdx = getFocusedCalcExprIdx();
+          const wrappers = [...boxList.querySelectorAll(`[data-id="${focusedBoxId}"] .expr-wrapper`)];
+          const afterId = exprIdx >= 0 ? wrappers[exprIdx]?.dataset.exprId ?? null : null;
+          const addText = calcAddTextFns.get(focusedBoxId);
+          if (addText) addText(afterId);
+          return;
+        }
+      }
+      appendBox('text');
+      return;
+    }
     if (e.key === 'm') { e.preventDefault(); appendBox('math'); return; }
   }
 

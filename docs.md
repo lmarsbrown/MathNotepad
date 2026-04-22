@@ -755,17 +755,23 @@ Navigation: Enter in a row adds a new row after it; arrow keys at field edges cr
   useBaseUnits: false,     // expand all unit results to SI base units (m, kg, s, A, K, mol, cd)
   hidden: false,           // suppress all preview output (expressions still evaluate in editor)
   sigFigs: 6,              // significant figures for numeric result display
-  expressions: [{ id, latex, enabled }]
+  expressions: [
+    { id, latex, enabled },           // expression row
+    { id, type: 'text', text, latex: '' }  // text annotation row
+  ]
 }
 ```
 Created by `makeCalcBox(id?)` (script.js:288).
 
-**Module-level state (script.js:50–54):**
+**Module-level state (script.js:56–63):**
 ```js
 let calcExprNextId   = 1;
+let calcTextNextId   = 1;
 let calcMqFields     = new Map();      // boxId → Map<exprId, MQField>
+let calcTextAreaMap  = new Map();      // boxId → Map<exprId, HTMLTextAreaElement>
 let calcUpdateFnsMap = new Map();      // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns   = new Map();      // boxId → (afterExprId?) => void
+let calcAddTextFns   = new Map();      // boxId → (afterExprId?) => void
 let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 ```
 
@@ -795,7 +801,7 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
     .calc-sigfigs-label     "sf:" label
       .calc-sigfigs-input   number input (1–15, default 6)
   .calc-expr-list
-    .expr-wrapper           (shared with graph editor rows)
+    .expr-wrapper[data-row-type unset]     (expression row)
       .expr-row
         .expr-toggle        pill button
         .expr-mq            MathQuill field
@@ -803,16 +809,29 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
         .expr-delete        × button
       .calc-expr-error      error text (hidden unless error)
       .calc-unit-warning    warning text (hidden unless unit mismatch)
+    .expr-wrapper[data-row-type="text"]    (text annotation row)
+      .calc-text-row
+        textarea.calc-text-input   plain text with "Text…" placeholder
+        .expr-delete               × button
   .calc-add-btn             "+ Expression"
+  .calc-add-btn             "+ Text"
   .delete-btn
 ```
 
 **Inner function `createCalcExprRow`** — closure inside `createBoxElement`. Wires:
 - Toggle click → `commitCalcBox` + `scheduleCalcUpdate`
 - MQ `edit` → `commitCalcBox` + `scheduleCalcUpdate`
-- MQ `enter` → insert new row after current
-- MQ `moveOutOf/upOutOf/downOutOf` → navigate within box; at edges, call `focusBoxAtEdge`
-- MQ `keydown` Backspace on empty → delete row, focus adjacent
+- MQ `enter` → insert new expression row after current
+- MQ `moveOutOf/upOutOf/downOutOf` → navigate within box via `focusCalcRowById`; at edges, call `focusBoxAtEdge`
+- MQ `keydown` Backspace on empty → delete row, focus adjacent via `focusCalcRowById`
+
+**Inner function `createCalcTextRow`** — closure inside `createBoxElement`. Text annotation rows:
+- Textarea auto-resizes; `input` → `commitCalcBox`
+- Enter → add expression row after (via `calcAddExprFns`)
+- Backspace on empty → delete row, focus adjacent
+- Arrow up at start / down at end → cross to adjacent row or box
+
+**`focusCalcRowById(exprId, dir)`** — helper inside `createBoxElement`. Focuses an expression row (via MQ field) or text row (via textarea). `dir=1` focuses at start, `dir=-1` at end (for text rows).
 
 **`diffAndApply` behaviour:** Calc boxes always fully rebuild (cleanupCalcBox + createBoxElement + replaceChild) even when the id matches, so expression list stays in sync with source-panel edits.
 
@@ -821,9 +840,10 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 \begin{calc}{showdefs}{showbare}{physics}{units}{symbolic}{baseunits}{sf=3}
 % ce1 on x=5
 % ce2 off y=x^{2}
+% ct1 text Some annotation with \$inline math\$
 \end{calc}
 ```
-Each flag token is only emitted when the corresponding setting is `true` (or non-default for `{sf=N}`, which is omitted when sigFigs is 6). Legacy `{showresults}` (old format) sets both `showResultsDefs` and `showResultsBare`. Each expression line: `% <id> <on|off> <latex>`. Parsed via `\begin{calc}` block handler in `parseFromLatex`.
+Each flag token is only emitted when the corresponding setting is `true` (or non-default for `{sf=N}`, which is omitted when sigFigs is 6). Legacy `{showresults}` (old format) sets both `showResultsDefs` and `showResultsBare`. Expression lines: `% <id> <on|off> <latex>`. Text annotation lines: `% <id> text <content>` where `\n` and `\\` are escaped. Parsed via `\begin{calc}` block handler in `parseFromLatex`.
 
 **Preview rendering** (`createPreviewElement`, `type === 'calc'` branch, script.js:2106):
 - Calls `evaluateCalcExpressions` fresh on each render, passing all flags

@@ -1722,6 +1722,37 @@ body {
   height: 1em;
 }
 
+.preview-calc-text {
+  margin: 2px 0;
+}
+
+/* Calc text annotation row — textarea inside calc box */
+.calc-text-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+}
+
+.calc-text-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #cdd6f4;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: var(--eq-font-size, 16px);
+  line-height: 1.5;
+  resize: none;
+  overflow: hidden;
+  min-height: 24px;
+}
+
+.calc-text-input::placeholder {
+  color: #585b70;
+}
+
 /* ── Image box ── */
 .box-image {
   flex-direction: column;

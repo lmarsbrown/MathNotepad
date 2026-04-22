@@ -168,12 +168,25 @@ function createPreviewElement(box) {
     if (box.hidden) return wrapper;
     const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
     for (const expr of (box.expressions || [])) {
+      if (expr.type === 'text') {
+        // Text annotation row: render using the same inline-LaTeX pipeline as text boxes
+        const p = document.createElement('p');
+        p.className = 'preview-text preview-calc-text';
+        p.innerHTML = processTextContent(expr.text || '');
+        // Stamp IDs so the element survives wrapper removal and can be found by scrollAndHighlightPreview
+        p.dataset.boxId  = box.id;
+        p.dataset.exprId = expr.id;
+        wrapper.appendChild(p);
+        continue;
+      }
       if (!expr.enabled) continue;
       const latex = (expr.latex || '').trim();
       if (!latex) {
         // Blank expression acts as a vertical spacer line
         const spacer = document.createElement('div');
         spacer.className = 'preview-calc-spacer';
+        spacer.dataset.boxId  = box.id;
+        spacer.dataset.exprId = expr.id;
         wrapper.appendChild(spacer);
         continue;
       }
@@ -220,6 +233,9 @@ function createPreviewElement(box) {
         previewLatex = `\\[${displayLatex}\\]`;
       }
       div.textContent = previewLatex;
+      // Stamp IDs so the element survives wrapper removal and can be found by scrollAndHighlightPreview
+      div.dataset.boxId  = box.id;
+      div.dataset.exprId = expr.id;
       wrapper.appendChild(div);
     }
     return wrapper;
@@ -325,7 +341,7 @@ async function updatePreview() {
     // Graph boxes always bypass the cache (snapshot url changes independently).
     const needsCache = box.type !== 'graph' && box.type !== 'pagebreak' && box.type !== 'image';
     const cacheKey = box.type === 'calc'
-      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|h${box.hidden ? '1' : '0'}|${(box.expressions || []).map(e => `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
+      ? `calc|${box.showResultsDefs !== false ? '1' : '0'}|${box.showResultsBare !== false ? '1' : '0'}|${box.physicsBasic ? '1' : '0'}|${box.physicsEM ? '1' : '0'}|${box.physicsChem ? '1' : '0'}|sf${box.sigFigs ?? 6}|h${box.hidden ? '1' : '0'}|${(box.expressions || []).map(e => e.type === 'text' ? `${e.id}:text:${e.text ?? ''}` : `${e.id}:${e.enabled ? '1' : '0'}:${e.latex}`).join('|')}`
       : `${box.type}|${box.content}`;
     const cached = needsCache ? previewBoxCache.get(box.id) : null;
 
@@ -594,10 +610,17 @@ previewContent.addEventListener('click', e => {
   }
 });
 
-function scrollAndHighlightPreview(boxId) {
-  // Find the element in the preview that corresponds to this box.
-  // It may be wrapped in a .preview-highlight-box, so walk up one level.
-  let el = previewContent.querySelector(`[data-box-id="${boxId}"]`);
+/**
+ * Scrolls the preview panel to a box (or specific expression within a calc box) and blinks it.
+ * @param {string} boxId - The box to scroll to.
+ * @param {string} [exprId] - If provided, scroll to this specific expression within the box.
+ */
+function scrollAndHighlightPreview(boxId, exprId) {
+  // Prefer a specific expression; fall back to the first element for this box.
+  let el = exprId
+    ? previewContent.querySelector(`[data-box-id="${boxId}"][data-expr-id="${exprId}"]`)
+    : null;
+  if (!el) el = previewContent.querySelector(`[data-box-id="${boxId}"]`);
   if (!el) return;
   const target = el.parentElement?.classList.contains('preview-highlight-box') ? el.parentElement : el;
   // Scroll target into the center of the preview panel
