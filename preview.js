@@ -6,13 +6,32 @@
 // Applied to LaTeX strings in the preview only; boxes/source are left untouched.
 // IMPORTANT: call this BEFORE escapeHtml so that <-/-> are substituted before < and > are escaped.
 const BB_SUBS = {
-  'RR': '\\mathbb{R}',
+  'AA': '\\mathbb{A}',
+  'BB': '\\mathbb{B}',
   'CC': '\\mathbb{C}',
-  'ZZ': '\\mathbb{Z}',
-  'NN': '\\mathbb{N}',
-  'QQ': '\\mathbb{Q}',
+  'DD': '\\mathbb{D}',
+  'EE': '\\mathbb{E}',
   'FF': '\\mathbb{F}',
+  'GG': '\\mathbb{G}',
   'HH': '\\mathbb{H}',
+  'II': '\\mathbb{I}',
+  'JJ': '\\mathbb{J}',
+  'KK': '\\mathbb{K}',
+  'LL': '\\mathbb{L}',
+  'MM': '\\mathbb{M}',
+  'NN': '\\mathbb{N}',
+  'OO': '\\mathbb{O}',
+  'PP': '\\mathbb{P}',
+  'QQ': '\\mathbb{Q}',
+  'RR': '\\mathbb{R}',
+  'SS': '\\mathbb{S}',
+  'TT': '\\mathbb{T}',
+  'UU': '\\mathbb{U}',
+  'VV': '\\mathbb{V}',
+  'WW': '\\mathbb{W}',
+  'XX': '\\mathbb{X}',
+  'YY': '\\mathbb{Y}',
+  'ZZ': '\\mathbb{Z}',
 };
 /**
  * Splits a string by a single-character separator, ignoring separators inside
