@@ -133,6 +133,7 @@ function exitGraphMode() {
       graphRenderer.updateExpressions(box.expressions || []);
       graphRenderer.render(box.width || 600, box.height || 400, !!box.lightTheme);
       box._snapshotDataUrl = graphRenderer.canvas.toDataURL('image/png');
+      box.element = box.createElement(); // rebuild element to include snapshot thumbnail
 
       // Restore canvas-view bounds and save them for re-entry
       graphRenderer.xMin = savedXMin; graphRenderer.xMax = savedXMax;

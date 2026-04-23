@@ -552,7 +552,11 @@ function parseFromLatex(src) {
 
   // Apply any pending highlight metadata to a box object, then clear it.
   const applyPending = (obj) => {
-    if (pendingHighlight) { Object.assign(obj, pendingHighlight); pendingHighlight = null; }
+    if (pendingHighlight) {
+      Object.assign(obj, pendingHighlight);
+      obj.element.classList.toggle('box-is-highlighted', !!obj.highlighted);
+      pendingHighlight = null;
+    }
     return obj;
   };
 
@@ -581,12 +585,11 @@ function parseFromLatex(src) {
       }
       const inner = parseFromLatex(commentedLines.join('\n'));
 
-      let newBox = createBoxFromType(inner[0].type);
-
-      Object.assign(newBox, inner[0]);
-      newBox.commented = true;
-
-      if (inner.length > 0) result.push(applyPending(newBox));
+      if (inner.length > 0) {
+        inner[0].commented = true;
+        inner[0].element.classList.add('commented');
+        result.push(applyPending(inner[0]));
+      }
       continue;
     }
 
@@ -599,9 +602,7 @@ function parseFromLatex(src) {
     let matchedHeading = false;
     for (const { prefix, type, len } of headingPatterns) {
       if (line.startsWith(prefix) && line.endsWith('}')) {
-        let newBox = new HeaderBox(type);
-        newBox.content = line.slice(len, -1) ;
-        result.push(applyPending(newBox));
+        result.push(applyPending(new HeaderBox(type, line.slice(len, -1))));
         i++;
         matchedHeading = true;
         break;
@@ -636,26 +637,23 @@ function parseFromLatex(src) {
 
     // Calc block: \begin{calc} ... \end{calc}
     if (line.startsWith('\\begin{calc}')) {
-
-      let newBox = new CalcBox()
-      
       // Support legacy {showresults} (both on) and new separate {showdefs}/{showbare} flags
-      newBox.legacyAll = line.includes('{showresults}');
-      newBox.showResultsDefs = newBox.legacyAll || line.includes('{showdefs}');
-      newBox.showResultsBare = newBox.legacyAll || line.includes('{showbare}');
-      // Legacy {physics} flag enables all three groups.
-      newBox.legacyPhysics = line.includes('{physics}') && !line.includes('{physics_');
-      newBox.physicsBasic = newBox.legacyPhysics || line.includes('{physics_basic}');
-      newBox.physicsEM    = newBox.legacyPhysics || line.includes('{physics_em}');
-      newBox.physicsChem  = newBox.legacyPhysics || line.includes('{physics_chem}');
-      newBox.useUnits     = line.includes('{units}');
-      newBox.useSymbolic  = line.includes('{symbolic}');
-      newBox.useBaseUnits = line.includes('{baseunits}');
-      newBox.hidden      = line.includes('{hidden}');
-      newBox.collapsed   = line.includes('{collapsed}');
-      newBox.sfMatch     = line.match(/\{sf=(\d+)\}/);
-      newBox.sigFigs     = newBox.sfMatch ? parseInt(newBox.sfMatch[1], 10) : 6;
-      newBox.expressions = [];
+      const legacyAll     = line.includes('{showresults}');
+      const legacyPhysics = line.includes('{physics}') && !line.includes('{physics_');
+      const calcData = {
+        showResultsDefs: legacyAll || line.includes('{showdefs}'),
+        showResultsBare: legacyAll || line.includes('{showbare}'),
+        physicsBasic:    legacyPhysics || line.includes('{physics_basic}'),
+        physicsEM:       legacyPhysics || line.includes('{physics_em}'),
+        physicsChem:     legacyPhysics || line.includes('{physics_chem}'),
+        useUnits:        line.includes('{units}'),
+        useSymbolic:     line.includes('{symbolic}'),
+        useBaseUnits:    line.includes('{baseunits}'),
+        hidden:          line.includes('{hidden}'),
+        collapsed:       line.includes('{collapsed}'),
+        sigFigs:         (() => { const m = line.match(/\{sf=(\d+)\}/); return m ? parseInt(m[1], 10) : 6; })(),
+        expressions:     [],
+      };
       i++;
 
       while (i < lines.length && !lines[i].startsWith('\\end{calc}')) {
@@ -669,7 +667,7 @@ function parseFromLatex(src) {
               // Text row: "% <id> text <encoded-text>"
               const encoded = parts.slice(2).join(' ');
               const text = encoded.replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
-              newBox.expressions.push({ id: exprId, type: 'text', text, latex: '', enabled: true });
+              calcData.expressions.push({ id: exprId, type: 'text', text, latex: '', enabled: true });
               const m = exprId.match(/^ct(\d+)$/);
               if (m) calcTextNextId = Math.max(calcTextNextId, parseInt(m[1]) + 1);
             } else {
@@ -684,7 +682,7 @@ function parseFromLatex(src) {
               } else {
                 latex = parts.slice(2).join(' ');
               }
-              newBox.expressions.push({ id: exprId, latex, enabled, sliderMin, sliderMax });
+              calcData.expressions.push({ id: exprId, latex, enabled, sliderMin, sliderMax });
               const m = exprId.match(/^ce(\d+)$/);
               if (m) calcExprNextId = Math.max(calcExprNextId, parseInt(m[1]) + 1);
             }
@@ -693,19 +691,19 @@ function parseFromLatex(src) {
         i++;
       }
       i++; // consume \end{calc}
-      result.push(applyPending(newBox));
+      result.push(applyPending(new CalcBox(undefined, calcData)));
       continue;
     }
 
     // Graph block: \begin{graph}{W}{H} ... \end{graph}
     if (line.startsWith('\\begin{graph}')) {
-      let newBox = new GraphBox();
-
-      const m = line.match(/^\\begin\{graph\}\{(\d+)\}\{(\d+)\}(\{light\})?/);
-      newBox.width  = m ? parseInt(m[1]) : 600;
-      newBox.height = m ? parseInt(m[2]) : 400;
-      newBox.lightTheme = !!(m && m[3]);
-      newBox.expressions = [];
+      const gm = line.match(/^\\begin\{graph\}\{(\d+)\}\{(\d+)\}(\{light\})?/);
+      const graphData = {
+        width:       gm ? parseInt(gm[1]) : 600,
+        height:      gm ? parseInt(gm[2]) : 400,
+        lightTheme:  !!(gm && gm[3]),
+        expressions: [],
+      };
       i++;
       while (i < lines.length && !lines[i].startsWith('\\end{graph}')) {
         const el = lines[i].trim();
@@ -731,42 +729,42 @@ function parseFromLatex(src) {
               latexStart += 2;
             }
             const latex = parts.slice(latexStart).join(' ');
-            newBox.expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
+            graphData.expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
           }
         }
         i++;
       }
       i++; // consume \end{graph}
-      result.push(applyPending(newBox));
+      result.push(applyPending(new GraphBox(undefined, graphData)));
       continue;
     }
 
     // Image block: \begin{image} ... \end{image}
     if (line.startsWith('\\begin{image}')) {
-      let newBox = new ImageBox();
-
-      newBox.mode   = line.includes('{file}') ? 'file' : 'url';
-      newBox.locked = line.includes('{locked}');
-
+      const imageData = {
+        mode:     line.includes('{file}') ? 'file' : 'url',
+        locked:   line.includes('{locked}'),
+        src: '', alt: '', width: 0, height: 0, fit: 'locked', align: 'left', filename: '',
+      };
       i++;
       while (i < lines.length && !lines[i].startsWith('\\end{image}')) {
         const el = lines[i].trim();
         if (el.startsWith('% alt: ')) {
-          newBox.alt = el.slice(7);
+          imageData.alt = el.slice(7);
         } else if (el.startsWith('% size: ')) {
-          const m = el.slice(8).match(/^(\d+)x(\d+)$/);
-          if (m) { newBox.width = parseInt(m[1]); newBox.height = parseInt(m[2]); }
+          const m2 = el.slice(8).match(/^(\d+)x(\d+)$/);
+          if (m2) { imageData.width = parseInt(m2[1]); imageData.height = parseInt(m2[2]); }
         } else if (el.startsWith('% fit: ')) {
-          newBox.fit = el.slice(7).trim();
+          imageData.fit = el.slice(7).trim();
         } else if (el.startsWith('% align: ')) {
-          newBox.align = el.slice(9).trim();
+          imageData.align = el.slice(9).trim();
         } else if (el.startsWith('% ')) {
-          newBox.src = el.slice(2);
+          imageData.src = el.slice(2);
         }
         i++;
       }
       i++; // consume \end{image}
-      result.push(applyPending(newBox));
+      result.push(applyPending(new ImageBox(undefined, imageData)));
       continue;
     }
 
@@ -799,36 +797,30 @@ function rebuildBoxList() {
   const _wasInRebuild = _dbgInRebuild;
   _dbgInRebuild = true;
 
-  // Collect all existing box elements by id
-  const existing = new Map();
-  for (const el of boxList.children) {
-    existing.set(el.dataset.id, el);
-  }
-
   const currentIds = new Set(boxes.map(b => b.id));
 
-  // Remove elements for deleted boxes
-  for (const [id, el] of existing) {
-    if (!currentIds.has(id)) {
-      boxList.removeChild(el);
-      mqFields.delete(id);
-      boxResizers.delete(id);
-      cleanupCalcBox(id);
-      cleanupImageBox(id);
-      existing.delete(id);
+  // Clean up field maps for removed boxes
+  for (const [id] of mqFields) {
+    if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
+  }
+  for (const [id] of calcMqFields) {
+    if (!currentIds.has(id)) cleanupCalcBox(id);
+  }
+
+  // Remove stale DOM elements
+  for (const child of [...boxList.children]) {
+    if (!currentIds.has(child.dataset.id)) {
+      cleanupImageBox(child.dataset.id);
+      boxList.removeChild(child);
     }
   }
 
-  // Insert/reorder elements
+  // Insert/reorder using box.element
   for (let i = 0; i < boxes.length; i++) {
     const box = boxes[i];
-    let el = existing.get(box.id);
-    if (!el) {
-      el = box.createElement();
-    }
     const currentAtPos = boxList.children[i];
-    if (currentAtPos !== el) {
-      boxList.insertBefore(el, currentAtPos || null);
+    if (currentAtPos !== box.element) {
+      boxList.insertBefore(box.element, currentAtPos || null);
       reflowBox(box);
     }
   }
@@ -1005,22 +997,23 @@ function diffAndApply(newBoxes) {
     const existing = boxes[i];
     if (existing && existing.type === nb.type) {
       if (existing.type === 'graph' || existing.type === 'calc') {
-        // Preserve id but take all parsed fields (expressions, width, height, etc.)
-        return { ...nb, id: existing.id };
+        // Preserve id and element but take all parsed fields (expressions, width, height, etc.)
+        const savedId      = existing.id;
+        const savedElement = existing.element;
+        Object.assign(existing, nb);
+        existing.id      = savedId;
+        existing.element = savedElement;
+        return existing;
       }
-      // Reuse id, update content and commented state
-      return { ...existing, content: nb.content, commented: nb.commented };
+      // Reuse id and element, update content and commented state
+      existing.content   = nb.content;
+      existing.commented = nb.commented;
+      return existing;
     }
     return nb;
   });
 
   boxes = result;
-
-  // Update MQ fields in place where possible, rebuild for others
-  const existingEls = new Map();
-  for (const el of boxList.children) {
-    existingEls.set(el.dataset.id, el);
-  }
 
   // Remove extra DOM elements
   while (boxList.children.length > boxes.length) {
@@ -1046,8 +1039,8 @@ function diffAndApply(newBoxes) {
         // Calc boxes always rebuild their DOM so the expression list stays in sync
         // with any changes made via the LaTeX source panel.
         cleanupCalcBox(box.id);
-        const newEl = box.createElement();
-        boxList.replaceChild(newEl, existingEl);
+        box.element = box.createElement();
+        boxList.replaceChild(box.element, existingEl);
         reflowBox(box);
       } else {
         // Update content of existing box
@@ -1069,11 +1062,10 @@ function diffAndApply(newBoxes) {
         i, boxId: box.id, boxType: box.type,
         displacedId: existingEl?.dataset.id ?? null,
       });
-      const newEl = box.createElement();
       if (existingEl) {
-        boxList.insertBefore(newEl, existingEl);
+        boxList.insertBefore(box.element, existingEl);
       } else {
-        boxList.appendChild(newEl);
+        boxList.appendChild(box.element);
       }
       reflowBox(box);
     }
@@ -1323,30 +1315,28 @@ function pasteBox() {
 
   let newBox;
   if (boxClipboard.type === 'calc') {
-    newBox = new CalcBox();
-    // Reassign fresh ids to pasted expressions to avoid id collisions
-    newBox.expressions = (boxClipboard.expressions || []).map(e => ({
-      ...e, id: 'ce' + (calcExprNextId++)
-    }));
-    newBox.showResultsDefs = boxClipboard.showResultsDefs !== false;
-    newBox.showResultsBare = boxClipboard.showResultsBare !== false;
-    newBox.physicsBasic = !!boxClipboard.physicsBasic;
-    newBox.physicsEM    = !!boxClipboard.physicsEM;
-    newBox.physicsChem  = !!boxClipboard.physicsChem;
+    newBox = new CalcBox(undefined, {
+      expressions:    (boxClipboard.expressions || []).map(e => ({ ...e, id: 'ce' + (calcExprNextId++) })),
+      showResultsDefs: boxClipboard.showResultsDefs !== false,
+      showResultsBare: boxClipboard.showResultsBare !== false,
+      physicsBasic:    !!boxClipboard.physicsBasic,
+      physicsEM:       !!boxClipboard.physicsEM,
+      physicsChem:     !!boxClipboard.physicsChem,
+    });
   } else if (boxClipboard.type === 'image') {
-    newBox = new ImageBox();
-    newBox.mode     = boxClipboard.mode;
-    newBox.locked   = boxClipboard.locked;
-    newBox.src      = boxClipboard.src;
-    newBox.filename = boxClipboard.filename;
-    newBox.alt      = boxClipboard.alt;
-    newBox.width    = boxClipboard.width  || 0;
-    newBox.height   = boxClipboard.height || 0;
-    newBox.fit      = boxClipboard.fit    || 'locked';
-    newBox.align    = boxClipboard.align  || 'left';
+    newBox = new ImageBox(undefined, {
+      mode:     boxClipboard.mode,
+      locked:   boxClipboard.locked,
+      src:      boxClipboard.src,
+      filename: boxClipboard.filename,
+      alt:      boxClipboard.alt,
+      width:    boxClipboard.width  || 0,
+      height:   boxClipboard.height || 0,
+      fit:      boxClipboard.fit    || 'locked',
+      align:    boxClipboard.align  || 'left',
+    });
   } else {
-    newBox = createBoxFromType(boxClipboard.type);
-    newBox.content = boxClipboard.content;
+    newBox = createBoxFromType(boxClipboard.type, undefined, boxClipboard.content);
   }
 
   if (isEmpty) {

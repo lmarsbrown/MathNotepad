@@ -27,6 +27,8 @@ Please add comments to every function you write in JS doc format explaining what
 
 If you are unsure how to follow a policy in this file, ask the user. After clarification, add a worked example under Policy Examples in docs.md explaining the confusion and resolution.
 
+If the user asks "can you...", you should respond to it as a question. It is not just a polite way of requesting you do to do something.
+
 ## commit.md
 Every time you make a change, add a brief summary of that change to commit.md in the style of a git commit message. Commit.md will become a commit message eventually. When updating commit.md make sure that it stays up to date. If you do something, and then undo it before making the commit there should not be two separate items in commit.md saying you added the thing and then deleted it. Instead, you should just the part of the commit message corresponding to what was later removed. 
 

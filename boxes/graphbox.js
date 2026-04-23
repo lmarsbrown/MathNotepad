@@ -1,12 +1,13 @@
 class GraphBox extends Box{
-    constructor(id){
+    constructor(id, data={}){
         super("graph",id);
-        this.width = 600;
-        this.height = 400;
-        this.lightTheme = false;
-        this.expressions = [
+        this.width = data.width || 600;
+        this.height = data.height || 400;
+        this.lightTheme = !!data.lightTheme;
+        this.expressions = data.expressions || [
             { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 },
         ];
+        this.element = this.createElement();
     }
     createElement(){
         let div = super.createElement();

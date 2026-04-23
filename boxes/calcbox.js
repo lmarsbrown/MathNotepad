@@ -1,25 +1,299 @@
 class CalcBox extends Box{
-    constructor(id){
+    constructor(id, data={}){
         super("calc",id);
         this.content = '';
-        this.showResultsDefs = true;
-        this.showResultsBare = true;
-        this.physicsBasic = false;
-        this.physicsEM = false;
-        this.physicsChem = false;
-        this.useUnits = false;
-        this.useSymbolic = false;
-        this.useBaseUnits = false;
-        this.hidden = false;
-        this.collapsed = false;
-        this.sigFigs = 6;
-        this.expressions = [
+        this.showResultsDefs = data.showResultsDefs !== false;
+        this.showResultsBare = data.showResultsBare !== false;
+        this.physicsBasic = !!data.physicsBasic;
+        this.physicsEM = !!data.physicsEM;
+        this.physicsChem = !!data.physicsChem;
+        this.useUnits = !!data.useUnits;
+        this.useSymbolic = !!data.useSymbolic;
+        this.useBaseUnits = !!data.useBaseUnits;
+        this.hidden = !!data.hidden;
+        this.collapsed = !!data.collapsed;
+        this.sigFigs = data.sigFigs || 6;
+        this.expressions = data.expressions || [
             { id: 'ce' + (calcExprNextId++), latex: '', enabled: true },
         ];
+        this._exprList = null; // set during createElement
+        this._calcCtx  = null; // set during createElement
+        this.element = this.createElement();
     }
 
-    _createToolbar(){
+    /**
+     * Focuses a calc row (expression or text) by its exprId.
+     * @param {string} exprId - The id of the expression/text row to focus.
+     * @param {number} dir - 1 = arriving from above (start), -1 = arriving from below (end).
+     */
+    _focusCalcRowById(exprId, dir) {
+        const fieldMap = calcMqFields.get(this.id);
+        const taMap    = calcTextAreaMap.get(this.id);
+        const field = fieldMap && fieldMap.get(exprId);
+        if (field) { field.focus(); return; }
+        const ta = taMap && taMap.get(exprId);
+        if (ta) {
+            ta.focus();
+            const pos = dir === -1 ? ta.value.length : 0;
+            ta.selectionStart = ta.selectionEnd = pos;
+        }
+    }
+
+    /**
+     * Creates a text annotation row inside a calc box.
+     * Renders as a plain textarea with inline-LaTeX support.
+     * @param {{ id: string, text: string }} expr - The text row data.
+     * @returns {HTMLElement} The wrapper element.
+     */
+    _createCalcTextRow(expr) {
+        const taMap = calcTextAreaMap.get(this.id);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'expr-wrapper';
+        wrapper.dataset.exprId = expr.id;
+        wrapper.dataset.rowType = 'text';
+
+        // Double-click → scroll preview to this specific text row and blink it
+        wrapper.addEventListener('dblclick', e => {
+            if (!isPreviewOpen) return;
+            e.stopPropagation();
+            scrollAndHighlightPreview(this.id, expr.id);
+        });
+
+        const row = document.createElement('div');
+        row.className = 'calc-text-row';
+
+        const ta = document.createElement('textarea');
+        ta.className = 'calc-text-input';
+        ta.rows = 1;
+        ta.value = expr.text || '';
+        ta.placeholder = 'Text…';
+
+        const autoResize = () => {
+            ta.style.height = '1px';
+            ta.style.height = ta.scrollHeight + 'px';
+        };
+        requestAnimationFrame(autoResize);
+
+        ta.addEventListener('input', () => {
+            autoResize();
+            const boxIdx = boxes.findIndex(b => b.id === this.id);
+            if (boxIdx !== -1) {
+            const exprIdx = boxes[boxIdx].expressions?.findIndex(e => e.id === expr.id) ?? -1;
+            if (exprIdx !== -1) boxes[boxIdx].expressions[exprIdx].text = ta.value;
             }
+            syncToText();
+        });
+
+        ta.addEventListener('keydown', e => {
+            // Enter → add expression row after this text row
+            if (e.key === 'Enter') {
+            e.preventDefault();
+            const addAfter = calcAddExprFns.get(this.id);
+            if (addAfter) addAfter(expr.id);
+            return;
+            }
+            // Backspace on empty → delete row, focus adjacent
+            if (e.key === 'Backspace' && ta.value === '') {
+            e.preventDefault();
+            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
+            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+            if (wrappers.length > 1) {
+                const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+                this._focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
+            }
+            const idx = boxes.findIndex(b => b.id === this.id);
+            if (idx !== -1) {
+                const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+                if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+            }
+            if (taMap) taMap.delete(expr.id);
+            wrapper.remove();
+            commitCalcBox(this.id);
+            return;
+            }
+            // Arrow up at start → move to previous row
+            if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+            e.preventDefault();
+            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
+            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+            if (rowIdx > 0) {
+                this._focusCalcRowById(wrappers[rowIdx - 1].dataset.exprId, -1);
+            } else {
+                const boxIdx = boxes.findIndex(b => b.id === this.id);
+                if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+            }
+            return;
+            }
+            // Arrow down at end → move to next row
+            if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+            e.preventDefault();
+            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
+            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+            if (rowIdx < wrappers.length - 1) {
+                this._focusCalcRowById(wrappers[rowIdx + 1].dataset.exprId, 1);
+            } else {
+                const boxIdx = boxes.findIndex(b => b.id === this.id);
+                if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+            }
+            return;
+            }
+        });
+
+        ta.addEventListener('focusin',  () => setFocused(this.id, this.element));
+        ta.addEventListener('focusout', (e) => {
+            if (!this.element.contains(e.relatedTarget)) clearFocused(this.id, this.element);
+        });
+
+        if (taMap) taMap.set(expr.id, ta);
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'expr-delete';
+        delBtn.textContent = '×';
+        delBtn.addEventListener('mousedown', e => e.preventDefault());
+        delBtn.addEventListener('click', () => {
+            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
+            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
+            if (wrappers.length > 1) {
+            const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+            this._focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
+            }
+            const idx = boxes.findIndex(b => b.id === this.id);
+            if (idx !== -1) {
+            const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
+            if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
+            }
+            if (taMap) taMap.delete(expr.id);
+            wrapper.remove();
+            commitCalcBox(this.id);
+        });
+
+        row.appendChild(ta);
+        row.appendChild(delBtn);
+        wrapper.appendChild(row);
+        return wrapper;
+    }
+
+    /**
+     * Creates a results-visibility toggle button for the calc toolbar.
+     * @param {string} label - Button text.
+     * @param {string} title - Tooltip text.
+     * @param {Function} getFlag - () => boolean — reads the current flag value from boxes[].
+     * @param {Function} setFlag - (idx, val) => void — writes the flag to boxes[idx].
+     * @returns {HTMLButtonElement}
+     */
+    _makeResultsToggle(label, title, getFlag, setFlag) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'calc-show-results-btn' + (getFlag() ? ' active' : '');
+        btn.title = title;
+        btn.textContent = label;
+        btn.addEventListener('mousedown', e => e.preventDefault());
+        btn.addEventListener('click', () => {
+            const idx = boxes.findIndex(b => b.id === this.id);
+            if (idx === -1) return;
+            setFlag(idx, !getFlag());
+            btn.classList.toggle('active', getFlag());
+            syncToText();
+            scheduleCalcUpdate(this.id);
+        });
+        return btn;
+    }
+
+    /**
+     * Creates a physics-constants toggle button for the calc toolbar.
+     * @param {string} label - Button text.
+     * @param {string[]} tooltipGroup - Physics constants group for the tooltip.
+     * @param {string} tooltipLabel - Display label for the tooltip.
+     * @param {string} flagKey - Property key on the box object (e.g. 'physicsBasic').
+     * @returns {HTMLButtonElement}
+     */
+    _makePhysicsBtn(label, tooltipGroup, tooltipLabel, flagKey) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'calc-show-results-btn' + (this[flagKey] ? ' active' : '');
+        btn.title = buildPhysicsTooltip(tooltipGroup, tooltipLabel);
+        btn.textContent = label;
+        btn.addEventListener('mousedown', e => e.preventDefault());
+        btn.addEventListener('click', () => {
+            const idx = boxes.findIndex(b => b.id === this.id);
+            if (idx === -1) return;
+            boxes[idx][flagKey] = !boxes[idx][flagKey];
+            btn.classList.toggle('active', boxes[idx][flagKey]);
+            syncToText();
+            scheduleCalcUpdate(this.id);
+        });
+        return btn;
+    }
+
+    /**
+     * Inserts a new expression row after the given exprId in this calc box.
+     * @param {string|null} afterExprId - Insert after this expression id, or append if null.
+     */
+    _addExprAfter(afterExprId) {
+        const idx = boxes.findIndex(b => b.id === this.id);
+        if (idx === -1) return;
+        const calcFieldMap = calcMqFields.get(this.id);
+        const newExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
+        if (afterExprId) {
+            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+            if (exprIdx !== -1) {
+            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+            } else {
+            boxes[idx].expressions.push(newExpr);
+            }
+            const afterRow = this._exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
+            const newRow = createCalcExprRow(newExpr, this._calcCtx).wrapper;
+            if (afterRow) {
+            this._exprList.insertBefore(newRow, afterRow.nextSibling);
+            } else {
+            this._exprList.appendChild(newRow);
+            }
+        } else {
+            boxes[idx].expressions.push(newExpr);
+            this._exprList.appendChild(createCalcExprRow(newExpr, this._calcCtx).wrapper);
+        }
+        const newField = calcFieldMap && calcFieldMap.get(newExpr.id);
+        if (newField) {
+            newField.reflow();
+            setTimeout(() => newField.focus(), 0);
+        }
+        commitCalcBox(this.id);
+        scheduleCalcUpdate(this.id);
+    }
+
+    /**
+     * Inserts a new text annotation row after the given exprId in this calc box.
+     * @param {string|null} afterExprId - Insert after this expression id, or append if null.
+     */
+    _addTextAfter(afterExprId) {
+        const idx = boxes.findIndex(b => b.id === this.id);
+        if (idx === -1) return;
+        const taMap = calcTextAreaMap.get(this.id);
+        const newExpr = { id: 'ct' + (calcTextNextId++), type: 'text', text: '', latex: '' };
+        if (afterExprId) {
+            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+            if (exprIdx !== -1) {
+            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+            } else {
+            boxes[idx].expressions.push(newExpr);
+            }
+            const afterRow = this._exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
+            const newRow = this._createCalcTextRow(newExpr);
+            if (afterRow) {
+            this._exprList.insertBefore(newRow, afterRow.nextSibling);
+            } else {
+            this._exprList.appendChild(newRow);
+            }
+        } else {
+            boxes[idx].expressions.push(newExpr);
+            this._exprList.appendChild(this._createCalcTextRow(newExpr));
+        }
+        const newTa = taMap && taMap.get(newExpr.id);
+        if (newTa) setTimeout(() => newTa.focus(), 0);
+        commitCalcBox(this.id);
+    }
+
     createElement(){
         let div = super.createElement();
         div.classList.add('box-calc');
@@ -41,30 +315,13 @@ class CalcBox extends Box{
         badge.textContent = 'CALC';
         toolbar.appendChild(badge);
 
-        const makeResultsToggle = (label, title, getFlag, setFlag) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'calc-show-results-btn' + (getFlag() ? ' active' : '');
-        btn.title = title;
-        btn.textContent = label;
-        btn.addEventListener('mousedown', e => e.preventDefault());
-        btn.addEventListener('click', () => {
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx === -1) return;
-            setFlag(idx, !getFlag());
-            btn.classList.toggle('active', getFlag());
-            syncToText();
-            scheduleCalcUpdate(this.id);
-        });
-        return btn;
-        };
-        toolbar.appendChild(makeResultsToggle(
+        toolbar.appendChild(this._makeResultsToggle(
         'Assignments',
         'Show/hide results for assignment expressions (e.g. y = x²)',
         () => boxes.find(b => b.id === this.id)?.showResultsDefs !== false,
         (idx, val) => { boxes[idx].showResultsDefs = val; }
         ));
-        toolbar.appendChild(makeResultsToggle(
+        toolbar.appendChild(this._makeResultsToggle(
         'Bare',
         'Show/hide results for bare expressions (e.g. √2)',
         () => boxes.find(b => b.id === this.id)?.showResultsBare !== false,
@@ -72,27 +329,9 @@ class CalcBox extends Box{
         ));
 
         // Physics constants toggles (3 groups)
-        const makePhysicsBtn = (label, tooltipGroup, tooltipLabel, flagKey) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'calc-show-results-btn' + (this[flagKey] ? ' active' : '');
-        btn.title = buildPhysicsTooltip(tooltipGroup, tooltipLabel);
-        btn.textContent = label;
-        btn.addEventListener('mousedown', e => e.preventDefault());
-        btn.addEventListener('click', () => {
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx === -1) return;
-            boxes[idx][flagKey] = !boxes[idx][flagKey];
-            btn.classList.toggle('active', boxes[idx][flagKey]);
-            syncToText();
-            scheduleCalcUpdate(this.id);
-        });
-        toolbar.appendChild(btn);
-        return btn;
-        };
-        makePhysicsBtn('Physics', PHYSICS_CONSTANTS_BASIC, 'basic physics', 'physicsBasic');
-        makePhysicsBtn('E&M',     PHYSICS_CONSTANTS_EM,    'E&M',            'physicsEM');
-        makePhysicsBtn('Chem',    PHYSICS_CONSTANTS_CHEM,  'chemistry',      'physicsChem');
+        toolbar.appendChild(this._makePhysicsBtn('Physics', PHYSICS_CONSTANTS_BASIC, 'basic physics', 'physicsBasic'));
+        toolbar.appendChild(this._makePhysicsBtn('E&M',     PHYSICS_CONSTANTS_EM,    'E&M',            'physicsEM'));
+        toolbar.appendChild(this._makePhysicsBtn('Chem',    PHYSICS_CONSTANTS_CHEM,  'chemistry',      'physicsChem'));
 
         // Units mode toggle
         const unitsBtn = document.createElement('button');
@@ -155,7 +394,7 @@ class CalcBox extends Box{
         toolbar.appendChild(baseUnitsBtn);
 
         // Hidden toggle — prevents the calc box from rendering anything in the preview
-        toolbar.appendChild(makeResultsToggle(
+        toolbar.appendChild(this._makeResultsToggle(
         'Hidden',
         'Hide this calc box from the preview (expressions still evaluate in the editor)',
         () => !!(boxes.find(b => b.id === this.id)?.hidden),
@@ -193,6 +432,7 @@ class CalcBox extends Box{
 
         const exprList = document.createElement('div');
         exprList.className = 'calc-expr-list';
+        this._exprList = exprList;
 
         const calcFieldMap = new Map();   // exprId → MQField
         const calcTaMap   = new Map();    // exprId → HTMLTextAreaElement
@@ -201,33 +441,14 @@ class CalcBox extends Box{
         calcTextAreaMap.set(this.id, calcTaMap);
         calcUpdateFnsMap.set(this.id, calcUpdateFns);
 
-        /**
-         * Focus a calc row (expression or text) by exprId.
-         * @param {string} exprId - The expression/text row id to focus.
-         * @param {number} dir - 1 = arriving from above (focus start), -1 = arriving from below (focus end).
-         */
-        function focusCalcRowById(exprId, dir) {
-        const field = calcFieldMap.get(exprId);
-        if (field) { field.focus(); return; }
-        const ta = calcTaMap.get(exprId);
-        if (ta) {
-            ta.focus();
-            const pos = dir === -1 ? ta.value.length : 0;
-            ta.selectionStart = ta.selectionEnd = pos;
-        }
-        }
-
         // ── Calc box context passed to the module-level createCalcExprRow ────────────
         const calcCtx = {
             boxId: this.id,
             fieldMap: calcFieldMap,
             updateFns: calcUpdateFns,
             exprList,
-            focusRowById: focusCalcRowById,
-            addExpr: (afterId) => {
-                const fn = calcAddExprFns.get(this.id);
-                if (fn) fn(afterId);
-            },
+            focusRowById: (exprId, dir) => this._focusCalcRowById(exprId, dir),
+            addExpr: (afterId) => this._addExprAfter(afterId),
             commitBox: () => commitCalcBox(this.id),
             scheduleUpdate: () => scheduleCalcUpdate(this.id),
             onMoveOutOfList: (dir) => {
@@ -242,146 +463,11 @@ class CalcBox extends Box{
             onFocusIn: () => setFocused(this.id, div),
             onFocusOut: (e) => { if (!div.contains(e.relatedTarget)) clearFocused(this.id, div); },
         };
-
-        // ── Helper: create one text annotation row ────────────────────────────────
-        /**
-         * Creates a text annotation row inside a calc box.
-         * Renders as a plain textarea with inline-LaTeX support (same as a text box).
-         * @param {{ id: string, text: string }} expr - The text row data.
-         * @returns {HTMLElement} The wrapper element.
-         */
-        function createCalcTextRow(expr) {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'expr-wrapper';
-        wrapper.dataset.exprId = expr.id;
-        wrapper.dataset.rowType = 'text';
-
-        // Double-click → scroll preview to this specific text row and blink it
-        wrapper.addEventListener('dblclick', e => {
-            if (!isPreviewOpen) return;
-            e.stopPropagation();
-            scrollAndHighlightPreview(this.id, expr.id);
-        });
-
-        const row = document.createElement('div');
-        row.className = 'calc-text-row';
-
-        const ta = document.createElement('textarea');
-        ta.className = 'calc-text-input';
-        ta.rows = 1;
-        ta.value = expr.text || '';
-        ta.placeholder = 'Text…';
-
-        const autoResize = () => {
-            ta.style.height = '1px';
-            ta.style.height = ta.scrollHeight + 'px';
-        };
-        requestAnimationFrame(autoResize);
-
-        ta.addEventListener('input', () => {
-            autoResize();
-            // Directly update this expression in boxes[], then sync — same pattern as regular text boxes
-            const boxIdx = boxes.findIndex(b => b.id === this.id);
-            if (boxIdx !== -1) {
-            const exprIdx = boxes[boxIdx].expressions?.findIndex(e => e.id === expr.id) ?? -1;
-            if (exprIdx !== -1) boxes[boxIdx].expressions[exprIdx].text = ta.value;
-            }
-            syncToText();
-        });
-
-        ta.addEventListener('keydown', e => {
-            // Enter → add expression row after this text row
-            if (e.key === 'Enter') {
-            e.preventDefault();
-            const addAfter = calcAddExprFns.get(this.id);
-            if (addAfter) addAfter(expr.id);
-            return;
-            }
-            // Backspace on empty → delete row, focus adjacent
-            if (e.key === 'Backspace' && ta.value === '') {
-            e.preventDefault();
-            const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (wrappers.length > 1) {
-                const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
-                focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
-            }
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx !== -1) {
-                const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
-                if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-            }
-            calcTaMap.delete(expr.id);
-            wrapper.remove();
-            commitCalcBox(this.id);
-            return;
-            }
-            // Arrow up at start → move to previous row
-            if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
-            e.preventDefault();
-            const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (rowIdx > 0) {
-                focusCalcRowById(wrappers[rowIdx - 1].dataset.exprId, -1);
-            } else {
-                const boxIdx = boxes.findIndex(b => b.id === this.id);
-                if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-            }
-            return;
-            }
-            // Arrow down at end → move to next row
-            if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
-            e.preventDefault();
-            const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (rowIdx < wrappers.length - 1) {
-                focusCalcRowById(wrappers[rowIdx + 1].dataset.exprId, 1);
-            } else {
-                const boxIdx = boxes.findIndex(b => b.id === this.id);
-                if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-            }
-            return;
-            }
-        });
-
-        ta.addEventListener('focusin',  () => setFocused(this.id, div));
-        ta.addEventListener('focusout', (e) => {
-            if (!div.contains(e.relatedTarget)) clearFocused(this.id, div);
-        });
-
-        calcTaMap.set(expr.id, ta);
-
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'expr-delete';
-        delBtn.textContent = '×';
-        delBtn.addEventListener('mousedown', e => e.preventDefault());
-        delBtn.addEventListener('click', () => {
-            const wrappers = [...exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (wrappers.length > 1) {
-            const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
-            focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
-            }
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx !== -1) {
-            const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
-            if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-            }
-            calcTaMap.delete(expr.id);
-            wrapper.remove();
-            commitCalcBox(this.id);
-        });
-
-        row.appendChild(ta);
-        row.appendChild(delBtn);
-        wrapper.appendChild(row);
-        return wrapper;
-        }
+        this._calcCtx = calcCtx;
 
         // Populate expression list
         for (const expr of (this.expressions || [])) {
-        exprList.appendChild(expr.type === 'text' ? createCalcTextRow(expr) : createCalcExprRow(expr, calcCtx).wrapper);
+        exprList.appendChild(expr.type === 'text' ? this._createCalcTextRow(expr) : createCalcExprRow(expr, calcCtx).wrapper);
         }
         div.appendChild(exprList);
 
@@ -402,67 +488,9 @@ class CalcBox extends Box{
         syncToText(false); // collapsed state doesn't affect preview output
         });
 
-        // ── Register the "add expression after" function ──────────────────────────
-        const addExprAfter = (afterExprId) => {
-        const idx = boxes.findIndex(b => b.id === this.id);
-        if (idx === -1) return;
-        const newExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
-        if (afterExprId) {
-            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
-            if (exprIdx !== -1) {
-            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
-            } else {
-            boxes[idx].expressions.push(newExpr);
-            }
-            const afterRow = exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
-            const newRow = createCalcExprRow(newExpr, calcCtx).wrapper;
-            if (afterRow) {
-            exprList.insertBefore(newRow, afterRow.nextSibling);
-            } else {
-            exprList.appendChild(newRow);
-            }
-        } else {
-            boxes[idx].expressions.push(newExpr);
-            exprList.appendChild(createCalcExprRow(newExpr, calcCtx).wrapper);
-        }
-        const newField = calcFieldMap.get(newExpr.id);
-        if (newField) {
-            newField.reflow();
-            setTimeout(() => newField.focus(), 0);
-        }
-        commitCalcBox(this.id);
-        scheduleCalcUpdate(this.id);
-        };
-        calcAddExprFns.set(this.id, addExprAfter);
-
-        // ── Register the "add text row after" function ────────────────────────────
-        const addTextAfter = (afterExprId) => {
-        const idx = boxes.findIndex(b => b.id === this.id);
-        if (idx === -1) return;
-        const newExpr = { id: 'ct' + (calcTextNextId++), type: 'text', text: '', latex: '' };
-        if (afterExprId) {
-            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
-            if (exprIdx !== -1) {
-            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
-            } else {
-            boxes[idx].expressions.push(newExpr);
-            }
-            const afterRow = exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
-            const newRow = createCalcTextRow(newExpr);
-            if (afterRow) {
-            exprList.insertBefore(newRow, afterRow.nextSibling);
-            } else {
-            exprList.appendChild(newRow);
-            }
-        } else {
-            boxes[idx].expressions.push(newExpr);
-            exprList.appendChild(createCalcTextRow(newExpr));
-        }
-        const newTa = calcTaMap.get(newExpr.id);
-        if (newTa) setTimeout(() => newTa.focus(), 0);
-        commitCalcBox(this.id);
-        };
-        calcAddTextFns.set(this.id, addTextAfter);
+        // ── Register the "add expression after" and "add text row after" functions ─
+        calcAddExprFns.set(this.id, (afterId) => this._addExprAfter(afterId));
+        calcAddTextFns.set(this.id, (afterId) => this._addTextAfter(afterId));
 
         div.appendChild(this._createDeleteButton());
 

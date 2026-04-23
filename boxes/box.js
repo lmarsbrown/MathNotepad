@@ -5,16 +5,11 @@ class Box{
         this.content = "";
     }
     createElement(){
-        const _existingDomEl = boxList.querySelector(`[data-id="${this.id}"]`);
         _dbg('CREATE_BOX_ELEMENT', {
             id: this.id, type: this.type,
-            alreadyInDom: !!_existingDomEl,
             inRebuild: _dbgInRebuild,
             boxesHasId: boxes.some(b => b.id === this.id),
         });
-        if (_existingDomEl) {
-            console.warn(`[DBG] box.createElement() called for id="${this.id}" which already exists in DOM!`);
-        }
         const div = document.createElement('div');
         div.className = 'box' + (this.commented ? ' commented' : '') + (this.highlighted ? ' box-is-highlighted' : '');
         div.dataset.id = this.id;
@@ -113,6 +108,19 @@ class Box{
         return div;
     }
 
+    /**
+     * Auto-resizes the textarea (.text-input) inside this box to fit its content.
+     * Preserves the scroll position of the box list.
+     */
+    _autoResize() {
+        const ta = this.element.querySelector('.text-input');
+        if (!ta) return;
+        const savedScroll = boxList.scrollTop;
+        ta.style.height = '1px';
+        ta.style.height = ta.scrollHeight + 'px';
+        boxList.scrollTop = savedScroll;
+    }
+
     _createDeleteButton(){
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'delete-btn';
@@ -129,7 +137,22 @@ class MathBox extends Box{
         if(content){
             this.content = content;
         }
+        this.element = this.createElement();
     }
+
+    /**
+     * Resizes the box to fit the rendered MathQuill equation height.
+     * Uses requestAnimationFrame so layout is stable before measuring.
+     */
+    _resizeBox() {
+        requestAnimationFrame(() => {
+            this.element.style.minHeight = '';
+            const mqSpan = this.element.querySelector('.mq-math-mode');
+            const h = mqSpan ? mqSpan.offsetHeight : 0;
+            if (h > 0) this.element.style.minHeight = (h + 20) + 'px';
+        });
+    }
+
     createElement(){
         let div = super.createElement();
 
@@ -140,14 +163,7 @@ class MathBox extends Box{
         // Resize the box to fit the rendered equation height.
         // MathQuill's internal vertical-align tricks don't always push the CSS block
         // height, so we measure the actual rendered offsetHeight and set min-height.
-        const resizeBox = () => {
-        requestAnimationFrame(() => {
-            div.style.minHeight = '';
-            const h = mqSpan.offsetHeight;
-            if (h > 0) div.style.minHeight = (h + 20) + 'px';
-        });
-        };
-        boxResizers.set(this.id, resizeBox);
+        boxResizers.set(this.id, () => this._resizeBox());
 
         const greekLetters = "alpha beta Gamma gamma Delta delta epsilon zeta eta Theta theta iota kappa Lambda lambda mu nu Xi xi Pi pi rho Sigma sigma tau Upsilon upsilon Phi phi Chi chi Psi Omega omega";
 
@@ -162,7 +178,7 @@ class MathBox extends Box{
                 boxes[idx].content = field.latex();
                 syncToText();
             }
-            resizeBox();
+            this._resizeBox();
             },
             enter: () => {
             insertBoxAfter(this.id, defaultBoxType);
@@ -187,7 +203,7 @@ class MathBox extends Box{
         if (this.content){
             field.latex(this.content);
         }
-        setTimeout(resizeBox, 0);
+        setTimeout(() => this._resizeBox(), 0);
 
         // Capture-phase keydown: fires before MathQuill's inner textarea handler.
         mqSpan.addEventListener('keydown', e => {
@@ -251,6 +267,7 @@ class TextBox extends Box{
         if(content){
             this.content = content;
         }
+        this.element = this.createElement();
     }
     createElement(){
         let div = super.createElement();
@@ -262,16 +279,10 @@ class TextBox extends Box{
         ta.value = this.content || '';
         ta.placeholder = 'Text…';
 
-        const autoResize = () => {
-            const savedScroll = boxList.scrollTop;
-            ta.style.height = '1px'; // collapse first so scrollHeight reflects content, not current size
-            ta.style.height = ta.scrollHeight + 'px';
-            boxList.scrollTop = savedScroll;
-        };
-        boxResizers.set(this.id, autoResize);
+        boxResizers.set(this.id, () => this._autoResize());
 
         ta.addEventListener('input', () => {
-        autoResize();
+        this._autoResize();
         const idx = boxes.findIndex(b => b.id === this.id);
         if (idx !== -1) {
             boxes[idx].content = ta.value;
@@ -329,14 +340,16 @@ class TextBox extends Box{
         div.appendChild(this._createDeleteButton());
 
         // Trigger resize after append
-        requestAnimationFrame(autoResize);
+        requestAnimationFrame(() => this._autoResize());
         return div;
     }
 }
 
 class HeaderBox extends Box{
-    constructor(type,id){
+    constructor(type, content='', id){
         super(type,id);
+        this.content = content;
+        this.element = this.createElement();
     }
     createElement(){
         let div = super.createElement();
@@ -361,16 +374,10 @@ class HeaderBox extends Box{
         ta.style.fontWeight = 'bold';
         ta.style.fontSize = fontSizes[this.type];
 
-        const autoResize = () => {
-        const savedScroll = boxList.scrollTop;
-        ta.style.height = '1px';
-        ta.style.height = ta.scrollHeight + 'px';
-        boxList.scrollTop = savedScroll;
-        };
-        boxResizers.set(this.id, autoResize);
+        boxResizers.set(this.id, () => this._autoResize());
 
         ta.addEventListener('input', () => {
-        autoResize();
+        this._autoResize();
         // Strip newlines from headings
         if (ta.value.includes('\n')) ta.value = ta.value.replace(/\n/g, '');
         const idx = boxes.findIndex(b => b.id === this.id);
@@ -423,15 +430,16 @@ class HeaderBox extends Box{
         inner.appendChild(ta);
         div.appendChild(inner);
         div.appendChild(this._createDeleteButton());
-        requestAnimationFrame(autoResize);
+        requestAnimationFrame(() => this._autoResize());
 
         return div;
     }
 }
 
 class PagebreakBox extends Box{
-    constructor(){
-        super("pagebreak");
+    constructor(id){
+        super("pagebreak", id);
+        this.element = this.createElement();
     }
     createElement(){
         let div = super.createElement();
@@ -470,24 +478,11 @@ function updateHighlightToolbar() {
 
 // ── Render all boxes ──────────────────────────────────────────────────────────
 function renderBoxes() {
-  // Remove MQ instances for boxes that no longer exist
-  const currentIds = new Set(boxes.map(b => b.id));
-  for (const [id] of mqFields) {
-    if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
-  }
-  for (const [id] of calcMqFields) {
-    if (!currentIds.has(id)) cleanupCalcBox(id);
-  }
-
   boxList.innerHTML = '';
   for (const box of boxes) {
-    let boxElement = box.createElement();
-
-    boxList.appendChild(boxElement);
+    boxList.appendChild(box.element);
     reflowBox(box);
   }
-
-
 }
 // Setting the latex of a box before it is in the DOM can cause bugs. Calling reflow after it is added fixes this.
 function reflowBox(box){
@@ -528,14 +523,15 @@ function clearFocused(id, el) {
   updateHighlightToolbar();
 }
 
-function createBoxFromType(type,id){
-    return type === 'graph' ? new GraphBox(id)
-        : type === 'calc'  ? new CalcBox(id)
-        : type === 'image' ? new ImageBox(id)
-        : type === 'math'  ? new MathBox('',id)
-        : type === 'text'  ? new TextBox('',id)
-        : (type === 'h1' || type === 'h2' || type === 'h3') ? new HeaderBox(type,id)
-        : new Box(type,id);
+function createBoxFromType(type, id, content=''){
+    return type === 'graph'   ? new GraphBox(id)
+        : type === 'calc'     ? new CalcBox(id)
+        : type === 'image'    ? new ImageBox(id)
+        : type === 'math'     ? new MathBox(content, id)
+        : type === 'text'     ? new TextBox(content, id)
+        : (type === 'h1' || type === 'h2' || type === 'h3') ? new HeaderBox(type, content, id)
+        : type === 'pagebreak' ? new PagebreakBox(id)
+        : new Box(type, id);
 }
 // ── Insert / delete ───────────────────────────────────────────────────────────
 function insertBoxAfter(afterId, type = 'math') {
@@ -602,10 +598,7 @@ function appendBox(type = 'math') {
     }
     insertBoxAfter(focusedBoxId, type);
   } else {
-    const newBox = type === 'graph' ? makeGraphBox()
-               : type === 'calc'  ? makeCalcBox()
-               : type === 'image' ? new ImageBox()
-               : { id: genId(), type, content: '' };
+    const newBox = createBoxFromType(type);
     boxes.push(newBox);
     rebuildBoxList();
     syncToText();
