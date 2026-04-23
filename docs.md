@@ -492,21 +492,20 @@ Clicking a graph box in the right panel enters graph edit mode:
 **Entry/exit:**
 - `enterGraphMode(boxId)` (graph-ui.js) — hides box list, builds expression list, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
 - `exitGraphMode()` (graph-ui.js) — calls `_teardownGraphModeUI()`, restores box list and preview.
-- `_teardownGraphModeUI()` (graph-ui.js) — destroys MathQuill fields, clears maps.
+- `_teardownGraphModeUI()` (graph-ui.js) — clears `graphMqFields`, resets `_activeGraphExprBoxes = []`.
 
 **Expression list:**
-- `renderGraphExprList(box)` (graph-ui.js) — builds the expression list DOM from `box.expressions`.
-- `createGraphExprRow(expr)` (graph-ui.js) — builds one row with MathQuill field, color swatch, enable pill toggle, error badge.
-- `addGraphExpression()` (graph-ui.js), `addGraphExpressionAfter(afterId)` (graph-ui.js) — append/insert expressions.
-- `deleteGraphExpr(exprId)` (graph-ui.js) — remove expression row.
-- `commitGraphEditorToBox(boxId)` (graph-ui.js) — reads DOM state into `boxes[idx].expressions`, then calls `syncToText()`.
+- `renderGraphExprList(box)` (graph-ui.js) — creates `GraphExpressionBox` instances from `box.expressions`, appends them to `#graph-expr-list`, calls `reflow()` and `updateControls(null)` on each.
+- `GraphExpressionBox` (graph-ui.js) — class extending `Box`. Owns `.element` (.expr-wrapper), `._mqField`, `._colorSwatch`, `._constValueSpan`, slider fns. Key methods: `updateControls(analysis)`, `_delete(focusAdjacent)`, `toData()`, `focus()`. Instances live in `_activeGraphExprBoxes` (script.js global) for the duration of a graph edit session.
+- `addGraphExpression()` / `addGraphExpressionAfter(afterId)` (graph-ui.js) — create a new `GraphExpressionBox`, push to `_activeGraphExprBoxes`, append/insert in DOM.
+- `commitGraphEditorToBox(boxId)` (graph-ui.js) — iterates DOM wrappers in order, calls `toData()` on the matching `_activeGraphExprBoxes` entry, stores plain objects in `boxes[idx].expressions`, then calls `syncToText()`.
 
-**Color picker:** `openColorPopup(anchorEl, exprId)` (graph-ui.js), `closeColorPopup()` (graph-ui.js) — fixed popup with preset palette + `<input type="color">`.
+**Color picker:** `openColorPopup(anchorEl, exprId)` (graph-ui.js), `closeColorPopup()` (graph-ui.js) — fixed popup with preset palette + `<input type="color">`. Updates `wrapper.dataset.color` directly; `toData()` reads it.
 
 **Render trigger:**
 - `scheduleGraphRender()` (script.js) — rAF-debounced.
-- `renderGraphPreview()` (script.js) — compiles expressions via `compileGraphExpressions` (math.js), calls `graphRenderer.render(...)`.
-- `updateGraphExprErrors(errors)` (script.js) — updates error badges on rows.
+- `renderGraphPreview()` (script.js) — compiles expressions via `compileGraphExpressions` (math.js), calls `graphRenderer.render(...)`, then calls `eb.updateControls(cachedAnalysis)` for each entry in `_activeGraphExprBoxes`.
+- `updateGraphExprErrors(errors)` (script.js) — updates error badges on rows by querying the DOM.
 
 **Crop:** `showGraphCropRect` (script.js) toggled by checkbox. `getGraphCropInfo(box)` (script.js), `updateGraphCropOverlay()` (script.js) manage the dashed overlay.
 
@@ -534,7 +533,7 @@ Each expression row has:
 Arrow keys / Tab navigate between expression rows. Enter in a row inserts a new row after it. Backspace on empty row deletes it.
 
 ### Implementation
-Built by `createGraphExprRow(expr)` (graph-ui.js). MathQuill fields stored in `graphMqFields` map. `edit` handler debounces via `graphCommitTimer` then calls `commitGraphEditorToBox` + `scheduleGraphRender()`. `focusGraphExpr(idx, edge)` (graph-ui.js) focuses a row by index.
+Each row is a `GraphExpressionBox` instance (graph-ui.js). MathQuill fields are registered in the `graphMqFields` map during `createElement()`. `edit` handler calls `commitGraphEditorToBox` + `scheduleGraphRender()` directly. `focusExprRowById(graphMqFields, exprId)` (script.js) focuses a row by id.
 
 **Color palette:** `GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4']` (script.js). New expressions cycle via `nextGraphColor()`. Colors are stored as literal CSS hex and passed unchanged to the renderer — do not transform at render time.
 
@@ -832,8 +831,6 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 - MQ `enter` → `_calcBox._addExprAfter(this.id)`
 - MQ `moveOutOf/upOutOf/downOutOf` → navigate within box; at edges, call `focusBoxAtEdge`
 - MQ `keydown` Backspace on empty → `_delete(true)`
-
-**`createCalcExprRow`** (boxes/calcbox.js, module-level) — still used by the graph editor only. Same callback-based API as before.
 
 **`_focusCalcRowById(exprId, dir)`** — CalcBox method. Focuses an expression row (via `this.fieldMap`) or text row (via `calcTextAreaMap`). `dir=-1` positions textarea cursor at end.
 

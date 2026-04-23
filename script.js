@@ -45,8 +45,7 @@ let graphModeBoxId = null;        // id of box being edited in graph mode, or nu
 let focusedGraphExprId = null;    // id of the expression row currently focused
 let graphExprNextId = 1;
 let graphMqFields = new Map();    // expr id → MathQuill field
-let graphExprUpdateFns = new Map(); // expr id → () => void, refreshes that row's badges
-let graphSliderFns = new Map();   // expr id → { showSlider, hideSlider }
+let _activeGraphExprBoxes = [];   // GraphExpressionBox instances for the current graph edit session
 let graphCommitTimer = null;
 let draftSaveTimer = null;
 
@@ -218,7 +217,7 @@ function renderGraphPreview() {
   // Refresh expression row badges using the already-compiled analysis — avoids recompiling per frame.
   // Pass null if no analysis is cached yet so each fn falls back to its own recompile.
   const cachedAnalysis = renderer._lastAnalysis || null;
-  for (const fn of graphExprUpdateFns.values()) fn(cachedAnalysis);
+  for (const eb of _activeGraphExprBoxes) eb.updateControls(cachedAnalysis);
 }
 
 /** Update error indicators on graph expression rows. */
@@ -821,7 +820,12 @@ function rebuildBoxList() {
     const box = boxes[i];
     const currentAtPos = boxList.children[i];
     if (currentAtPos !== box.element) {
-      boxList.insertBefore(box.element, currentAtPos || null);
+      if (currentAtPos && currentAtPos.dataset.id === box.id) {
+        // box.element was rebuilt (e.g. graph snapshot update); replace the old element
+        boxList.replaceChild(box.element, currentAtPos);
+      } else {
+        boxList.insertBefore(box.element, currentAtPos || null);
+      }
       reflowBox(box);
     }
   }

@@ -1,5 +1,247 @@
 'use strict';
 
+// ── GraphExpressionBox ────────────────────────────────────────────────────────
+
+/**
+ * Represents a single expression row within the graph editor.
+ * Owns its DOM element (.expr-wrapper), MQ field, color swatch, slider, and
+ * const-value badge. Lives only during a graph edit session; created by
+ * renderGraphExprList and destroyed by _teardownGraphModeUI.
+ * @extends Box
+ */
+class GraphExpressionBox extends Box {
+    /**
+     * @param {{ id?: string, latex?: string, enabled?: boolean, color?: string, thickness?: number, sliderMin?: number, sliderMax?: number }} data
+     */
+    constructor(data = {}) {
+        super('graphexpr', data.id);
+        this.latex     = data.latex     || '';
+        this.enabled   = data.enabled   !== false;
+        this.color     = data.color     || '#3b82f6';
+        this.thickness = data.thickness != null ? data.thickness : 2.0;
+        this.sliderMin = data.sliderMin ?? 0;
+        this.sliderMax = data.sliderMax ?? 10;
+        this._mqField        = null;
+        this._toggle         = null;
+        this._colorSwatch    = null;
+        this._constValueSpan = null;
+        this._showSlider     = null;
+        this._hideSlider     = null;
+        this.element = this.createElement();
+    }
+
+    /**
+     * Builds the .expr-wrapper DOM for this graph expression row.
+     * Registers this._mqField into graphMqFields.
+     * @returns {HTMLElement}
+     */
+    createElement() {
+        const colorSwatch = document.createElement('div');
+        colorSwatch.className = 'graph-expr-color-swatch';
+        colorSwatch.style.background = this.color;
+        colorSwatch.title = 'Color & thickness';
+        this._colorSwatch = colorSwatch;
+
+        const constValueSpan = document.createElement('span');
+        constValueSpan.className = 'graph-expr-const-value';
+        constValueSpan.style.display = 'none';
+        this._constValueSpan = constValueSpan;
+
+        const { wrapper, mqField: field, toggle, mqSpan, handle } = createExprRow(
+            { id: this.id, enabled: this.enabled },
+            {
+                //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
+                autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega',
+                rightSlot:       colorSwatch,
+                showDragHandle:  true,
+                onEdit:          () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); },
+                onEnter:         () => addGraphExpressionAfter(this.id),
+                onToggle:        () => { commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); },
+                onDelete:        () => this._delete(false),
+                onBackspaceEmpty:() => this._delete(true),
+                onMoveOut: (dir) => {
+                    const listEl = document.getElementById('graph-expr-list');
+                    const wrappers = [...listEl.querySelectorAll('.expr-wrapper')];
+                    const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                    if (dir === 1 && idx < wrappers.length - 1) {
+                        focusExprRowById(graphMqFields, wrappers[idx + 1].dataset.exprId);
+                    } else if (dir === -1 && idx > 0) {
+                        focusExprRowById(graphMqFields, wrappers[idx - 1].dataset.exprId);
+                    }
+                },
+            }
+        );
+        this._mqField = field;
+        this._toggle  = toggle;
+
+        wrapper.dataset.color     = this.color;
+        wrapper.dataset.thickness = this.thickness;
+
+        // Slider section — shown for numeric constants like a=2
+        const { showSlider, hideSlider } = createSliderSection(wrapper, this, {
+            getLatex:       () => this._mqField.latex(),
+            setLatex:       (str) => { this._mqField.latex(str); commitGraphEditorToBox(graphModeBoxId); scheduleGraphRender(); },
+            onBoundsCommit: () => commitGraphEditorToBox(graphModeBoxId),
+        });
+        this._showSlider = showSlider;
+        this._hideSlider = hideSlider;
+
+        colorSwatch.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openColorPopup(colorSwatch, this.id);
+        });
+
+        constValueSpan.addEventListener('click', () => {
+            navigator.clipboard.writeText(constValueSpan.textContent.replace(/^[≈=]\s*/, '')).catch(() => {});
+        });
+        wrapper.appendChild(constValueSpan);
+
+        // Undo/redo shortcuts inside the MathQuill field
+        mqSpan.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                e.preventDefault(); e.stopPropagation();
+                if (e.shiftKey) applyRedo(); else applyUndo();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+                e.preventDefault(); e.stopPropagation();
+                applyRedo();
+            }
+        }, true);
+
+        // Drag-to-reorder within the graph expression list
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const listEl = document.getElementById('graph-expr-list');
+            const allWrappers = () => Array.from(listEl.querySelectorAll('.expr-wrapper'));
+            const startY = e.clientY;
+            const origRect = wrapper.getBoundingClientRect();
+
+            const ghost = wrapper.cloneNode(true);
+            ghost.style.cssText = `
+              position: fixed;
+              left: ${origRect.left}px;
+              top: ${origRect.top}px;
+              width: ${origRect.width}px;
+              opacity: 0.85;
+              pointer-events: none;
+              z-index: 9999;
+              box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            `;
+            document.body.appendChild(ghost);
+
+            const placeholder = document.createElement('div');
+            placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
+            wrapper.replaceWith(placeholder);
+
+            let currentTarget = placeholder;
+
+            function onMove(ev) {
+                ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
+                const siblings = allWrappers().filter(w => w !== wrapper);
+                let inserted = false;
+                for (const sib of siblings) {
+                    const r = sib.getBoundingClientRect();
+                    if (ev.clientY < r.top + r.height / 2) {
+                        if (currentTarget !== sib) { sib.before(placeholder); currentTarget = sib; }
+                        inserted = true;
+                        break;
+                    }
+                }
+                if (!inserted) {
+                    const last = siblings[siblings.length - 1];
+                    if (last && currentTarget !== null) { listEl.appendChild(placeholder); currentTarget = null; }
+                }
+            }
+
+            function onUp() {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                ghost.remove();
+                placeholder.replaceWith(wrapper);
+                commitGraphEditorToBox(graphModeBoxId);
+                scheduleGraphRender();
+            }
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+
+        // Track focused expression for render-on-top highlight
+        wrapper.addEventListener('focusin', () => {
+            if (focusedGraphExprId !== this.id) { focusedGraphExprId = this.id; scheduleGraphRender(); }
+        });
+        wrapper.addEventListener('focusout', e => {
+            if (!wrapper.contains(e.relatedTarget)) {
+                const leavingId = this.id;
+                setTimeout(() => {
+                    if (focusedGraphExprId === leavingId) { focusedGraphExprId = null; scheduleGraphRender(); }
+                }, 0);
+            }
+        });
+
+        if (this.latex) field.latex(this.latex);
+        graphMqFields.set(this.id, field);
+        return wrapper;
+    }
+
+    /**
+     * Refreshes color swatch visibility, slider, and const-value badge.
+     * Calls updateGraphingControls with the precompiled analysis (fast) or null (slow recompile).
+     * @param {Object|null} analysis - From renderer._lastAnalysis, or null to trigger recompile.
+     */
+    updateControls(analysis) {
+        updateGraphingControls(
+            this._mqField.latex(), analysis, this.id,
+            this._colorSwatch, this._toggle,
+            this._showSlider, this._hideSlider,
+            this._constValueSpan
+        );
+    }
+
+    /**
+     * Removes this row from the DOM and _activeGraphExprBoxes.
+     * @param {boolean} focusAdjacent - Whether to focus the nearest remaining row.
+     */
+    _delete(focusAdjacent) {
+        const listEl = document.getElementById('graph-expr-list');
+        if (focusAdjacent) {
+            const wrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
+            const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+            if (wrappers.length > 1) {
+                const focusId = idx > 0 ? wrappers[idx - 1].dataset.exprId : wrappers[idx + 1].dataset.exprId;
+                focusExprRowById(graphMqFields, focusId);
+            }
+        }
+        graphMqFields.delete(this.id);
+        const exprIdx = _activeGraphExprBoxes.findIndex(e => e.id === this.id);
+        if (exprIdx !== -1) _activeGraphExprBoxes.splice(exprIdx, 1);
+        this.element.remove();
+        updateGraphBoxCount(graphModeBoxId);
+        commitGraphEditorToBox(graphModeBoxId);
+        scheduleGraphRender();
+        syncToText();
+    }
+
+    /** Focuses the MathQuill field. */
+    focus() {
+        if (this._mqField) this._mqField.focus();
+    }
+
+    /**
+     * Returns a plain serializable data object for persistence and rendering.
+     * @returns {{ id: string, latex: string, enabled: boolean, color: string, thickness: number, sliderMin: number, sliderMax: number }}
+     */
+    toData() {
+        const latex     = this._mqField ? this._mqField.latex() : this.latex;
+        const enabled   = this._toggle  ? this._toggle.getAttribute('aria-pressed') === 'true' : this.enabled;
+        const color     = this.element  ? (this.element.dataset.color                  || this.color)     : this.color;
+        const thickness = this.element  ? (parseFloat(this.element.dataset.thickness)  || 2.0)            : this.thickness;
+        const sliderMin = this.element  ? (parseFloat(this.element.dataset.sliderMin)  || 0)              : this.sliderMin;
+        const sliderMax = this.element  ? (parseFloat(this.element.dataset.sliderMax)  || 10)             : this.sliderMax;
+        return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax };
+    }
+}
+
 // ── Graph editing mode ────────────────────────────────────────────────────────
 
 function enterGraphMode(boxId) {
@@ -93,8 +335,7 @@ function _teardownGraphModeUI() {
   clearTimeout(graphCommitTimer);
   if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; }
   graphMqFields.clear();
-  graphExprUpdateFns.clear();
-  graphSliderFns.clear();
+  _activeGraphExprBoxes = [];
   focusedGraphExprId = null;
   closeColorPopup();
   document.getElementById('graph-expr-list').innerHTML = '';
@@ -104,7 +345,6 @@ function _teardownGraphModeUI() {
   document.getElementById('graph-toolbar').style.display = 'none';
 
   graphModeBoxId = null;
-  _graphCtx = null;
   previewContent.classList.remove('graph-mode');
   // Remove crop overlay if present
   const overlay = document.getElementById('graph-crop-overlay');
@@ -150,9 +390,6 @@ function exitGraphMode() {
   syncToText();
   if (isPreviewOpen) schedulePreview(0);
 }
-
-/** Active graph mode context — built in renderGraphExprList, used by _createGraphRow. */
-let _graphCtx = null;
 
 /**
  * Refreshes UI controls for a graph expression row (color swatch, toggle, slider, const badge).
@@ -238,170 +475,31 @@ function updateGraphingControls(latex, precompiledAnalysis, exprId, colorSwatch,
 }
 
 /**
- * Creates a single graph expression row using createCalcExprRow, attaches graph-specific elements.
- * Requires _graphCtx to be set by renderGraphExprList before calling.
- *
- * @param {{ id, latex, color, thickness, enabled, sliderMin, sliderMax }} expr
- * @returns {HTMLElement} The wrapper element.
+ * Populates #graph-expr-list with GraphExpressionBox instances for all expressions in box.
+ * @param {GraphBox} box
  */
-function _createGraphRow(expr) {
-  // Color swatch — passed as rightSlot (graph rows show color, not numeric results)
-  const colorSwatch = document.createElement('div');
-  colorSwatch.className = 'graph-expr-color-swatch';
-  colorSwatch.style.background = expr.color || '#3b82f6';
-  colorSwatch.title = 'Color & thickness';
-
-  // Constant value badge — shown below the row for derived constant expressions
-  const constValueSpan = document.createElement('span');
-  constValueSpan.className = 'graph-expr-const-value';
-  constValueSpan.style.display = 'none';
-
-  const { wrapper, field, mqSpan, handle } = createCalcExprRow(expr, _graphCtx, {
-    rightSlot: colorSwatch,
-    showDragHandle: true,
-    //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
-    autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi psi omega',
-    customUpdate: (analysisArg, controls) => {
-      updateGraphingControls(controls.field.latex(), analysisArg, expr.id, colorSwatch, controls.toggle, controls.showSlider, controls.hideSlider, constValueSpan);
-    },
-  });
-
-  wrapper.dataset.color = expr.color || '#3b82f6';
-  wrapper.dataset.thickness = expr.thickness != null ? expr.thickness : 2.0;
-
-  colorSwatch.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openColorPopup(colorSwatch, expr.id);
-  });
-
-  constValueSpan.addEventListener('click', () => {
-    navigator.clipboard.writeText(constValueSpan.textContent.replace(/^[≈=]\s*/, '')).catch(() => {});
-  });
-  wrapper.appendChild(constValueSpan);
-
-  // Undo/redo shortcuts inside the MathQuill field
-  mqSpan.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-      e.preventDefault(); e.stopPropagation();
-      if (e.shiftKey) applyRedo(); else applyUndo();
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-      e.preventDefault(); e.stopPropagation();
-      applyRedo();
-    }
-  }, true);
-
-  // Drag-to-reorder within the graph expression list
-  handle.addEventListener('mousedown', e => {
-    e.preventDefault();
-    const list = _graphCtx.exprList;
-
-    const allWrappers = () => Array.from(list.querySelectorAll('.expr-wrapper'));
-    const startY = e.clientY;
-    const origRect = wrapper.getBoundingClientRect();
-
-    const ghost = wrapper.cloneNode(true);
-    ghost.style.cssText = `
-      position: fixed;
-      left: ${origRect.left}px;
-      top: ${origRect.top}px;
-      width: ${origRect.width}px;
-      opacity: 0.85;
-      pointer-events: none;
-      z-index: 9999;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-    `;
-    document.body.appendChild(ghost);
-
-    const placeholder = document.createElement('div');
-    placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
-    wrapper.replaceWith(placeholder);
-
-    let currentTarget = placeholder;
-
-    function onMove(ev) {
-      ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
-      const siblings = allWrappers().filter(w => w !== wrapper);
-      let inserted = false;
-      for (const sib of siblings) {
-        const r = sib.getBoundingClientRect();
-        if (ev.clientY < r.top + r.height / 2) {
-          if (currentTarget !== sib) { sib.before(placeholder); currentTarget = sib; }
-          inserted = true;
-          break;
-        }
-      }
-      if (!inserted) {
-        const last = siblings[siblings.length - 1];
-        if (last && currentTarget !== null) { list.appendChild(placeholder); currentTarget = null; }
-      }
-    }
-
-    function onUp() {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      ghost.remove();
-      placeholder.replaceWith(wrapper);
-      commitGraphEditorToBox(graphModeBoxId);
-      scheduleGraphRender();
-    }
-
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-
-  // Track focused expression for render-on-top highlight
-  wrapper.addEventListener('focusin', () => {
-    if (focusedGraphExprId !== expr.id) { focusedGraphExprId = expr.id; scheduleGraphRender(); }
-  });
-  wrapper.addEventListener('focusout', e => {
-    if (!wrapper.contains(e.relatedTarget)) {
-      const leavingId = expr.id;
-      setTimeout(() => {
-        if (focusedGraphExprId === leavingId) { focusedGraphExprId = null; scheduleGraphRender(); }
-      }, 0);
-    }
-  });
-
-  // Initial state — run slow-path recompile to set initial control visibility
-  const updateFn = graphExprUpdateFns.get(expr.id);
-  if (updateFn) updateFn(null);
-
-  return wrapper;
-}
-
 function renderGraphExprList(box) {
   const listEl = document.getElementById('graph-expr-list');
   listEl.innerHTML = '';
   graphMqFields.clear();
-  graphExprUpdateFns.clear();
-  graphSliderFns.clear();
+  _activeGraphExprBoxes = [];
+
   // Ensure graphExprNextId is above all existing expression ids to avoid duplicates
   for (const expr of (box.expressions || [])) {
     const m = expr.id.match(/^ge(\d+)$/);
     if (m) graphExprNextId = Math.max(graphExprNextId, parseInt(m[1]) + 1);
   }
 
-  _graphCtx = {
-    boxId: box.id,
-    fieldMap: graphMqFields,
-    updateFns: graphExprUpdateFns,
-    exprList: listEl,
-    focusRowById: (exprId) => focusExprRowById(graphMqFields, exprId),
-    addExpr: (afterId) => addGraphExpressionAfter(afterId),
-    commitBox: () => commitGraphEditorToBox(graphModeBoxId),
-    scheduleUpdate: () => scheduleGraphRender(),
-    onAfterDelete: (exprId) => {
-      graphSliderFns.delete(exprId);
-      updateGraphBoxCount(graphModeBoxId);
-      syncToText();
-    },
-  };
-
-  for (const expr of (box.expressions || [])) {
-    listEl.appendChild(_createGraphRow(expr));
+  for (const exprData of (box.expressions || [])) {
+    const exprBox = new GraphExpressionBox(exprData);
+    _activeGraphExprBoxes.push(exprBox);
+    listEl.appendChild(exprBox.element);
   }
-  for (const field of graphMqFields.values()) field.reflow();
+
+  for (const exprBox of _activeGraphExprBoxes) {
+    exprBox._mqField.reflow();
+    exprBox.updateControls(null);
+  }
 }
 
 let _activeColorPopup = null;
@@ -647,19 +745,12 @@ function commitGraphEditorToBox(boxId) {
   const idx = boxes.findIndex(b => b.id === boxId);
   if (idx === -1) return;
 
+  // Use DOM order (drag-to-reorder changes DOM but not _activeGraphExprBoxes order)
   const wrappers = document.querySelectorAll('#graph-expr-list .expr-wrapper');
   const expressions = [];
   for (const wrapper of wrappers) {
-    const exprId    = wrapper.dataset.exprId;
-    const toggleEl  = wrapper.querySelector('.expr-toggle');
-    const enabled   = toggleEl ? toggleEl.getAttribute('aria-pressed') === 'true' : true;
-    const color     = wrapper.dataset.color || '#3b82f6';
-    const thickness = parseFloat(wrapper.dataset.thickness) || 2.0;
-    const sliderMin = parseFloat(wrapper.dataset.sliderMin) || 0;
-    const sliderMax = parseFloat(wrapper.dataset.sliderMax) || 10;
-    const field     = graphMqFields.get(exprId);
-    const latex     = field ? field.latex() : '';
-    expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
+    const exprBox = _activeGraphExprBoxes.find(e => e.id === wrapper.dataset.exprId);
+    if (exprBox) expressions.push(exprBox.toData());
   }
   boxes[idx].expressions = expressions;
   boxes[idx].width  = parseInt(document.getElementById('graph-width-input').value)  || 600;
@@ -678,47 +769,41 @@ function updateGraphBoxCount(boxId) {
 }
 
 function addGraphExpression() {
-  if (!graphModeBoxId || !_graphCtx) return;
-  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const wrapper = _createGraphRow(newExpr);
-  _graphCtx.exprList.appendChild(wrapper);
-  const field = graphMqFields.get(newExpr.id);
-  if (field) field.reflow();
+  if (!graphModeBoxId) return;
+  const exprBox = new GraphExpressionBox({
+    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0,
+  });
+  _activeGraphExprBoxes.push(exprBox);
+  document.getElementById('graph-expr-list').appendChild(exprBox.element);
+  exprBox._mqField.reflow();
   commitGraphEditorToBox(graphModeBoxId);
-  if (field) setTimeout(() => field.focus(), 0);
+  setTimeout(() => exprBox._mqField.focus(), 0);
 }
 
 function addGraphExpressionAfter(afterId) {
-  if (!graphModeBoxId || !_graphCtx) return;
+  if (!graphModeBoxId) return;
   clearTimeout(graphCommitTimer);
   commitGraphEditorToBox(graphModeBoxId);
 
-  const newExpr = { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 };
-  const listEl = _graphCtx.exprList;
+  const exprBox = new GraphExpressionBox({
+    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0,
+  });
+
+  const listEl = document.getElementById('graph-expr-list');
   const afterWrapper = listEl.querySelector(`.expr-wrapper[data-expr-id="${afterId}"]`);
-  const newWrapper = _createGraphRow(newExpr);
-
   if (afterWrapper) {
-    listEl.insertBefore(newWrapper, afterWrapper.nextSibling);
+    listEl.insertBefore(exprBox.element, afterWrapper.nextSibling);
+    const afterIdx = _activeGraphExprBoxes.findIndex(e => e.id === afterId);
+    _activeGraphExprBoxes.splice(afterIdx !== -1 ? afterIdx + 1 : _activeGraphExprBoxes.length, 0, exprBox);
   } else {
-    listEl.appendChild(newWrapper);
+    listEl.appendChild(exprBox.element);
+    _activeGraphExprBoxes.push(exprBox);
   }
 
-  // Also insert into boxes array
-  const idx = boxes.findIndex(b => b.id === graphModeBoxId);
-  if (idx !== -1) {
-    const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterId);
-    if (exprIdx !== -1) {
-      boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
-    } else {
-      boxes[idx].expressions.push(newExpr);
-    }
-  }
-  const field = graphMqFields.get(newExpr.id);
-  if (field) field.reflow();
-  updateGraphBoxCount(graphModeBoxId);
+  exprBox._mqField.reflow();
+  commitGraphEditorToBox(graphModeBoxId);
   syncToText();
-  if (field) setTimeout(() => field.focus(), 0);
+  setTimeout(() => exprBox._mqField.focus(), 0);
 }
 
 // Wire up graph editor panel buttons

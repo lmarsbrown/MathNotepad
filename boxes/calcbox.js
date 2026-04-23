@@ -45,12 +45,13 @@ class ExpressionBox extends Box {
         resultSpan.style.cursor = 'pointer';
         this._resultSpan = resultSpan;
 
-        const { wrapper, mqField: field, toggle, mqSpan } = createExprRow(
+        const { wrapper, mqField: field, toggle, mqSpan, handle } = createExprRow(
             { id: this.id, enabled: this.enabled },
             {
                 //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
                 autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega',
                 rightSlot: resultSpan,
+                showDragHandle: true,
                 onEdit:          () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); this._analyze(); },
                 onEnter:         () => this._calcBox._addExprAfter(this.id),
                 onToggle:        () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
@@ -73,6 +74,69 @@ class ExpressionBox extends Box {
         );
         this._mqField = field;
         this._toggle  = toggle;
+
+        // Drag-to-reorder within the calc expression list
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const listEl = this._calcBox._exprList;
+            const allWrappers = () => Array.from(listEl.querySelectorAll('.expr-wrapper'));
+            const startY = e.clientY;
+            const origRect = wrapper.getBoundingClientRect();
+
+            const ghost = wrapper.cloneNode(true);
+            ghost.style.cssText = `
+              position: fixed;
+              left: ${origRect.left}px;
+              top: ${origRect.top}px;
+              width: ${origRect.width}px;
+              opacity: 0.85;
+              pointer-events: none;
+              z-index: 9999;
+              box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            `;
+            document.body.appendChild(ghost);
+
+            const placeholder = document.createElement('div');
+            placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
+            wrapper.replaceWith(placeholder);
+
+            let currentTarget = placeholder;
+
+            const onMove = (ev) => {
+                ghost.style.top = (origRect.top + ev.clientY - startY) + 'px';
+                const siblings = allWrappers().filter(w => w !== wrapper);
+                let inserted = false;
+                for (const sib of siblings) {
+                    const r = sib.getBoundingClientRect();
+                    if (ev.clientY < r.top + r.height / 2) {
+                        if (currentTarget !== sib) { sib.before(placeholder); currentTarget = sib; }
+                        inserted = true;
+                        break;
+                    }
+                }
+                if (!inserted) {
+                    const last = siblings[siblings.length - 1];
+                    if (last && currentTarget !== null) { listEl.appendChild(placeholder); currentTarget = null; }
+                }
+            };
+
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                ghost.remove();
+                placeholder.replaceWith(wrapper);
+                // Re-sync expressions array from DOM order (drag only moves DOM nodes)
+                const newWrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
+                this._calcBox.expressions = newWrappers
+                    .map(w => this._calcBox.expressions.find(ex => ex.id === w.dataset.exprId))
+                    .filter(Boolean);
+                commitCalcBox(this._calcBox.id);
+                scheduleCalcUpdate(this._calcBox.id);
+            };
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
 
         wrapper.addEventListener('dblclick', e => {
             if (!isPreviewOpen) return;
@@ -1037,215 +1101,3 @@ function collectMathBlock(lines, startLine) {
   return null;
 }
 
-/**
- * Creates one expression row for a calc or graph editor box.
- * Shared by both calc boxes (createBoxElement) and the graph editor (renderGraphExprList).
- *
- * @param {Object} expr - Expression data ({ id, latex, enabled, sliderMin?, sliderMax? }).
- * @param {Object} ctx - Box context providing all closure-bound dependencies.
- * @param {string} ctx.boxId
- * @param {Map} ctx.fieldMap - exprId → MQField
- * @param {Map} ctx.updateFns - exprId → update function
- * @param {HTMLElement} ctx.exprList - The expression list container (.calc-expr-list or #graph-expr-list)
- * @param {Function} ctx.focusRowById - (exprId, dir) → void
- * @param {Function} ctx.addExpr - (afterId) → void, inserts a new expression after this one
- * @param {Function} ctx.commitBox - () → void, persists current box state
- * @param {Function} ctx.scheduleUpdate - () → void, triggers re-render/re-evaluate
- * @param {Function} [ctx.onAfterDelete] - (exprId) → void, extra cleanup after row deletion
- * @param {Function} [ctx.onMoveOutOfList] - (dir) → void, called when navigating past list ends
- * @param {Function} [ctx.onDblClick] - (exprId) → void, called on wrapper double-click
- * @param {Function} [ctx.onFocusIn] - () → void, called on mqSpan focusin
- * @param {Function} [ctx.onFocusOut] - (e) → void, called on mqSpan focusout
- * @param {Object} [opts] - Display options.
- * @param {HTMLElement|null} [opts.rightSlot] - Custom right-slot element; null = use result display.
- * @param {boolean} [opts.showDragHandle] - Whether to show the drag reorder handle.
- * @param {string} [opts.autoCommands] - MathQuill autoCommands override.
- * @param {Function|null} [opts.customUpdate] - (data, controls) → void, replaces default result display.
- * @returns {{ wrapper, toggle, field, mqSpan, handle }}
- */
-function createCalcExprRow(expr, ctx, opts = {}) {
-  const {
-    rightSlot: customRightSlot = null,
-    showDragHandle = false,
-    //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
-    autoCommands = 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega',
-    customUpdate = null,
-  } = opts;
-
-  // Create rightSlot: custom element or a fresh result display span
-  let resultSpan = null;
-  let rightSlotEl;
-  if (customRightSlot !== null) {
-    rightSlotEl = customRightSlot;
-  } else {
-    resultSpan = document.createElement('span');
-    resultSpan.className = 'calc-expr-result';
-    resultSpan.style.display = 'none';
-    resultSpan.title = 'Click to copy';
-    resultSpan.style.cursor = 'pointer';
-    rightSlotEl = resultSpan;
-  }
-
-  const { wrapper, mqField: field, mqSpan, toggle, handle } = createExprRow(expr, {
-    rightSlot: rightSlotEl,
-    autoCommands,
-    showDragHandle,
-    onToggle: () => { ctx.commitBox(); ctx.scheduleUpdate(); },
-    onDelete: () => deleteRow(false),
-    onEdit: () => { ctx.commitBox(); ctx.scheduleUpdate(); },
-    onEnter: () => ctx.addExpr(expr.id),
-    onMoveOut: (dir) => {
-      const wrappers = [...ctx.exprList.querySelectorAll('.expr-wrapper')];
-      const idx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-      if (dir === 1 && idx < wrappers.length - 1) {
-        ctx.focusRowById(wrappers[idx + 1].dataset.exprId, 1);
-      } else if (dir === -1 && idx > 0) {
-        ctx.focusRowById(wrappers[idx - 1].dataset.exprId, -1);
-      } else if (ctx.onMoveOutOfList) {
-        ctx.onMoveOutOfList(dir);
-      }
-    },
-    onBackspaceEmpty: () => deleteRow(true),
-  });
-
-  // Removes row from DOM, boxes[], and state maps; optionally focuses adjacent row
-  function deleteRow(focusAdjacent) {
-    const wrappers = Array.from(ctx.exprList.querySelectorAll('.expr-wrapper'));
-    const idx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-    if (focusAdjacent && wrappers.length > 1) {
-      const focusId = idx > 0 ? wrappers[idx - 1].dataset.exprId : wrappers[idx + 1].dataset.exprId;
-      ctx.focusRowById(focusId, idx > 0 ? -1 : 1);
-    }
-    const boxIdx = boxes.findIndex(b => b.id === ctx.boxId);
-    if (boxIdx !== -1) {
-      const exprIdx = boxes[boxIdx].expressions.findIndex(e => e.id === expr.id);
-      if (exprIdx !== -1) boxes[boxIdx].expressions.splice(exprIdx, 1);
-    }
-    ctx.fieldMap.delete(expr.id);
-    ctx.updateFns.delete(expr.id);
-    wrapper.remove();
-    if (ctx.onAfterDelete) ctx.onAfterDelete(expr.id);
-    ctx.commitBox();
-    ctx.scheduleUpdate();
-  }
-
-  if (ctx.onDblClick) {
-    wrapper.addEventListener('dblclick', e => { e.stopPropagation(); ctx.onDblClick(expr.id); });
-  }
-
-  // Slider section — shown when expression is a numeric constant like a=2
-  const { showSlider, hideSlider } = createSliderSection(wrapper, expr, {
-    getLatex: () => field.latex(),
-    setLatex: (str) => { field.latex(str); ctx.commitBox(); ctx.scheduleUpdate(); },
-    onBoundsCommit: () => ctx.commitBox(),
-  });
-
-  const errorLine = document.createElement('div');
-  errorLine.className = 'calc-expr-error';
-  errorLine.style.display = 'none';
-  wrapper.appendChild(errorLine);
-
-  const warningLine = document.createElement('div');
-  warningLine.className = 'calc-unit-warning';
-  warningLine.style.display = 'none';
-  wrapper.appendChild(warningLine);
-
-  // Copy-on-click for the result span (calc mode only — not used when rightSlot is custom)
-  if (resultSpan) {
-    let copyFlashing = false;
-    resultSpan.addEventListener('click', () => {
-      if (copyFlashing) return;
-      const val = resultSpan.dataset.copyValue ?? resultSpan.textContent;
-      if (!val) return;
-      const num = val.replace(/^[=≈]\s*/, '');
-      const prevHtml = resultSpan.innerHTML;
-      const prevColor = resultSpan.style.color;
-      copyFlashing = true;
-      navigator.clipboard.writeText(num).then(() => {
-        resultSpan.textContent = 'copied!';
-        resultSpan.style.color = '#4ec9b0';
-        setTimeout(() => {
-          resultSpan.innerHTML = prevHtml;
-          resultSpan.style.color = prevColor;
-          copyFlashing = false;
-        }, 900);
-      }).catch(() => { copyFlashing = false; });
-    });
-  }
-
-  // Per-row update function stored in ctx.updateFns
-  const controls = { field, toggle, showSlider, hideSlider, errorLine, warningLine, wrapper };
-  const updateFn = customUpdate
-    ? (data) => customUpdate(data, controls)
-    : (resultMap) => {
-        const result = resultMap ? resultMap.get(expr.id) : null;
-        const currentExpr = boxes.find(b => b.id === ctx.boxId)?.expressions?.find(e => e.id === expr.id);
-        const currentLatex = currentExpr?.latex || '';
-        const kind = classifyCalcExpr(currentLatex);
-        let suppress = false;
-        let numericLiteralRhs = null;
-        if (kind === 'def') {
-          const op = findCalcOperatorAtDepth0(currentLatex.trim());
-          const rhs = op ? currentLatex.trim().slice(op.idx + op.len).trim() : '';
-          if (isNumericLiteralLatex(rhs) && !(result && result.boolValue !== undefined)) {
-            suppress = true;
-            numericLiteralRhs = rhs;
-          }
-        }
-        if (numericLiteralRhs !== null && result && !result.error) {
-          showSlider(parseFloat(numericLiteralRhs));
-        } else {
-          hideSlider();
-        }
-        warningLine.style.display = 'none';
-        warningLine.textContent = '';
-        if (result && result.error) {
-          errorLine.textContent = result.error;
-          errorLine.style.display = '';
-          if (resultSpan) resultSpan.style.display = 'none';
-          wrapper.classList.add('has-error');
-        } else if (result && result.unitAst !== undefined && !suppress) {
-          errorLine.style.display = 'none';
-          wrapper.classList.remove('has-error');
-          if (resultSpan) {
-            const sigFigs = boxes.find(b => b.id === ctx.boxId)?.sigFigs ?? 6;
-            renderUnitResult(resultSpan, result.unitAst, result.warnings, sigFigs);
-            resultSpan.dataset.copyValue = buildAstText(result.unitAst, sigFigs) ?? '';
-            resultSpan.style.display = '';
-            resultSpan.style.color = '';
-            const warnText = formatUnitWarnings(result.warnings);
-            if (warnText) { warningLine.textContent = warnText; warningLine.style.display = ''; }
-          }
-        } else {
-          const currentBox = boxes.find(b => b.id === ctx.boxId);
-          const formatted = result ? formatCalcResult(result, currentBox?.sigFigs ?? 6) : null;
-          if (formatted !== null && !suppress && resultSpan) {
-            errorLine.style.display = 'none';
-            if (formatted.length > CALC_RESULT_MAX_CHARS) {
-              resultSpan.textContent = 'Too Bulky!';
-              resultSpan.dataset.copyValue = formatted;
-            } else {
-              resultSpan.textContent = formatted;
-              delete resultSpan.dataset.copyValue;
-            }
-            resultSpan.style.display = '';
-            if (result.boolValue === true)       resultSpan.style.color = '#4ec9b0';
-            else if (result.boolValue === false)  resultSpan.style.color = '#f44747';
-            else                                  resultSpan.style.color = '';
-            wrapper.classList.remove('has-error');
-          } else {
-            errorLine.style.display = 'none';
-            if (resultSpan) resultSpan.style.display = 'none';
-            wrapper.classList.remove('has-error');
-          }
-        }
-      };
-
-  ctx.updateFns.set(expr.id, updateFn);
-  if (expr.latex) field.latex(expr.latex);
-  ctx.fieldMap.set(expr.id, field);
-  if (ctx.onFocusIn)  mqSpan.addEventListener('focusin',  () => ctx.onFocusIn());
-  if (ctx.onFocusOut) mqSpan.addEventListener('focusout', (e) => ctx.onFocusOut(e));
-
-  return { wrapper, toggle, field, mqSpan, handle };
-}
