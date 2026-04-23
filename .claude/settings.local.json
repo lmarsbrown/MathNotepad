@@ -5,7 +5,9 @@
       "Bash(node:*)",
       "Bash(grep *)",
       "Bash(git add *)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

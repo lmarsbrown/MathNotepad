@@ -567,6 +567,7 @@ body {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  border: none !important;
 }
 
 /* Override MathQuill border inside expr rows */
