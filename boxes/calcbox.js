@@ -27,9 +27,8 @@ class CalcBox extends Box{
      * @param {number} dir - 1 = arriving from above (start), -1 = arriving from below (end).
      */
     _focusCalcRowById(exprId, dir) {
-        const fieldMap = calcMqFields.get(this.id);
         const taMap    = calcTextAreaMap.get(this.id);
-        const field = fieldMap && fieldMap.get(exprId);
+        const field = this.fieldMap && this.fieldMap.get(exprId);
         if (field) { field.focus(); return; }
         const ta = taMap && taMap.get(exprId);
         if (ta) {
@@ -233,7 +232,6 @@ class CalcBox extends Box{
     _addExprAfter(afterExprId) {
         const idx = boxes.findIndex(b => b.id === this.id);
         if (idx === -1) return;
-        const calcFieldMap = calcMqFields.get(this.id);
         const newExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
         if (afterExprId) {
             const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
@@ -253,7 +251,7 @@ class CalcBox extends Box{
             boxes[idx].expressions.push(newExpr);
             this._exprList.appendChild(createCalcExprRow(newExpr, this._calcCtx).wrapper);
         }
-        const newField = calcFieldMap && calcFieldMap.get(newExpr.id);
+        const newField = this.fieldMap && this.fieldMap.get(newExpr.id);
         if (newField) {
             newField.reflow();
             setTimeout(() => newField.focus(), 0);
@@ -437,7 +435,9 @@ class CalcBox extends Box{
         const calcFieldMap = new Map();   // exprId → MQField
         const calcTaMap   = new Map();    // exprId → HTMLTextAreaElement
         const calcUpdateFns = new Map();  // exprId → (resultMap) => void
-        calcMqFields.set(this.id, calcFieldMap);
+
+        this.fieldMap = calcFieldMap;
+
         calcTextAreaMap.set(this.id, calcTaMap);
         calcUpdateFnsMap.set(this.id, calcUpdateFns);
 
@@ -744,10 +744,18 @@ function updateCalcResults(boxId) {
   for (const fn of updateFns.values()) fn(results);
 }
 
+/**
+ * Reads the current state of a calc box's UI and writes it back to the boxes data array, then syncs to storage.  
+ * Flushes the calc box UI state into the boxes data array, then persists to storage.
+ * Iterates every expr-wrapper row: text rows are saved as {id, type, text, latex},
+ * expression rows are saved as {id, latex, enabled, sliderMin, sliderMax} using
+ * the MathQuill field value and DOM data attributes for slider bounds.
+ * @param {string} boxId - The ID of the calc box to commit.
+ */
 function commitCalcBox(boxId) {
   const idx = boxes.findIndex(b => b.id === boxId);
   if (idx === -1) return;
-  const fieldMap = calcMqFields.get(boxId);
+  let fieldMap = boxes[idx].fieldMap;
   if (!fieldMap) return;
   const rows = boxList.querySelectorAll(`[data-id="${boxId}"] .expr-wrapper`);
   const expressions = [];
@@ -771,7 +779,7 @@ function commitCalcBox(boxId) {
 }
 
 function cleanupCalcBox(boxId) {
-  calcMqFields.delete(boxId);
+//   calcMqFields.delete(boxId);
   calcTextAreaMap.delete(boxId);
   calcUpdateFnsMap.delete(boxId);
   calcAddExprFns.delete(boxId);

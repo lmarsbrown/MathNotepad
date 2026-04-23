@@ -392,9 +392,20 @@ function markClean() {
 function restoreFromLatex(latex) {
   suppressHistory = true;
   suppressBoxSync = true;
-  boxes = parseFromLatex(latex);
+  // Clear before parseFromLatex so new fields registered during construction are retained.
+  // Clearing after would wipe them, making the post-DOM re-apply loop unable to find them.
   mqFields.clear(); boxResizers.clear();
+  boxes = parseFromLatex(latex);
   rebuildBoxList();
+  // Re-apply latex for math boxes now that elements are in the DOM.
+  // Setting field.latex() before DOM insertion can mis-render expressions like (x^2),
+  // causing the closing paren to appear inside the exponent.
+  for (const box of boxes) {
+    if (box.type === 'math' && box.content) {
+      const field = mqFields.get(box.id);
+      if (field) field.latex(box.content);
+    }
+  }
   suppressTextSync = true;
   latexSource.value = latex;
   suppressTextSync = false;

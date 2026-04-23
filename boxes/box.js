@@ -72,7 +72,7 @@ class Box{
             if (nearest.dataset.rowType === 'text') {
                 nearest.querySelector('.calc-text-input')?.focus();
             } else {
-                const field = calcMqFields.get(this.id)?.get(nearest.dataset.exprId);
+                const field = this.fieldMap?.get(nearest.dataset.exprId);
                 if (field) field.el().querySelector('textarea')?.focus({ preventScroll: true });
             }
             } else {
@@ -170,7 +170,7 @@ class MathBox extends Box{
         const field = MQ.MathField(mqSpan, {
         spaceBehavesLikeTab: false,
         autoCommands: 'sqrt nthroot sum int prod in notin subset subseteq supset supseteq cup cap emptyset forall exists infty partial setminus ell approx times vec hbar nabla '+greekLetters,
-        autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp mat',
+        autoOperatorNames: 'sin cos tan cot sec csc arcsin arccos arctan ln log exp mat',
         handlers: {
             edit: () => {
             const idx = boxes.findIndex(b => b.id === this.id);
@@ -491,7 +491,7 @@ function reflowBox(box){
     field.reflow();
   }
   // Reflow all MathQuill fields in a calc box
-  const calcMap = calcMqFields.get(box.id);
+  const calcMap = box.fieldMap;
   if (calcMap) {
     for (const field of calcMap.values()) field.reflow();
   }
@@ -636,22 +636,20 @@ function toggleComment(id) {
 
 // ── Focus a box ───────────────────────────────────────────────────────────────
 function focusBox(id) {
-  _dbg('FOCUS_BOX', {
-    id,
-    hasMqField: mqFields.has(id),
-    hasCalcMap: calcMqFields.has(id),
-    hasTextInput: !!boxList.querySelector(`[data-id="${id}"] .text-input`),
-    idInBoxes: boxes.some(b => b.id === id),
-  });
+  let idx = boxes.findIndex(b => b.id === this.id);
+  if(!idx){
+    console.error("Cannot focus box: Box not found");
+    return;
+  }
+  let box = boxes[idx];
   const field = mqFields.get(id);
   if (field) {
     setTimeout(() => field.focus(), 0);
     return;
   }
   // Calc box: focus the first expression field
-  const calcMap = calcMqFields.get(id);
-  if (calcMap) {
-    const firstField = calcMap.values().next().value;
+  if (box && box.fieldMap) {
+    const firstField = box.fieldMap.values().next().value;
     if (firstField) { setTimeout(() => firstField.focus(), 0); return; }
   }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);
@@ -682,8 +680,11 @@ function focusBoxAtEdge(id, edge) {
         return;
       }
     } else {
-      const target = calcMqFields.get(id)?.get(exprId);
-      if (target) { setTimeout(() => target.focus(), 0); return; }
+      let idx = boxes.findIndex(b => b.id === id);
+      if(idx){
+        const target = boxes[idx].fieldMap?.get(exprId);
+        if (target) { setTimeout(() => target.focus(), 0); return; }
+      }
     }
   }
   const el = boxList.querySelector(`[data-id="${id}"] .text-input`);

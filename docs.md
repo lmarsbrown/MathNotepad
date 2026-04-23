@@ -769,7 +769,7 @@ Created by `new CalcBox(id)` (boxes/calcbox.js).
 ```js
 let calcExprNextId   = 1;
 let calcTextNextId   = 1;
-let calcMqFields     = new Map();      // boxId → Map<exprId, MQField>
+// let calcMqFields     = new Map();      // boxId → Map<exprId, MQField>
 let calcTextAreaMap  = new Map();      // boxId → Map<exprId, HTMLTextAreaElement>
 let calcUpdateFnsMap = new Map();      // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns   = new Map();      // boxId → (afterExprId?) => void

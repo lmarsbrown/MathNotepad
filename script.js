@@ -57,7 +57,7 @@ const imageObjectUrls = new Map();        // boxId → blob object URL (revoke o
 // ── Calc box state ────────────────────────────────────────────────────────────
 let calcExprNextId = 1;
 let calcTextNextId = 1;
-let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
+// let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
 let calcTextAreaMap = new Map();    // boxId → Map<exprId, HTMLTextAreaElement>
 let calcUpdateFnsMap = new Map();   // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns = new Map();     // boxId → (afterExprId?: string) => void
@@ -803,9 +803,9 @@ function rebuildBoxList() {
   for (const [id] of mqFields) {
     if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
   }
-  for (const [id] of calcMqFields) {
-    if (!currentIds.has(id)) cleanupCalcBox(id);
-  }
+//   for (const [id] of calcMqFields) {
+    // if (!currentIds.has(id)) cleanupCalcBox(id);
+//   }
 
   // Remove stale DOM elements
   for (const child of [...boxList.children]) {
@@ -911,7 +911,7 @@ function restoreSnapshot(snap, preferFocusIdx = -1, preferCalcExprIdx = -1) {
     const targetBox = boxes[Math.min(preferFocusIdx, boxes.length - 1)];
     // For calc boxes, restore focus to the same expression index without scrolling
     if (preferCalcExprIdx >= 0 && targetBox.type === 'calc') {
-      const calcMap = calcMqFields.get(targetBox.id);
+      const calcMap = targetBox.fieldMap;
       if (calcMap && calcMap.size > 0) {
         const fields = [...calcMap.values()];
         const field = fields[Math.min(preferCalcExprIdx, fields.length - 1)];
