@@ -718,7 +718,7 @@ function classifyCalcExpr(latex) {
   if (!op) return 'bare';
   if (op.op !== '=') return 'equation';
   const lhs = trimmed.slice(0, op.idx).trim();
-  return /^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|theta|lambda|mu|sigma|omega))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs) ? 'def' : 'equation';
+  return /^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|theta|lambda|mu|sigma|phi|Phi|omega))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs) ? 'def' : 'equation';
 }
 
 // Returns true if the latex string is a plain numeric literal (e.g. "5", "3.14", "-2")
@@ -857,7 +857,7 @@ function createCalcExprRow(expr, ctx, opts = {}) {
     rightSlot: customRightSlot = null,
     showDragHandle = false,
     //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
-    autoCommands = 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon phi chi omega',
+    autoCommands = 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega',
     customUpdate = null,
   } = opts;
 

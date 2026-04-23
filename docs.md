@@ -638,6 +638,8 @@ Takes a MathQuill LaTeX string and produces either a numeric value, a GLSL shade
 
 *Multi-letter unit name matching:* The tokenizer greedily matches SI unit names (listed in `SI_ALL_UNIT_NAMES`, sorted longest-first) before falling back to single-letter IDENT tokens. This means `kg` tokenizes as one IDENT `kg`, not `k` × `g`. Any sequence of letters that begins a known unit name and is not directly adjacent to another letter on its left will match. Consequence: `kg`, `mol`, `Pa`, `Hz`, `rad`, etc. are always single variable-name tokens, even outside units mode. Multi-unit sequences without an explicit separator (e.g., `kgm`) are resolved greedily: `kg` matches first, then `m` separately.
 
+*`\Omega` / Ω handling:* `\Omega` (and the Unicode Ω character U+03A9) are intercepted in the tokenizer and emitted as IDENT tokens rather than CMD tokens. If the preceding token is an IDENT whose value combined with `Ω` matches a `SCALED_UNIT_ATOMS` entry (e.g., preceding `k` → `kΩ`), the preceding token is replaced by the combined unit. Otherwise `\Omega` emits IDENT(`Ω`). The `\mu\Omega` sequence works via the existing `\mu` parser case: `\mu` (CMD) followed by IDENT(`Ω`) → `μΩ`.
+
 **Parser:** `Parser` class (math.js) — recursive descent. Methods: `parseExpr`, `parseSum`, `parseProduct`, `parseUnary`, `parsePower`, `parseAtom`, `parseCallArgs`. Handles: arithmetic, `\frac`, `\sqrt`, trig/log/exp, `\pi`, `\infty`, absolute value `|...|`, Greek letters, subscripts, user function calls.
 
 `\log` is compiled to `div(ln(x), ln(10))` — it does not appear as a `log` AST node. `\sqrt[n]{x}` compiles to `pow(x, div(1, n))`.
@@ -924,9 +926,9 @@ In the preview, unit results use `astToLatex` output embedded directly in displa
 ## Implementation
 **Constants in math.js:**
 - `SI_BASE_UNITS` — `Set` of 7 base unit symbols: `m`, `s`, `kg`, `A`, `K`, `mol`, `cd`
-- `DERIVED_UNIT_EXPANSIONS` — maps 12 derived unit names + liter units (`L`, `mL`, `μL`) to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad, L, mL, μL
+- `DERIVED_UNIT_EXPANSIONS` — maps 13 derived unit names + liter units (`L`, `mL`, `μL`) to `{ coeff, units: { [base]: exponent } }`. Includes: N, J, W, Pa, Hz, V, C, F, H, T, Wb, rad, Ω, L, mL, μL
 - `CHEM_ONLY_UNITS` — `Set(['μL', 'mL', 'L'])` — gated behind chemistry mode
-- `SCALED_UNIT_ATOMS` — same format as `DERIVED_UNIT_EXPANSIONS`; all prefixed/scaled unit names not already in the base sets. Covers: nm/μm/mm/cm/km (km is max for distance), ns/μs/ms, min/hr/day/yr, μg/mg/g, μA/mA, nJ/μJ/mJ/kJ/MJ/GJ/TJ/PJ, nW/μW/mW/kW/MW/GW/TW, mN/kN/MN, kPa/MPa/GPa, kHz/MHz/GHz/THz, μV/mV/kV/MV, μC/mC, pF/nF/μF/mF, nH/μH/mH, μT/mT, μWb/mWb
+- `SCALED_UNIT_ATOMS` — same format as `DERIVED_UNIT_EXPANSIONS`; all prefixed/scaled unit names not already in the base sets. Covers: nm/μm/mm/cm/km (km is max for distance), ns/μs/ms, min/hr/day/yr, μg/mg/g, μA/mA, nJ/μJ/mJ/kJ/MJ/GJ/TJ/PJ, nW/μW/mW/kW/MW/GW/TW, mN/kN/MN, kPa/MPa/GPa, kHz/MHz/GHz/THz, μV/mV/kV/MV, μC/mC, pF/nF/μF/mF, nH/μH/mH, μT/mT, μWb/mWb, μΩ/mΩ/kΩ/MΩ/GΩ
 - `SCALABLE_UNITS_SERIES` — map from base unit name to `[{name, p}]` sorted ascending by scale factor `p`. Used by `_selectBestScale` to find the best-fit prefix.
 - `SI_ALL_UNIT_NAMES` — all unit names (base + derived + scaled) sorted longest-first; used by the tokenizer for greedy matching
 - `_activePhysicsChem` — module-level boolean set in `evaluateCalcExpressions`; gates liter unit recognition

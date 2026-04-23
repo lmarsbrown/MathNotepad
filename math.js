@@ -74,6 +74,7 @@ const DERIVED_UNIT_EXPANSIONS = {
   T:   { coeff: 1,    units: { kg: 1, s: -2, A: -1 } },
   Wb:  { coeff: 1,    units: { kg: 1, m: 2, s: -2, A: -1 } },
   rad: { coeff: 1,    units: {} },
+  'Ω':  { coeff: 1,    units: { kg: 1, m: 2, s: -3, A: -2 } },
   // Liter-based volume units (enabled only when chemistry mode is active).
   μL:  { coeff: 1e-9, units: { m: 3 } },
   mL:  { coeff: 1e-6, units: { m: 3 } },
@@ -161,6 +162,12 @@ const SCALED_UNIT_ATOMS = {
   // Weber (relative to Wb = kg·m²·s⁻²·A⁻¹)
   μWb: { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2, A: -1 } },
   mWb: { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2, A: -1 } },
+  // Resistance (relative to Ω = kg·m²·s⁻³·A⁻²)
+  'μΩ': { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3, A: -2 } },
+  'mΩ': { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3, A: -2 } },
+  'kΩ': { coeff: 1e3,       units: { kg: 1, m: 2, s: -3, A: -2 } },
+  'MΩ': { coeff: 1e6,       units: { kg: 1, m: 2, s: -3, A: -2 } },
+  'GΩ': { coeff: 1e9,       units: { kg: 1, m: 2, s: -3, A: -2 } },
 };
 
 // Scale series for each base/derived unit, used by _selectBestScale.
@@ -185,6 +192,7 @@ const SCALABLE_UNITS_SERIES = {
   H:   [{name:'nH',p:1e-9},{name:'μH',p:1e-6},{name:'mH',p:1e-3},{name:'H',p:1}],
   T:   [{name:'μT',p:1e-6},{name:'mT',p:1e-3},{name:'T',p:1}],
   Wb:  [{name:'μWb',p:1e-6},{name:'mWb',p:1e-3},{name:'Wb',p:1}],
+  'Ω':  [{name:'μΩ',p:1e-6},{name:'mΩ',p:1e-3},{name:'Ω',p:1},{name:'kΩ',p:1e3},{name:'MΩ',p:1e6},{name:'GΩ',p:1e9}],
 };
 
 // Compound unit simplifications — matched at display time (power=1 only).
@@ -328,7 +336,33 @@ function tokenize(src) {
         if (i < src.length) i++; // skip }
         cmd = '\\' + name;
       }
+      // \Omega → ohm unit atom (Ω). Combine with a preceding prefix letter if valid.
+      if (cmd === '\\Omega') {
+        const last = tokens.length ? tokens[tokens.length - 1] : null;
+        if (last && last.type === TK.IDENT) {
+          const combined = last.val + 'Ω';
+          if (SCALED_UNIT_ATOMS[combined] !== undefined) {
+            tokens[tokens.length - 1] = { type: TK.IDENT, val: combined };
+            continue;
+          }
+        }
+        tokens.push({ type: TK.IDENT, val: 'Ω' });
+        continue;
+      }
       tokens.push({ type: TK.CMD, val: cmd }); continue;
+    }
+    // Handle Ω (U+03A9) directly in source — combine with preceding prefix letter if valid.
+    if (c === 'Ω') {
+      const last = tokens.length ? tokens[tokens.length - 1] : null;
+      if (last && last.type === TK.IDENT) {
+        const combined = last.val + 'Ω';
+        if (SCALED_UNIT_ATOMS[combined] !== undefined) {
+          tokens[tokens.length - 1] = { type: TK.IDENT, val: combined };
+          i++; continue;
+        }
+      }
+      tokens.push({ type: TK.IDENT, val: 'Ω' });
+      i++; continue;
     }
     if (c === '{') { tokens.push({ type: TK.LBRACE }); i++; continue; }
     if (c === '}') { tokens.push({ type: TK.RBRACE }); i++; continue; }
@@ -683,7 +717,9 @@ class Parser {
         return { type: 'variable', name: this.tryParseSubscript('mu') };
       }
       case '\\sigma':   return { type: 'variable', name: this.tryParseSubscript('sigma') };
-      case '\\rho':   return { type: 'variable', name: this.tryParseSubscript('rho') };
+      case '\\rho':     return { type: 'variable', name: this.tryParseSubscript('rho') };
+      case '\\phi':     return { type: 'variable', name: this.tryParseSubscript('phi') };
+      case '\\Phi':     return { type: 'variable', name: this.tryParseSubscript('Phi') };
       case '\\omega':   return { type: 'variable', name: this.tryParseSubscript('omega') };
       case '\\hbar':    return { type: 'variable', name: this.tryParseSubscript('hbar') };
 
@@ -1345,8 +1381,8 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
     }
 
     case 'derivative': {
-      const arg = recurse(ast.arg);
-      return { ...ast, arg };
+      const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs));
+      return evaluateAstSymbolic(derivedAst, valueMap, funcDefs, opts);
     }
 
     case 'primecall': {
@@ -1900,8 +1936,8 @@ function astToLatex(ast, sigFigs = 6) {
       // Greek letter variable names must be re-emitted as LaTeX commands.
       // Subscripts are preserved: 'alpha_1' → '\alpha_{1}'.
       const GREEK_TO_LATEX = { alpha:'\\alpha', beta:'\\beta', gamma:'\\gamma', delta:'\\delta',
-        epsilon:'\\epsilon', theta:'\\theta', lambda:'\\lambda', mu:'\\mu', sigma:'\\sigma',rho:'\\rho',
-        omega:'\\omega', hbar:'\\hbar', pi:'\\pi' };
+        epsilon:'\\epsilon', theta:'\\theta', lambda:'\\lambda', mu:'\\mu', sigma:'\\sigma', rho:'\\rho',
+        phi:'\\phi', Phi:'\\Phi', omega:'\\omega', hbar:'\\hbar', pi:'\\pi' };
       const underscoreIdx = ast.name.indexOf('_');
       const base = underscoreIdx === -1 ? ast.name : ast.name.slice(0, underscoreIdx);
       const sub  = underscoreIdx === -1 ? ''        : ast.name.slice(underscoreIdx + 1);
@@ -2034,6 +2070,55 @@ function simplifyAstToBase(ast) {
   } catch (_) {
     return _simplifyAstFallback(ast);
   }
+}
+
+/**
+ * Like substituteAst but recurses into the substituted value, fully expanding
+ * transitive variable definitions. Safe only when varDefs is acyclic (guaranteed
+ * because varDefs is built from userResolved definitions, which pass cycle detection).
+ * e.g. with {c: pow(a,2), a: pow(b,3)}: variable(c) → pow(a,2) → pow(pow(b,3),2) = b^6.
+ */
+function _deepSubstituteVarDefs(ast, varDefs) {
+  if (ast.type === 'number') return ast;
+  if (ast.type === 'variable') {
+    if (varDefs.has(ast.name)) return _deepSubstituteVarDefs(varDefs.get(ast.name), varDefs);
+    return ast;
+  }
+  if (ast.type === 'derivative') return { ...ast, arg: _deepSubstituteVarDefs(ast.arg, varDefs) };
+  if (ast.type === 'call' || ast.type === 'primecall')
+    return { ...ast, args: ast.args.map(a => _deepSubstituteVarDefs(a, varDefs)) };
+  return ast;
+}
+
+/**
+ * Expand derivative nodes in an AST by substituting variable definitions into
+ * their arguments before differentiating. Allows d/db a to correctly
+ * differentiate a's definition (e.g. a=b^2 → 2b) rather than treating a as
+ * an unrelated constant (which would give 0). Handles transitive chains
+ * (e.g. c=a^2, a=b^3 → d/db c = 6b^5).
+ *
+ * The differentiation variable is excluded from the substitution so it stays
+ * symbolic for differentiation (e.g. d/db a with a=b^2: substitute a→b^2 but
+ * don't substitute b itself, then differentiate b^2 w.r.t. b → 2b).
+ *
+ * @param {object} ast - AST to process
+ * @param {Map<string,object>} varDefs - name → definition AST (non-numeric defs only)
+ * @param {Map} funcDefs - function definitions
+ * @returns {object} AST with derivative nodes expanded
+ */
+function expandDerivatives(ast, varDefs, funcDefs) {
+  if (ast.type === 'number' || ast.type === 'variable') return ast;
+  if (ast.type === 'derivative') {
+    // Exclude the differentiation variable so it remains symbolic for d/dv
+    const filtered = new Map([...varDefs].filter(([k]) => k !== ast.variable));
+    const substituted = filtered.size > 0 ? _deepSubstituteVarDefs(ast.arg, filtered) : ast.arg;
+    const expandedArg = expandDerivatives(substituted, varDefs, funcDefs);
+    return simplifyAst(differentiateAst(expandedArg, ast.variable, funcDefs));
+  }
+  if (ast.type === 'call' || ast.type === 'primecall') {
+    return { ...ast, args: ast.args.map(a => expandDerivatives(a, varDefs, funcDefs)) };
+  }
+  return ast;
 }
 
 /**
@@ -2473,7 +2558,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
     const op = findCalcOperatorAtDepth0(trimmed);
     if (!op || op.op !== '=') continue;
     const lhs = trimmed.slice(0, op.idx).trim();
-    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
+    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|phi|Phi|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
     try {
       const lhsAst = parseLatexToAst(lhs);
       if (lhsAst.type !== 'variable') continue;
@@ -2575,6 +2660,19 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
     if (!changed) break;
   }
 
+  // Build varAstDefs: variable name → definition AST for derivative expansion.
+  // Only includes successfully-resolved definitions whose RHS contains variables
+  // (pure numeric constants like b=3 are excluded so they stay symbolic during
+  // differentiation and are substituted numerically at evaluation time).
+  const varAstDefs = new Map();
+  for (const [name, def] of allDefs) {
+    if (!userResolved.has(name)) continue;
+    try {
+      const rhsAst = parseLatexToAst(def.rhsStr);
+      if (collectVariables(rhsAst).size > 0) varAstDefs.set(name, rhsAst);
+    } catch (_) {}
+  }
+
   // ── Step 3: Evaluate all expressions (enabled and disabled) and record results
   for (const e of expressions) {
     const trimmed = e.latex.trim();
@@ -2592,15 +2690,18 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
     // Helper: evaluate an AST and return a result object.
     // In units mode, returns { unitAst } for symbolic results; { value } for numeric.
     const evalToResult = (ast) => {
+      // Expand derivative args using variable definitions before evaluating,
+      // so d/db a correctly resolves a's definition (e.g. a=b^2 → 2b).
+      const processed = varAstDefs.size > 0 ? expandDerivatives(ast, varAstDefs, funcDefs) : ast;
       if (useUnits) {
         const warnings = [];
-        const val = evaluateAstSymbolic(ast, unitValues, funcDefs, { useSymbolic, warnings });
+        const val = evaluateAstSymbolic(processed, unitValues, funcDefs, { useSymbolic, warnings });
         if (val.type === 'number') return { value: val.value };
         let unitAst = val;
         try { unitAst = useBaseUnits ? simplifyAstToBase(val) : simplifyAst(val); } catch (_) {}
         return { unitAst, warnings };
       }
-      const val = evaluateAst(ast, allValues, funcDefs);
+      const val = evaluateAst(processed, allValues, funcDefs);
       return { value: val };
     };
 
@@ -2625,7 +2726,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       const rhsStr = trimmed.slice(op.idx + 1).trim();
 
       const lhsVarName = (() => {
-        if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhsStr)) return null;
+        if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|phi|Phi|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhsStr)) return null;
         try { const a = parseLatexToAst(lhsStr); return a.type === 'variable' ? a.name : null; } catch (_) { return null; }
       })();
       const isDefiningExpr = lhsVarName !== null && allDefs.has(lhsVarName) && allDefs.get(lhsVarName).exprId === e.id;
