@@ -760,24 +760,29 @@ Navigation: Enter in a row adds a new row after it; arrow keys at field edges cr
   hidden: false,           // suppress all preview output (expressions still evaluate in editor)
   sigFigs: 6,              // significant figures for numeric result display
   expressions: [
-    { id, latex, enabled },           // expression row
-    { id, type: 'text', text, latex: '' }  // text annotation row
+    ExpressionBox,  // { id, latex, enabled, sliderMin, sliderMax, exprType }
+    CalcTextRow,    // { id, type:'text', content/text, latex:'' }
   ]
 }
 ```
 Created by `new CalcBox(id)` (boxes/calcbox.js).
 
+**Expression instance classes (boxes/calcbox.js):**
+- `ExpressionBox extends Box` — owns `.element` (.expr-wrapper), `.latex`, `.enabled`, `.exprType` (`'constant'|'def'|'bare'|'equation'`). Key methods: `_analyze()` (cached type detection), `updateResult(resultMap)`, `_delete(focusAdjacent)`, `toData()`.
+- `CalcTextRow extends Box` — owns `.element` (.expr-wrapper[data-row-type=text]), `.content` (text value). `get text()` provides serialization compatibility. Key methods: `_delete(focusAdjacent)`, `toData()`.
+
+`CalcBox.expressions` is `Array<ExpressionBox | CalcTextRow>`.
+
 **Module-level state (script.js):**
 ```js
 let calcExprNextId   = 1;
 let calcTextNextId   = 1;
-// let calcMqFields     = new Map();      // boxId → Map<exprId, MQField>
 let calcTextAreaMap  = new Map();      // boxId → Map<exprId, HTMLTextAreaElement>
-let calcUpdateFnsMap = new Map();      // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns   = new Map();      // boxId → (afterExprId?) => void
 let calcAddTextFns   = new Map();      // boxId → (afterExprId?) => void
 let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 ```
+`CalcBox.fieldMap` (`Map<exprId, MQField>`) is an instance property initialized in the CalcBox constructor.
 
 **Key functions:**
 | Function | Location | Purpose |
@@ -785,9 +790,9 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
 | `formatCalcResult(result)` | boxes/calcbox.js | `{value}` → `"= 5"` / `"≈ 1.414"`, etc. |
 | `classifyCalcExpr(latex)` | boxes/calcbox.js | Detect expression kind for display |
 | `scheduleCalcUpdate(boxId)` | boxes/calcbox.js | rAF-debounced update trigger |
-| `updateCalcResults(boxId)` | boxes/calcbox.js | Evaluate + fire per-row update fns |
-| `commitCalcBox(boxId)` | boxes/calcbox.js | DOM → `boxes[idx].expressions` → `syncToText()` |
-| `cleanupCalcBox(boxId)` | boxes/calcbox.js | Delete all 4 maps for boxId |
+| `updateCalcResults(boxId)` | boxes/calcbox.js | Evaluate + call `exprBox.updateResult()` per row |
+| `commitCalcBox(boxId)` | boxes/calcbox.js | Calls `syncToText()`; serialization reads live values via `toData()` |
+| `cleanupCalcBox(boxId)` | boxes/calcbox.js | Delete taMap/addExprFns/addTextFns for boxId |
 
 **DOM structure** (built in `CalcBox.createElement()`, boxes/calcbox.js):
 ```
@@ -821,20 +826,16 @@ let calcPendingUpdate = new Set();     // boxIds with pending rAF update
   .delete-btn
 ```
 
-**`createCalcExprRow`** (boxes/calcbox.js, module-level) — shared with graph editor. Wires:
+**`ExpressionBox.createElement()`** — builds .expr-wrapper. Wires:
 - Toggle click → `commitCalcBox` + `scheduleCalcUpdate`
-- MQ `edit` → `commitCalcBox` + `scheduleCalcUpdate`
-- MQ `enter` → insert new expression row after current
-- MQ `moveOutOf/upOutOf/downOutOf` → navigate within box via `focusCalcRowById`; at edges, call `focusBoxAtEdge`
-- MQ `keydown` Backspace on empty → delete row, focus adjacent via `focusCalcRowById`
+- MQ `edit` → `commitCalcBox` + `scheduleCalcUpdate` + `_analyze()`
+- MQ `enter` → `_calcBox._addExprAfter(this.id)`
+- MQ `moveOutOf/upOutOf/downOutOf` → navigate within box; at edges, call `focusBoxAtEdge`
+- MQ `keydown` Backspace on empty → `_delete(true)`
 
-**`createCalcTextRow`** — inner function inside `CalcBox.createElement()`. Text annotation rows:
-- Textarea auto-resizes; `input` → `commitCalcBox`
-- Enter → add expression row after (via `calcAddExprFns`)
-- Backspace on empty → delete row, focus adjacent
-- Arrow up at start / down at end → cross to adjacent row or box
+**`createCalcExprRow`** (boxes/calcbox.js, module-level) — still used by the graph editor only. Same callback-based API as before.
 
-**`focusCalcRowById(exprId, dir)`** — inner helper inside `CalcBox.createElement()`. Focuses an expression row (via MQ field) or text row (via textarea). `dir=1` focuses at start, `dir=-1` at end (for text rows).
+**`_focusCalcRowById(exprId, dir)`** — CalcBox method. Focuses an expression row (via `this.fieldMap`) or text row (via `calcTextAreaMap`). `dir=-1` positions textarea cursor at end.
 
 **`diffAndApply` behaviour:** Calc boxes always fully rebuild (cleanupCalcBox + box.createElement() + replaceChild) even when the id matches, so expression list stays in sync with source-panel edits.
 

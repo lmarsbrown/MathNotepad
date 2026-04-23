@@ -1,3 +1,411 @@
+// ── ExpressionBox ─────────────────────────────────────────────────────────────
+
+/**
+ * Represents a single math expression row within a CalcBox.
+ * Owns its DOM element (.expr-wrapper), current LaTeX, and expression-type analysis.
+ * @extends Box
+ */
+class ExpressionBox extends Box {
+    /**
+     * @param {{ id?: string, latex?: string, enabled?: boolean, sliderMin?: number, sliderMax?: number }} data
+     * @param {CalcBox} calcBox - Parent CalcBox instance.
+     */
+    constructor(data = {}, calcBox) {
+        super('expr', data.id);
+        this.latex      = data.latex     || '';
+        this.enabled    = data.enabled   !== false;
+        this.sliderMin  = data.sliderMin ?? 0;
+        this.sliderMax  = data.sliderMax ?? 10;
+        this._calcBox   = calcBox;
+        /** Cached expression type: 'constant' | 'def' | 'bare' | 'equation' */
+        this.exprType   = null;
+        this._lastAnalyzedLatex = null;
+        // DOM refs — set during createElement()
+        this._mqField     = null;
+        this._toggle      = null;
+        this._resultSpan  = null;
+        this._errorLine   = null;
+        this._warningLine = null;
+        this._showSlider  = null;
+        this._hideSlider  = null;
+        this.element = this.createElement();
+        this._analyze();
+    }
+
+    /**
+     * Builds the .expr-wrapper DOM for this expression row.
+     * Registers this._mqField into this._calcBox.fieldMap.
+     * @returns {HTMLElement}
+     */
+    createElement() {
+        const resultSpan = document.createElement('span');
+        resultSpan.className = 'calc-expr-result';
+        resultSpan.style.display = 'none';
+        resultSpan.title = 'Click to copy';
+        resultSpan.style.cursor = 'pointer';
+        this._resultSpan = resultSpan;
+
+        const { wrapper, mqField: field, toggle, mqSpan } = createExprRow(
+            { id: this.id, enabled: this.enabled },
+            {
+                //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
+                autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega',
+                rightSlot: resultSpan,
+                onEdit:          () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); this._analyze(); },
+                onEnter:         () => this._calcBox._addExprAfter(this.id),
+                onToggle:        () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
+                onDelete:        () => this._delete(false),
+                onBackspaceEmpty:() => this._delete(true),
+                onMoveOut: (dir) => {
+                    const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
+                    const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                    if (dir === 1 && idx < wrappers.length - 1) {
+                        this._calcBox._focusCalcRowById(wrappers[idx + 1].dataset.exprId, 1);
+                    } else if (dir === -1 && idx > 0) {
+                        this._calcBox._focusCalcRowById(wrappers[idx - 1].dataset.exprId, -1);
+                    } else {
+                        const boxIdx = boxes.findIndex(b => b.id === this._calcBox.id);
+                        if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+                        else if (dir === -1 && boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+                    }
+                },
+            }
+        );
+        this._mqField = field;
+        this._toggle  = toggle;
+
+        wrapper.addEventListener('dblclick', e => {
+            if (!isPreviewOpen) return;
+            e.stopPropagation();
+            scrollAndHighlightPreview(this._calcBox.id, this.id);
+        });
+
+        mqSpan.addEventListener('focusin',  ()  => setFocused(this._calcBox.id, this._calcBox.element));
+        mqSpan.addEventListener('focusout', (e) => {
+            if (!this._calcBox.element.contains(e.relatedTarget)) clearFocused(this._calcBox.id, this._calcBox.element);
+        });
+
+        const { showSlider, hideSlider } = createSliderSection(wrapper, this, {
+            getLatex: () => this._mqField.latex(),
+            setLatex: (str) => { this._mqField.latex(str); commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
+            onBoundsCommit: () => commitCalcBox(this._calcBox.id),
+        });
+        this._showSlider = showSlider;
+        this._hideSlider = hideSlider;
+
+        const errorLine = document.createElement('div');
+        errorLine.className = 'calc-expr-error';
+        errorLine.style.display = 'none';
+        wrapper.appendChild(errorLine);
+        this._errorLine = errorLine;
+
+        const warningLine = document.createElement('div');
+        warningLine.className = 'calc-unit-warning';
+        warningLine.style.display = 'none';
+        wrapper.appendChild(warningLine);
+        this._warningLine = warningLine;
+
+        // Copy-on-click for the result span
+        let copyFlashing = false;
+        resultSpan.addEventListener('click', () => {
+            if (copyFlashing) return;
+            const val = resultSpan.dataset.copyValue ?? resultSpan.textContent;
+            if (!val) return;
+            const num = val.replace(/^[=≈]\s*/, '');
+            const prevHtml = resultSpan.innerHTML;
+            const prevColor = resultSpan.style.color;
+            copyFlashing = true;
+            navigator.clipboard.writeText(num).then(() => {
+                resultSpan.textContent = 'copied!';
+                resultSpan.style.color = '#4ec9b0';
+                setTimeout(() => {
+                    resultSpan.innerHTML = prevHtml;
+                    resultSpan.style.color = prevColor;
+                    copyFlashing = false;
+                }, 900);
+            }).catch(() => { copyFlashing = false; });
+        });
+
+        if (this.latex) field.latex(this.latex);
+        this._calcBox.fieldMap.set(this.id, this._mqField);
+        return wrapper;
+    }
+
+    /**
+     * Classifies the current LaTeX and caches result in this.exprType.
+     * No-op if the LaTeX hasn't changed since last call.
+     * Types: 'constant' (def with numeric literal RHS), 'def', 'bare', 'equation'.
+     */
+    _analyze() {
+        const latex = this._mqField ? this._mqField.latex() : this.latex;
+        if (latex === this._lastAnalyzedLatex) return;
+        this._lastAnalyzedLatex = latex;
+        const kind = classifyCalcExpr(latex);
+        if (kind === 'def') {
+            const op  = findCalcOperatorAtDepth0(latex.trim());
+            const rhs = op ? latex.trim().slice(op.idx + op.len).trim() : '';
+            this.exprType = isNumericLiteralLatex(rhs) ? 'constant' : 'def';
+        } else {
+            this.exprType = kind;
+        }
+    }
+
+    /**
+     * Removes this row from the DOM and the parent CalcBox's expression list.
+     * @param {boolean} focusAdjacent - Whether to focus the nearest remaining row.
+     */
+    _delete(focusAdjacent) {
+        if (focusAdjacent) {
+            const wrappers = Array.from(this._calcBox._exprList.querySelectorAll('.expr-wrapper'));
+            const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+            if (wrappers.length > 1) {
+                const focusId = idx > 0 ? wrappers[idx - 1].dataset.exprId : wrappers[idx + 1].dataset.exprId;
+                this._calcBox._focusCalcRowById(focusId, idx > 0 ? -1 : 1);
+            }
+        }
+        const exprIdx = this._calcBox.expressions.indexOf(this);
+        if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
+        this._calcBox.fieldMap.delete(this.id);
+        this.element.remove();
+        commitCalcBox(this._calcBox.id);
+        scheduleCalcUpdate(this._calcBox.id);
+    }
+
+    /**
+     * Updates the result display using the cached this.exprType (no re-analysis).
+     * @param {Map|null} resultMap - Map<exprId, result> from evaluateCalcExpressions.
+     */
+    updateResult(resultMap) {
+        const result       = resultMap ? resultMap.get(this.id) : null;
+        const currentLatex = this._mqField ? this._mqField.latex() : this.latex;
+        let suppress = false;
+        let numericLiteralRhs = null;
+        // 'constant' type: suppress result display and show slider instead
+        if (this.exprType === 'constant' && !(result && result.boolValue !== undefined)) {
+            suppress = true;
+            const op = findCalcOperatorAtDepth0(currentLatex.trim());
+            numericLiteralRhs = op ? currentLatex.trim().slice(op.idx + op.len).trim() : '';
+        }
+        if (numericLiteralRhs !== null && result && !result.error) {
+            this._showSlider(parseFloat(numericLiteralRhs));
+        } else {
+            this._hideSlider();
+        }
+        this._warningLine.style.display = 'none';
+        this._warningLine.textContent   = '';
+        const sigFigs = this._calcBox.sigFigs ?? 6;
+        if (result && result.error) {
+            this._errorLine.textContent = result.error;
+            this._errorLine.style.display = '';
+            this._resultSpan.style.display = 'none';
+            this.element.classList.add('has-error');
+        } else if (result && result.unitAst !== undefined && !suppress) {
+            this._errorLine.style.display = 'none';
+            this.element.classList.remove('has-error');
+            renderUnitResult(this._resultSpan, result.unitAst, result.warnings, sigFigs);
+            this._resultSpan.dataset.copyValue = buildAstText(result.unitAst, sigFigs) ?? '';
+            this._resultSpan.style.display = '';
+            this._resultSpan.style.color = '';
+            const warnText = formatUnitWarnings(result.warnings);
+            if (warnText) { this._warningLine.textContent = warnText; this._warningLine.style.display = ''; }
+        } else {
+            const formatted = result ? formatCalcResult(result, sigFigs) : null;
+            if (formatted !== null && !suppress) {
+                this._errorLine.style.display = 'none';
+                if (formatted.length > CALC_RESULT_MAX_CHARS) {
+                    this._resultSpan.textContent = 'Too Bulky!';
+                    this._resultSpan.dataset.copyValue = formatted;
+                } else {
+                    this._resultSpan.textContent = formatted;
+                    delete this._resultSpan.dataset.copyValue;
+                }
+                this._resultSpan.style.display = '';
+                if (result.boolValue === true)       this._resultSpan.style.color = '#4ec9b0';
+                else if (result.boolValue === false)  this._resultSpan.style.color = '#f44747';
+                else                                  this._resultSpan.style.color = '';
+                this.element.classList.remove('has-error');
+            } else {
+                this._errorLine.style.display = 'none';
+                this._resultSpan.style.display = 'none';
+                this.element.classList.remove('has-error');
+            }
+        }
+    }
+
+    /**
+     * Focuses the MathQuill field of this expression.
+     */
+    focus() {
+        if (this._mqField) this._mqField.focus();
+    }
+
+    /**
+     * Returns a plain serializable data object for persistence.
+     * @returns {{ id: string, latex: string, enabled: boolean, sliderMin: number, sliderMax: number }}
+     */
+    toData() {
+        const latex      = this._mqField ? this._mqField.latex() : this.latex;
+        const enabled    = this._toggle  ? this._toggle.getAttribute('aria-pressed') === 'true' : this.enabled;
+        const sliderMin  = this.element  ? (parseFloat(this.element.dataset.sliderMin) || 0)  : this.sliderMin;
+        const sliderMax  = this.element  ? (parseFloat(this.element.dataset.sliderMax) || 10) : this.sliderMax;
+        return { id: this.id, latex, enabled, sliderMin, sliderMax };
+    }
+}
+
+// ── CalcTextRow ───────────────────────────────────────────────────────────────
+
+/**
+ * Represents a text annotation row within a CalcBox.
+ * Uses type='text' for serialization compatibility with serializeToLatex().
+ * @extends Box
+ */
+class CalcTextRow extends Box {
+    /**
+     * @param {{ id?: string, text?: string }} data
+     * @param {CalcBox} calcBox - Parent CalcBox instance.
+     */
+    constructor(data = {}, calcBox) {
+        super('text', data.id);
+        this.content   = data.text || '';
+        this.latex     = '';    // always empty; toData() returns this in the data object
+        this.enabled   = true;  // always enabled; evaluator skips empty-latex rows
+        this._calcBox  = calcBox;
+        this._textarea = null;  // set during createElement()
+        this.element   = this.createElement();
+    }
+
+    /** preview.js reads e.text on CalcTextRow instances when rendering the preview panel. */
+    get text() { return this.content; }
+
+    /**
+     * Builds the .expr-wrapper[data-row-type=text] DOM for this annotation row.
+     * @returns {HTMLElement}
+     */
+    createElement() {
+        const taMap = calcTextAreaMap.get(this._calcBox.id);
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'expr-wrapper';
+        wrapper.dataset.exprId  = this.id;
+        wrapper.dataset.rowType = 'text';
+
+        wrapper.addEventListener('dblclick', e => {
+            if (!isPreviewOpen) return;
+            e.stopPropagation();
+            scrollAndHighlightPreview(this._calcBox.id, this.id);
+        });
+
+        const row = document.createElement('div');
+        row.className = 'calc-text-row';
+
+        const ta = document.createElement('textarea');
+        ta.className   = 'calc-text-input';
+        ta.rows        = 1;
+        ta.value       = this.content;
+        ta.placeholder = 'Text…';
+        this._textarea = ta;
+
+        const autoResize = () => {
+            ta.style.height = '1px';
+            ta.style.height = ta.scrollHeight + 'px';
+        };
+        requestAnimationFrame(autoResize);
+
+        ta.addEventListener('input', () => {
+            autoResize();
+            this.content = ta.value;
+            syncToText();
+        });
+
+        ta.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                this._calcBox._addExprAfter(this.id);
+                return;
+            }
+            if (e.key === 'Backspace' && ta.value === '') {
+                e.preventDefault();
+                this._delete(true);
+                return;
+            }
+            if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+                e.preventDefault();
+                const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
+                const rowIdx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                if (rowIdx > 0) {
+                    this._calcBox._focusCalcRowById(wrappers[rowIdx - 1].dataset.exprId, -1);
+                } else {
+                    const boxIdx = boxes.findIndex(b => b.id === this._calcBox.id);
+                    if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+                }
+                return;
+            }
+            if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
+                e.preventDefault();
+                const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
+                const rowIdx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                if (rowIdx < wrappers.length - 1) {
+                    this._calcBox._focusCalcRowById(wrappers[rowIdx + 1].dataset.exprId, 1);
+                } else {
+                    const boxIdx = boxes.findIndex(b => b.id === this._calcBox.id);
+                    if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+                }
+                return;
+            }
+        });
+
+        ta.addEventListener('focusin',  ()  => setFocused(this._calcBox.id, this._calcBox.element));
+        ta.addEventListener('focusout', (e) => {
+            if (!this._calcBox.element.contains(e.relatedTarget)) clearFocused(this._calcBox.id, this._calcBox.element);
+        });
+
+        if (taMap) taMap.set(this.id, ta);
+
+        const delBtn = document.createElement('button');
+        delBtn.type      = 'button';
+        delBtn.className = 'expr-delete';
+        delBtn.textContent = '×';
+        delBtn.addEventListener('mousedown', e => e.preventDefault());
+        delBtn.addEventListener('click', () => this._delete(true));
+
+        row.appendChild(ta);
+        row.appendChild(delBtn);
+        wrapper.appendChild(row);
+        return wrapper;
+    }
+
+    /**
+     * Removes this row from the DOM and the parent CalcBox's expression list.
+     * @param {boolean} focusAdjacent
+     */
+    _delete(focusAdjacent) {
+        if (focusAdjacent) {
+            const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
+            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+            if (wrappers.length > 1) {
+                const focusId = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
+                this._calcBox._focusCalcRowById(focusId, rowIdx > 0 ? -1 : 1);
+            }
+        }
+        const taMap = calcTextAreaMap.get(this._calcBox.id);
+        if (taMap) taMap.delete(this.id);
+        const exprIdx = this._calcBox.expressions.indexOf(this);
+        if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
+        this.element.remove();
+        commitCalcBox(this._calcBox.id);
+    }
+
+    /**
+     * Returns a plain serializable data object for persistence.
+     * @returns {{ id: string, type: string, text: string, latex: string }}
+     */
+    toData() {
+        return { id: this.id, type: 'text', text: this._textarea ? this._textarea.value : this.content, latex: '' };
+    }
+}
+
+// ── CalcBox ───────────────────────────────────────────────────────────────────
+
 class CalcBox extends Box{
     constructor(id, data={}){
         super("calc",id);
@@ -13,11 +421,15 @@ class CalcBox extends Box{
         this.hidden = !!data.hidden;
         this.collapsed = !!data.collapsed;
         this.sigFigs = data.sigFigs || 6;
-        this.expressions = data.expressions || [
-            { id: 'ce' + (calcExprNextId++), latex: '', enabled: true },
-        ];
+        // Initialize maps early so ExpressionBox/CalcTextRow constructors can register into them
+        this.fieldMap = new Map();
+        calcTextAreaMap.set(this.id, new Map());
+        // Map plain data objects to class instances
+        const defaultExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
+        this.expressions = (data.expressions || [defaultExpr]).map(e =>
+            e.type === 'text' ? new CalcTextRow(e, this) : new ExpressionBox(e, this)
+        );
         this._exprList = null; // set during createElement
-        this._calcCtx  = null; // set during createElement
         this.element = this.createElement();
     }
 
@@ -36,141 +448,6 @@ class CalcBox extends Box{
             const pos = dir === -1 ? ta.value.length : 0;
             ta.selectionStart = ta.selectionEnd = pos;
         }
-    }
-
-    /**
-     * Creates a text annotation row inside a calc box.
-     * Renders as a plain textarea with inline-LaTeX support.
-     * @param {{ id: string, text: string }} expr - The text row data.
-     * @returns {HTMLElement} The wrapper element.
-     */
-    _createCalcTextRow(expr) {
-        const taMap = calcTextAreaMap.get(this.id);
-        const wrapper = document.createElement('div');
-        wrapper.className = 'expr-wrapper';
-        wrapper.dataset.exprId = expr.id;
-        wrapper.dataset.rowType = 'text';
-
-        // Double-click → scroll preview to this specific text row and blink it
-        wrapper.addEventListener('dblclick', e => {
-            if (!isPreviewOpen) return;
-            e.stopPropagation();
-            scrollAndHighlightPreview(this.id, expr.id);
-        });
-
-        const row = document.createElement('div');
-        row.className = 'calc-text-row';
-
-        const ta = document.createElement('textarea');
-        ta.className = 'calc-text-input';
-        ta.rows = 1;
-        ta.value = expr.text || '';
-        ta.placeholder = 'Text…';
-
-        const autoResize = () => {
-            ta.style.height = '1px';
-            ta.style.height = ta.scrollHeight + 'px';
-        };
-        requestAnimationFrame(autoResize);
-
-        ta.addEventListener('input', () => {
-            autoResize();
-            const boxIdx = boxes.findIndex(b => b.id === this.id);
-            if (boxIdx !== -1) {
-            const exprIdx = boxes[boxIdx].expressions?.findIndex(e => e.id === expr.id) ?? -1;
-            if (exprIdx !== -1) boxes[boxIdx].expressions[exprIdx].text = ta.value;
-            }
-            syncToText();
-        });
-
-        ta.addEventListener('keydown', e => {
-            // Enter → add expression row after this text row
-            if (e.key === 'Enter') {
-            e.preventDefault();
-            const addAfter = calcAddExprFns.get(this.id);
-            if (addAfter) addAfter(expr.id);
-            return;
-            }
-            // Backspace on empty → delete row, focus adjacent
-            if (e.key === 'Backspace' && ta.value === '') {
-            e.preventDefault();
-            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (wrappers.length > 1) {
-                const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
-                this._focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
-            }
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx !== -1) {
-                const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
-                if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-            }
-            if (taMap) taMap.delete(expr.id);
-            wrapper.remove();
-            commitCalcBox(this.id);
-            return;
-            }
-            // Arrow up at start → move to previous row
-            if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
-            e.preventDefault();
-            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (rowIdx > 0) {
-                this._focusCalcRowById(wrappers[rowIdx - 1].dataset.exprId, -1);
-            } else {
-                const boxIdx = boxes.findIndex(b => b.id === this.id);
-                if (boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-            }
-            return;
-            }
-            // Arrow down at end → move to next row
-            if (e.key === 'ArrowDown' && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) {
-            e.preventDefault();
-            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (rowIdx < wrappers.length - 1) {
-                this._focusCalcRowById(wrappers[rowIdx + 1].dataset.exprId, 1);
-            } else {
-                const boxIdx = boxes.findIndex(b => b.id === this.id);
-                if (boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-            }
-            return;
-            }
-        });
-
-        ta.addEventListener('focusin',  () => setFocused(this.id, this.element));
-        ta.addEventListener('focusout', (e) => {
-            if (!this.element.contains(e.relatedTarget)) clearFocused(this.id, this.element);
-        });
-
-        if (taMap) taMap.set(expr.id, ta);
-
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'expr-delete';
-        delBtn.textContent = '×';
-        delBtn.addEventListener('mousedown', e => e.preventDefault());
-        delBtn.addEventListener('click', () => {
-            const wrappers = [...this._exprList.querySelectorAll('.expr-wrapper')];
-            const rowIdx = wrappers.findIndex(w => w.dataset.exprId === expr.id);
-            if (wrappers.length > 1) {
-            const focusTarget = rowIdx > 0 ? wrappers[rowIdx - 1].dataset.exprId : wrappers[rowIdx + 1].dataset.exprId;
-            this._focusCalcRowById(focusTarget, rowIdx > 0 ? -1 : 1);
-            }
-            const idx = boxes.findIndex(b => b.id === this.id);
-            if (idx !== -1) {
-            const exprIdx = boxes[idx].expressions.findIndex(ex => ex.id === expr.id);
-            if (exprIdx !== -1) boxes[idx].expressions.splice(exprIdx, 1);
-            }
-            if (taMap) taMap.delete(expr.id);
-            wrapper.remove();
-            commitCalcBox(this.id);
-        });
-
-        row.appendChild(ta);
-        row.appendChild(delBtn);
-        wrapper.appendChild(row);
-        return wrapper;
     }
 
     /**
@@ -230,32 +507,27 @@ class CalcBox extends Box{
      * @param {string|null} afterExprId - Insert after this expression id, or append if null.
      */
     _addExprAfter(afterExprId) {
-        const idx = boxes.findIndex(b => b.id === this.id);
-        if (idx === -1) return;
-        const newExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
+        const newData    = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
+        const newExprBox = new ExpressionBox(newData, this);
         if (afterExprId) {
-            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+            const exprIdx = this.expressions.findIndex(e => e.id === afterExprId);
             if (exprIdx !== -1) {
-            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+                this.expressions.splice(exprIdx + 1, 0, newExprBox);
             } else {
-            boxes[idx].expressions.push(newExpr);
+                this.expressions.push(newExprBox);
             }
-            const afterRow = this._exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
-            const newRow = createCalcExprRow(newExpr, this._calcCtx).wrapper;
+            const afterRow = this._exprList.querySelector(`[data-expr-id="${afterExprId}"]`);
             if (afterRow) {
-            this._exprList.insertBefore(newRow, afterRow.nextSibling);
+                this._exprList.insertBefore(newExprBox.element, afterRow.nextSibling);
             } else {
-            this._exprList.appendChild(newRow);
+                this._exprList.appendChild(newExprBox.element);
             }
         } else {
-            boxes[idx].expressions.push(newExpr);
-            this._exprList.appendChild(createCalcExprRow(newExpr, this._calcCtx).wrapper);
+            this.expressions.push(newExprBox);
+            this._exprList.appendChild(newExprBox.element);
         }
-        const newField = this.fieldMap && this.fieldMap.get(newExpr.id);
-        if (newField) {
-            newField.reflow();
-            setTimeout(() => newField.focus(), 0);
-        }
+        newExprBox._mqField.reflow();
+        setTimeout(() => newExprBox._mqField.focus(), 0);
         commitCalcBox(this.id);
         scheduleCalcUpdate(this.id);
     }
@@ -265,30 +537,26 @@ class CalcBox extends Box{
      * @param {string|null} afterExprId - Insert after this expression id, or append if null.
      */
     _addTextAfter(afterExprId) {
-        const idx = boxes.findIndex(b => b.id === this.id);
-        if (idx === -1) return;
-        const taMap = calcTextAreaMap.get(this.id);
-        const newExpr = { id: 'ct' + (calcTextNextId++), type: 'text', text: '', latex: '' };
+        const newData    = { id: 'ct' + (calcTextNextId++), text: '' };
+        const newTextRow = new CalcTextRow(newData, this);
         if (afterExprId) {
-            const exprIdx = boxes[idx].expressions.findIndex(e => e.id === afterExprId);
+            const exprIdx = this.expressions.findIndex(e => e.id === afterExprId);
             if (exprIdx !== -1) {
-            boxes[idx].expressions.splice(exprIdx + 1, 0, newExpr);
+                this.expressions.splice(exprIdx + 1, 0, newTextRow);
             } else {
-            boxes[idx].expressions.push(newExpr);
+                this.expressions.push(newTextRow);
             }
-            const afterRow = this._exprList.querySelector(`.expr-wrapper[data-expr-id="${afterExprId}"]`);
-            const newRow = this._createCalcTextRow(newExpr);
+            const afterRow = this._exprList.querySelector(`[data-expr-id="${afterExprId}"]`);
             if (afterRow) {
-            this._exprList.insertBefore(newRow, afterRow.nextSibling);
+                this._exprList.insertBefore(newTextRow.element, afterRow.nextSibling);
             } else {
-            this._exprList.appendChild(newRow);
+                this._exprList.appendChild(newTextRow.element);
             }
         } else {
-            boxes[idx].expressions.push(newExpr);
-            this._exprList.appendChild(this._createCalcTextRow(newExpr));
+            this.expressions.push(newTextRow);
+            this._exprList.appendChild(newTextRow.element);
         }
-        const newTa = taMap && taMap.get(newExpr.id);
-        if (newTa) setTimeout(() => newTa.focus(), 0);
+        setTimeout(() => newTextRow._textarea?.focus(), 0);
         commitCalcBox(this.id);
     }
 
@@ -432,42 +700,9 @@ class CalcBox extends Box{
         exprList.className = 'calc-expr-list';
         this._exprList = exprList;
 
-        const calcFieldMap = new Map();   // exprId → MQField
-        const calcTaMap   = new Map();    // exprId → HTMLTextAreaElement
-        const calcUpdateFns = new Map();  // exprId → (resultMap) => void
-
-        this.fieldMap = calcFieldMap;
-
-        calcTextAreaMap.set(this.id, calcTaMap);
-        calcUpdateFnsMap.set(this.id, calcUpdateFns);
-
-        // ── Calc box context passed to the module-level createCalcExprRow ────────────
-        const calcCtx = {
-            boxId: this.id,
-            fieldMap: calcFieldMap,
-            updateFns: calcUpdateFns,
-            exprList,
-            focusRowById: (exprId, dir) => this._focusCalcRowById(exprId, dir),
-            addExpr: (afterId) => this._addExprAfter(afterId),
-            commitBox: () => commitCalcBox(this.id),
-            scheduleUpdate: () => scheduleCalcUpdate(this.id),
-            onMoveOutOfList: (dir) => {
-                const boxIdx = boxes.findIndex(b => b.id === this.id);
-                if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-                else if (dir === -1 && boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-            },
-            onDblClick: (exprId) => {
-                if (!isPreviewOpen) return;
-                scrollAndHighlightPreview(this.id, exprId);
-            },
-            onFocusIn: () => setFocused(this.id, div),
-            onFocusOut: (e) => { if (!div.contains(e.relatedTarget)) clearFocused(this.id, div); },
-        };
-        this._calcCtx = calcCtx;
-
-        // Populate expression list
-        for (const expr of (this.expressions || [])) {
-        exprList.appendChild(expr.type === 'text' ? this._createCalcTextRow(expr) : createCalcExprRow(expr, calcCtx).wrapper);
+        // Populate expression list from pre-built ExpressionBox/CalcTextRow instances
+        for (const exprBox of this.expressions) {
+            exprList.appendChild(exprBox.element);
         }
         div.appendChild(exprList);
 
@@ -738,50 +973,26 @@ function scheduleCalcUpdate(boxId) {
 function updateCalcResults(boxId) {
   const box = boxes.find(b => b.id === boxId);
   if (!box || box.type !== 'calc') return;
-  const results = evaluateCalcExpressions(box.expressions || [], { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
-  const updateFns = calcUpdateFnsMap.get(boxId);
-  if (!updateFns) return;
-  for (const fn of updateFns.values()) fn(results);
+  // Use toData() to read live values from MQ fields; avoids needing commitCalcBox to pre-sync
+  const exprData = (box.expressions || []).map(e => e.toData ? e.toData() : e);
+  const results = evaluateCalcExpressions(exprData, { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
+  for (const exprBox of (box.expressions || [])) {
+    if (exprBox instanceof ExpressionBox) exprBox.updateResult(results);
+  }
 }
 
 /**
- * Reads the current state of a calc box's UI and writes it back to the boxes data array, then syncs to storage.  
- * Flushes the calc box UI state into the boxes data array, then persists to storage.
- * Iterates every expr-wrapper row: text rows are saved as {id, type, text, latex},
- * expression rows are saved as {id, latex, enabled, sliderMin, sliderMax} using
- * the MathQuill field value and DOM data attributes for slider bounds.
+ * Syncs the CalcBox state to storage. serializeToLatex() calls toData() on each
+ * ExpressionBox/CalcTextRow to read live values, so no pre-sync of instance
+ * properties is needed here.
  * @param {string} boxId - The ID of the calc box to commit.
  */
 function commitCalcBox(boxId) {
-  const idx = boxes.findIndex(b => b.id === boxId);
-  if (idx === -1) return;
-  let fieldMap = boxes[idx].fieldMap;
-  if (!fieldMap) return;
-  const rows = boxList.querySelectorAll(`[data-id="${boxId}"] .expr-wrapper`);
-  const expressions = [];
-  for (const row of rows) {
-    const exprId = row.dataset.exprId;
-    if (row.dataset.rowType === 'text') {
-      const ta = row.querySelector('.calc-text-input');
-      expressions.push({ id: exprId, type: 'text', text: ta ? ta.value : '', latex: '' });
-      continue;
-    }
-    const toggle = row.querySelector('.expr-toggle');
-    const enabled = toggle ? toggle.getAttribute('aria-pressed') === 'true' : true;
-    const field = fieldMap.get(exprId);
-    const latex = field ? field.latex() : '';
-    const sliderMin = parseFloat(row.dataset.sliderMin) || 0;
-    const sliderMax = parseFloat(row.dataset.sliderMax) || 10;
-    expressions.push({ id: exprId, latex, enabled, sliderMin, sliderMax });
-  }
-  boxes[idx].expressions = expressions;
   syncToText();
 }
 
 function cleanupCalcBox(boxId) {
-//   calcMqFields.delete(boxId);
   calcTextAreaMap.delete(boxId);
-  calcUpdateFnsMap.delete(boxId);
   calcAddExprFns.delete(boxId);
   calcAddTextFns.delete(boxId);
   calcPendingUpdate.delete(boxId);

@@ -59,7 +59,6 @@ let calcExprNextId = 1;
 let calcTextNextId = 1;
 // let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
 let calcTextAreaMap = new Map();    // boxId → Map<exprId, HTMLTextAreaElement>
-let calcUpdateFnsMap = new Map();   // boxId → Map<exprId, (resultMap) => void>
 let calcAddExprFns = new Map();     // boxId → (afterExprId?: string) => void
 let calcAddTextFns = new Map();     // boxId → (afterExprId?: string) => void
 let calcPendingUpdate = new Set();  // boxIds with a pending rAF update
@@ -491,15 +490,17 @@ function serializeToLatex(boxArray) {
     else if (b.type === 'pagebreak') serialized = '\\newpage';
     else if (b.type === 'calc') {
       const exprLines = (b.expressions || []).map(e => {
-        if (e.type === 'text') {
+        // Use toData() to read live values from ExpressionBox/CalcTextRow instances
+        const d = e.toData ? e.toData() : e;
+        if (d.type === 'text') {
           // Encode backslashes then newlines so the format stays single-line
-          const encoded = (e.text || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n');
-          return `% ${e.id} text ${encoded}`;
+          const encoded = (d.text || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n');
+          return `% ${d.id} text ${encoded}`;
         }
         // Only serialize custom slider bounds (non-default) to keep format compact
-        const hasCustomSlider = e.sliderMin != null && (e.sliderMin !== 0 || (e.sliderMax ?? 10) !== 10);
-        const sliderPart = hasCustomSlider ? ` {s:${e.sliderMin}:${e.sliderMax ?? 10}}` : '';
-        return `% ${e.id} ${e.enabled ? 'on' : 'off'}${sliderPart} ${e.latex}`;
+        const hasCustomSlider = d.sliderMin != null && (d.sliderMin !== 0 || (d.sliderMax ?? 10) !== 10);
+        const sliderPart = hasCustomSlider ? ` {s:${d.sliderMin}:${d.sliderMax ?? 10}}` : '';
+        return `% ${d.id} ${d.enabled ? 'on' : 'off'}${sliderPart} ${d.latex}`;
       });
       const defsFlag     = b.showResultsDefs !== false ? '{showdefs}' : '';
       const bareFlag     = b.showResultsBare !== false ? '{showbare}' : '';
@@ -1281,7 +1282,7 @@ function cutBox(id) {
   } else if (box.type === 'calc') {
     // For calc boxes, commit live state then copy expressions
     commitCalcBox(id);
-    boxClipboard = { type: 'calc', content: '', expressions: JSON.parse(JSON.stringify(box.expressions || [])), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsBasic: !!box.physicsBasic, physicsEM: !!box.physicsEM, physicsChem: !!box.physicsChem };
+    boxClipboard = { type: 'calc', content: '', expressions: (box.expressions || []).map(e => e.toData ? e.toData() : { ...e }), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsBasic: !!box.physicsBasic, physicsEM: !!box.physicsEM, physicsChem: !!box.physicsChem };
     deleteBox(id);
     return;
   } else if (box.type === 'image') {
