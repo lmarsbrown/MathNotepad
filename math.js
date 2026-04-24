@@ -2538,32 +2538,20 @@ function buildParametricEvaluators(parametricExpr, analysis) {
  * Also returns jsEvaluators: Map<exprId, Function(x,y)> for snap-to-curve.
  */
 function compileGraphExpressions(expressions) {
-  // 1. Parse all expressions
+  // 1. Parse all expressions.
+  // Bare expressions (no = sign) are stored as kind:'bareExpr' for deferred parametric detection.
+  // Detection runs after evaluateConstants so all variable types and function bodies are known.
   const parsed = expressions.map(e => {
     if (!e.enabled) return { kind: 'disabled', exprId: e.id };
     const p = parseExpression(e.latex);
     if (p.error) {
-      // Bare expressions with no = sign: could be a constant, a point expression, etc.
       if (p.error === 'Expression must contain =') {
         try {
           const ast = parseLatexToAst(e.latex.trim());
-          // Point expression (t,2t): classify as parametric for the analyzer
-          if (ast.type === 'point') {
-            const vars = collectVariables(ast);
-            return {
-              kind: 'parametric',
-              xExpr: ast.args[0],
-              yExpr: ast.args[1],
-              deps: [...vars],
-              exprId: e.id,
-            };
-          }
-          // Scalar constants with no x/y are evaluated CPU-side — not a graph error
-          const vars = collectVariables(ast);
-          if (!vars.has('x') && !vars.has('y')) {
-            return { kind: 'disabled', exprId: e.id };
-          }
-        } catch (_) {}
+          return { kind: 'bareExpr', ast, exprId: e.id };
+        } catch (parseErr) {
+          return { kind: 'error', error: parseErr.message, exprId: e.id };
+        }
       }
       return { kind: 'error', error: p.error, exprId: e.id };
     }
@@ -2572,12 +2560,63 @@ function compileGraphExpressions(expressions) {
     return classified;
   });
 
-  // 2. Analyze dependencies
+  // 2. Analyze dependencies (bareExpr entries are ignored here)
   const active = parsed.filter(p => p.kind !== 'disabled');
   const analysis = analyzeExpressions(active);
 
   // 3. Evaluate constants
   evaluateConstants(analysis);
+
+  // 3b. Deferred parametric detection: try to reduce each bareExpr to a point using
+  // fully-evaluated constantValues and funcDefs so all variable/function types are known.
+  // Convert runtime point values {px,py} to AST point nodes for evaluateAstSymbolic.
+  const symValueMap = new Map();
+  for (const [k, v] of analysis.constantValues) {
+    if (typeof v === 'number') {
+      symValueMap.set(k, { type: 'number', value: v });
+    } else if (isPoint(v)) {
+      symValueMap.set(k, { type: 'point', args: [{ type: 'number', value: v.px }, { type: 'number', value: v.py }] });
+    }
+  }
+
+  for (const bare of parsed) {
+    if (bare.kind !== 'bareExpr') continue;
+    const { ast, exprId } = bare;
+    let reducedAst = ast;
+    try {
+      reducedAst = evaluateAstSymbolic(ast, symValueMap, analysis.funcDefs, { useSymbolic: true });
+    } catch (_) {}
+
+    if (reducedAst.type === 'point') {
+      const vars = collectVariables(reducedAst);
+      if (vars.has('x') || vars.has('y')) {
+        analysis.errors.set(exprId, 'Parametric expressions cannot use x or y');
+        continue;
+      }
+      if (!vars.has('t')) {
+        analysis.errors.set(exprId, 'Parametric expressions must use variable t');
+        continue;
+      }
+      let exprError = null;
+      for (const dep of vars) {
+        if (dep === 't') continue;
+        const r = analysis.resolved.get(dep);
+        if (!r || r.error) { exprError = r?.error || `Undefined variable '${dep}'`; break; }
+        if (r.dependsOnXY) {
+          exprError = `Variable '${dep}' depends on x or y, which is not valid in a parametric expression`;
+          break;
+        }
+      }
+      if (exprError) { analysis.errors.set(exprId, exprError); continue; }
+      analysis.parametrics.push({ xExpr: reducedAst.args[0], yExpr: reducedAst.args[1], deps: [...vars], exprId });
+    } else {
+      // Not a point: error unless it's a pure scalar constant (no x/y/t → silently ignore)
+      const vars = collectVariables(ast);
+      if (vars.has('x') || vars.has('y') || vars.has('t')) {
+        analysis.errors.set(exprId, 'Expression must contain =');
+      }
+    }
+  }
 
   // 4. Generate shader code for each implicit expression
   const renderExprs = [];
