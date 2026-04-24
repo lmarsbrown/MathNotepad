@@ -7,6 +7,14 @@ class GraphBox extends Box{
         this.expressions = data.expressions || [
             { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 },
         ];
+        // Calc-mode settings (mirror CalcBox flags so graph boxes support full evaluation)
+        this.physicsBasic = !!data.physicsBasic;
+        this.physicsEM    = !!data.physicsEM;
+        this.physicsChem  = !!data.physicsChem;
+        this.useUnits     = !!data.useUnits;
+        this.useSymbolic  = !!data.useSymbolic;
+        this.useBaseUnits = !!data.useBaseUnits;
+        this.sigFigs      = data.sigFigs ?? 6;
         this.element = this.createElement();
     }
     createElement(){

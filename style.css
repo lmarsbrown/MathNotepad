@@ -409,6 +409,19 @@ body {
 }
 
 
+#graph-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 16px 0;
+  align-items: center;
+}
+
+#graph-settings-row:empty { display: none; }
+
+#graph-settings-row .calc-sigfigs-label { margin-left: 2px; font-size: 11px; color: #a6adc8; }
+#graph-settings-row .calc-sigfigs-input { width: 36px; }
+
 #graph-expr-list {
   flex: 1;
   overflow-y: auto;

@@ -45,7 +45,7 @@ let graphModeBoxId = null;        // id of box being edited in graph mode, or nu
 let focusedGraphExprId = null;    // id of the expression row currently focused
 let graphExprNextId = 1;
 let graphMqFields = new Map();    // expr id → MathQuill field
-let _activeGraphExprBoxes = [];   // GraphExpressionBox instances for the current graph edit session
+let _activeGraphExprBoxes = [];   // ExpressionBox instances (graph mode) for the current graph edit session
 let graphCommitTimer = null;
 let draftSaveTimer = null;
 
@@ -204,43 +204,34 @@ function renderGraphPreview() {
   if (!box) return;
 
   const renderer = getGraphRenderer();
-  const errors = renderer.updateExpressions(box.expressions || []);
-  updateGraphExprErrors(errors);
 
+  // 1. Compile graphable expressions to GLSL (renderer caches by latex key)
+  renderer.updateExpressions(box.expressions || []);
+
+  // 2. Render the WebGL canvas
   const container = document.getElementById('preview-content');
   const w = container.clientWidth  || box.width  || 600;
   const h = container.clientHeight || box.height || 400;
-
   renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
   updateGraphCropOverlay();
 
-  // Refresh expression row badges using the already-compiled analysis — avoids recompiling per frame.
-  // Pass null if no analysis is cached yet so each fn falls back to its own recompile.
-  const cachedAnalysis = renderer._lastAnalysis || null;
-  for (const eb of _activeGraphExprBoxes) eb.updateControls(cachedAnalysis);
-}
+  // 3. Evaluate non-graphable expressions numerically for result display.
+  //    Filter out graphable (compiled) expressions so that x/y-undefined errors
+  //    don't propagate into constant or bare expression rows.
+  const compiledExprs  = renderer._compiledExprs  || [];
+  const compiledErrors = renderer._compiledErrors  || new Map();
+  const graphableIds   = new Set(compiledExprs.map(e => e.exprId));
+  // Exclude disabled expressions: they won't be graphed, and passing y=x^2 (disabled)
+  // to the calc evaluator produces "x is not defined" errors.
+  const nonGraphable   = (box.expressions || []).filter(e => !graphableIds.has(e.id) && e.enabled !== false);
+  const results = evaluateCalcExpressions(nonGraphable, {
+    usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem,
+    useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits,
+  });
 
-/** Update error indicators on graph expression rows. */
-function updateGraphExprErrors(errors) {
-  const wrappers = document.querySelectorAll('#graph-expr-list .expr-wrapper');
-  for (const wrapper of wrappers) {
-    const exprId = wrapper.dataset.exprId;
-    const errorMsg = errors.get(exprId);
-    let errorEl = wrapper.querySelector('.graph-expr-error');
-    if (errorMsg) {
-      if (!errorEl) {
-        errorEl = document.createElement('span');
-        errorEl.className = 'graph-expr-error';
-        wrapper.appendChild(errorEl);
-      }
-      errorEl.textContent = errorMsg;
-      errorEl.title = errorMsg;
-      wrapper.classList.add('has-error');
-    } else {
-      if (errorEl) errorEl.remove();
-      wrapper.classList.remove('has-error');
-    }
-  }
+  // 4. Update each expression row: color swatch for graphable, numeric result for others
+  const sigFigs = box.sigFigs ?? 6;
+  for (const eb of _activeGraphExprBoxes) eb.update(results, compiledExprs, sigFigs, compiledErrors);
 }
 
 function scheduleGraphRender() {
@@ -530,8 +521,18 @@ function serializeToLatex(boxArray) {
       const exprLines = (b.expressions || []).map(e =>
         `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.sliderMin != null ? e.sliderMin : 0} ${e.sliderMax != null ? e.sliderMax : 10} ${e.latex}`
       );
-      const themeFlag = b.lightTheme ? '{light}' : '';
-      serialized = `\\begin{graph}{${b.width}}{${b.height}}${themeFlag}\n${exprLines.join('\n')}\n\\end{graph}`;
+      // Build optional calc-mode flags; omit defaults so old parsers ignore unknown braces
+      const flags = [
+        b.lightTheme    ? '{light}'       : '',
+        b.useUnits      ? '{units}'       : '',
+        b.useSymbolic   ? '{symbolic}'    : '',
+        b.useBaseUnits  ? '{base_units}'  : '',
+        b.physicsBasic  ? '{physics}'     : '',
+        b.physicsEM     ? '{physics_em}'  : '',
+        b.physicsChem   ? '{physics_chem}': '',
+        (b.sigFigs != null && b.sigFigs !== 6) ? `{sf=${b.sigFigs}}` : '',
+      ].join('');
+      serialized = `\\begin{graph}{${b.width}}{${b.height}}${flags}\n${exprLines.join('\n')}\n\\end{graph}`;
     }
     else serialized = b.content.split('\n').map(line => '% ' + line).join('\n');
     if (b.highlighted) {
@@ -695,14 +696,23 @@ function parseFromLatex(src) {
       continue;
     }
 
-    // Graph block: \begin{graph}{W}{H} ... \end{graph}
+    // Graph block: \begin{graph}{W}{H}{flags...} ... \end{graph}
     if (line.startsWith('\\begin{graph}')) {
-      const gm = line.match(/^\\begin\{graph\}\{(\d+)\}\{(\d+)\}(\{light\})?/);
+      const gm = line.match(/^\\begin\{graph\}\{(\d+)\}\{(\d+)\}(.*)/);
+      const flagStr = gm ? gm[3] : '';
+      const sfMatch = flagStr.match(/\{sf=(\d+)\}/);
       const graphData = {
-        width:       gm ? parseInt(gm[1]) : 600,
-        height:      gm ? parseInt(gm[2]) : 400,
-        lightTheme:  !!(gm && gm[3]),
-        expressions: [],
+        width:        gm ? parseInt(gm[1]) : 600,
+        height:       gm ? parseInt(gm[2]) : 400,
+        lightTheme:   flagStr.includes('{light}'),
+        useUnits:     flagStr.includes('{units}'),
+        useSymbolic:  flagStr.includes('{symbolic}'),
+        useBaseUnits: flagStr.includes('{base_units}'),
+        physicsBasic: flagStr.includes('{physics}'),
+        physicsEM:    flagStr.includes('{physics_em}'),
+        physicsChem:  flagStr.includes('{physics_chem}'),
+        sigFigs:      sfMatch ? parseInt(sfMatch[1]) : 6,
+        expressions:  [],
       };
       i++;
       while (i < lines.length && !lines[i].startsWith('\\end{graph}')) {

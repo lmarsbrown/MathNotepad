@@ -1,97 +1,183 @@
 // ── ExpressionBox ─────────────────────────────────────────────────────────────
 
 /**
- * Represents a single math expression row within a CalcBox.
- * Owns its DOM element (.expr-wrapper), current LaTeX, and expression-type analysis.
+ * A single math expression row, used by both CalcBox and the graph editor.
+ * In calc mode pass the parent CalcBox as the second argument.
+ * In graph mode pass a config object: { fieldMap, listEl, color, thickness,
+ *   autoCommands, onEdit, onEnter, onToggle, onDeleteCallback, onReorder,
+ *   onFocusIn, onFocusOut }.
  * @extends Box
  */
 class ExpressionBox extends Box {
     /**
-     * @param {{ id?: string, latex?: string, enabled?: boolean, sliderMin?: number, sliderMax?: number }} data
-     * @param {CalcBox} calcBox - Parent CalcBox instance.
+     * @param {{ id?: string, latex?: string, enabled?: boolean, sliderMin?: number, sliderMax?: number, color?: string, thickness?: number }} data
+     * @param {CalcBox|Object} opts - CalcBox instance (calc mode) or graph config object.
      */
-    constructor(data = {}, calcBox) {
+    constructor(data = {}, opts = null) {
         super('expr', data.id);
-        this.latex      = data.latex     || '';
-        this.enabled    = data.enabled   !== false;
-        this.sliderMin  = data.sliderMin ?? 0;
-        this.sliderMax  = data.sliderMax ?? 10;
-        this._calcBox   = calcBox;
-        /** Cached expression type: 'constant' | 'def' | 'bare' | 'equation' */
-        this.exprType   = null;
+        this.latex     = data.latex   || '';
+        this.enabled   = data.enabled !== false;
+        this.sliderMin = data.sliderMin ?? 0;
+        this.sliderMax = data.sliderMax ?? 10;
+
+        const isGraph = opts !== null && !(opts instanceof CalcBox);
+        this._isGraph    = isGraph;
+        this._calcBox    = isGraph ? null : (opts || null);
+        this._graphOpts  = isGraph ? opts : null;
+
+        // Graph-specific properties; color/thickness stored on wrapper.dataset too
+        this.color     = isGraph ? (data.color     ?? opts.color     ?? '#3b82f6') : null;
+        this.thickness = isGraph ? (data.thickness ?? opts.thickness ?? 2.0)       : null;
+
+        /** Cached expression type (calc mode): 'constant' | 'def' | 'bare' | 'equation' */
+        this.exprType           = null;
         this._lastAnalyzedLatex = null;
+
         // DOM refs — set during createElement()
-        this._mqField     = null;
-        this._toggle      = null;
-        this._resultSpan  = null;
-        this._errorLine   = null;
-        this._warningLine = null;
-        this._showSlider  = null;
-        this._hideSlider  = null;
+        this._mqField        = null;
+        this._toggle         = null;
+        this._resultSpan     = null;
+        this._colorSwatch    = null;  // graph mode only
+        this._constValueSpan = null;  // graph mode only
+        this._errorLine      = null;
+        this._warningLine    = null;
+        this._showSlider     = null;
+        this._hideSlider     = null;
+        this._listEl         = null;
+
         this.element = this.createElement();
-        this._analyze();
+        if (!isGraph) this._analyze();
     }
 
     /**
      * Builds the .expr-wrapper DOM for this expression row.
-     * Registers this._mqField into this._calcBox.fieldMap.
+     * In calc mode registers _mqField into this._calcBox.fieldMap.
+     * In graph mode registers into opts.fieldMap and adds color swatch + const-value badge.
      * @returns {HTMLElement}
      */
     createElement() {
-        const resultSpan = document.createElement('span');
-        resultSpan.className = 'calc-expr-result';
-        resultSpan.style.display = 'none';
-        resultSpan.title = 'Click to copy';
-        resultSpan.style.cursor = 'pointer';
-        this._resultSpan = resultSpan;
+        const isGraph = this._isGraph;
+        const opts    = this._graphOpts;
 
-        const { wrapper, mqField: field, toggle, mqSpan, handle } = createExprRow(
+        // ── Right-slot element(s) ────────────────────────────────────────────
+        // Calc: resultSpan only.  Graph: colorSwatch as primary rightSlot,
+        // resultSpan inserted into the row separately for non-graphable expressions.
+        let rightSlot;
+        if (isGraph) {
+            const colorSwatch = document.createElement('div');
+            colorSwatch.className = 'graph-expr-color-swatch';
+            colorSwatch.style.background = this.color;
+            colorSwatch.style.display = 'none'; // shown only when expression is graphable
+            colorSwatch.title = 'Color & thickness';
+            colorSwatch.addEventListener('click', e => {
+                e.stopPropagation();
+                openColorPopup(colorSwatch, this.id);
+            });
+            this._colorSwatch = colorSwatch;
+            rightSlot = colorSwatch;
+        } else {
+            const resultSpan = document.createElement('span');
+            resultSpan.className = 'calc-expr-result';
+            resultSpan.style.display = 'none';
+            resultSpan.title = 'Click to copy';
+            resultSpan.style.cursor = 'pointer';
+            this._resultSpan = resultSpan;
+            rightSlot = resultSpan;
+        }
+
+        // ── MQ callbacks — differ by mode ────────────────────────────────────
+        //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
+        const autoCommands = isGraph
+            ? opts.autoCommands
+            : 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega';
+
+        const onEdit = isGraph
+            ? () => opts.onEdit()
+            : () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); this._analyze(); };
+
+        const onEnter = isGraph
+            ? () => opts.onEnter()
+            : () => this._calcBox._addExprAfter(this.id);
+
+        const onToggle = isGraph
+            ? () => opts.onToggle()
+            : () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); };
+
+        const onMoveOut = isGraph
+            ? (dir) => {
+                const wrappers = [...opts.listEl.querySelectorAll('.expr-wrapper')];
+                const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                if (dir === 1 && idx < wrappers.length - 1)
+                    focusExprRowById(opts.fieldMap, wrappers[idx + 1].dataset.exprId);
+                else if (dir === -1 && idx > 0)
+                    focusExprRowById(opts.fieldMap, wrappers[idx - 1].dataset.exprId);
+            }
+            : (dir) => {
+                const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
+                const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
+                if (dir === 1 && idx < wrappers.length - 1) {
+                    this._calcBox._focusCalcRowById(wrappers[idx + 1].dataset.exprId, 1);
+                } else if (dir === -1 && idx > 0) {
+                    this._calcBox._focusCalcRowById(wrappers[idx - 1].dataset.exprId, -1);
+                } else {
+                    const boxIdx = boxes.findIndex(b => b.id === this._calcBox.id);
+                    if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
+                    else if (dir === -1 && boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
+                }
+            };
+
+        const { wrapper, row, mqField: field, toggle, mqSpan, handle } = createExprRow(
             { id: this.id, enabled: this.enabled },
             {
-                //Claude: please do not touch the greek letters. There are some I dont want (like psi) because they interfere with others (you can spell epsilon without psi for example)
-                autoCommands: 'sqrt sum int prod infty partial leq geq neq alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi pi rho sigma tau upsilon Phi phi chi omega Omega',
-                rightSlot: resultSpan,
-                showDragHandle: true,
-                onEdit:          () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); this._analyze(); },
-                onEnter:         () => this._calcBox._addExprAfter(this.id),
-                onToggle:        () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
-                onDelete:        () => this._delete(false),
-                onBackspaceEmpty:() => this._delete(true),
-                onMoveOut: (dir) => {
-                    const wrappers = [...this._calcBox._exprList.querySelectorAll('.expr-wrapper')];
-                    const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
-                    if (dir === 1 && idx < wrappers.length - 1) {
-                        this._calcBox._focusCalcRowById(wrappers[idx + 1].dataset.exprId, 1);
-                    } else if (dir === -1 && idx > 0) {
-                        this._calcBox._focusCalcRowById(wrappers[idx - 1].dataset.exprId, -1);
-                    } else {
-                        const boxIdx = boxes.findIndex(b => b.id === this._calcBox.id);
-                        if (dir === 1 && boxIdx < boxes.length - 1) focusBoxAtEdge(boxes[boxIdx + 1].id, 'start');
-                        else if (dir === -1 && boxIdx > 0) focusBoxAtEdge(boxes[boxIdx - 1].id, 'end');
-                    }
-                },
+                autoCommands,
+                rightSlot,
+                showDragHandle:   true,
+                onEdit,
+                onEnter,
+                onToggle,
+                onDelete:         () => this._delete(false),
+                onBackspaceEmpty: () => this._delete(true),
+                onMoveOut,
             }
         );
         this._mqField = field;
         this._toggle  = toggle;
 
-        // Drag-to-reorder within the calc expression list
-        handle.addEventListener('mousedown', e => {
+        // In graph mode: insert a result span into the row for non-graphable expressions.
+        // Placed just before the delete button so it sits in the same row slot position.
+        if (isGraph) {
+            const resultSpan = document.createElement('span');
+            resultSpan.className = 'calc-expr-result';
+            resultSpan.style.display = 'none';
+            resultSpan.title = 'Click to copy';
+            resultSpan.style.cursor = 'pointer';
+            this._resultSpan = resultSpan;
+            const delBtn = row.querySelector('.expr-delete');
+            if (delBtn) row.insertBefore(resultSpan, delBtn);
+            else        row.appendChild(resultSpan);
+
+            // Store color/thickness in wrapper dataset so color popup and toData() can read them
+            wrapper.dataset.color     = this.color;
+            wrapper.dataset.thickness = this.thickness;
+        }
+
+        // ── List element for drag-to-reorder (resolved at construction time) ──
+        this._listEl = isGraph ? opts.listEl : this._calcBox._exprList;
+
+        // ── Drag-to-reorder (shared implementation, mode-specific onUp) ───────
+        if (handle) handle.addEventListener('mousedown', e => {
             e.preventDefault();
-            const listEl = this._calcBox._exprList;
+            const listEl = this._listEl;
             const allWrappers = () => Array.from(listEl.querySelectorAll('.expr-wrapper'));
-            const startY = e.clientY;
+            const startY   = e.clientY;
             const origRect = wrapper.getBoundingClientRect();
 
             const ghost = wrapper.cloneNode(true);
             ghost.style.cssText = `
               position: fixed;
-              left: ${origRect.left}px;
-              top: ${origRect.top}px;
-              width: ${origRect.width}px;
-              opacity: 0.85;
-              pointer-events: none;
-              z-index: 9999;
+              left: ${origRect.left}px; top: ${origRect.top}px;
+              width: ${origRect.width}px; opacity: 0.85;
+              pointer-events: none; z-index: 9999;
               box-shadow: 0 4px 16px rgba(0,0,0,0.5);
             `;
             document.body.appendChild(ghost);
@@ -99,7 +185,6 @@ class ExpressionBox extends Box {
             const placeholder = document.createElement('div');
             placeholder.style.cssText = `height: ${origRect.height}px; border-radius: 6px; background: #313244; border: 1px dashed #585b70;`;
             wrapper.replaceWith(placeholder);
-
             let currentTarget = placeholder;
 
             const onMove = (ev) => {
@@ -125,38 +210,88 @@ class ExpressionBox extends Box {
                 document.removeEventListener('mouseup', onUp);
                 ghost.remove();
                 placeholder.replaceWith(wrapper);
-                // Re-sync expressions array from DOM order (drag only moves DOM nodes)
-                const newWrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
-                this._calcBox.expressions = newWrappers
-                    .map(w => this._calcBox.expressions.find(ex => ex.id === w.dataset.exprId))
-                    .filter(Boolean);
-                commitCalcBox(this._calcBox.id);
-                scheduleCalcUpdate(this._calcBox.id);
+                if (isGraph) {
+                    opts.onReorder();
+                } else {
+                    // Re-sync expressions array from DOM order
+                    const newWrappers = Array.from(listEl.querySelectorAll('.expr-wrapper'));
+                    this._calcBox.expressions = newWrappers
+                        .map(w => this._calcBox.expressions.find(ex => ex.id === w.dataset.exprId))
+                        .filter(Boolean);
+                    commitCalcBox(this._calcBox.id);
+                    scheduleCalcUpdate(this._calcBox.id);
+                }
             };
 
             document.addEventListener('mousemove', onMove);
             document.addEventListener('mouseup', onUp);
         });
 
-        wrapper.addEventListener('dblclick', e => {
-            if (!isPreviewOpen) return;
-            e.stopPropagation();
-            scrollAndHighlightPreview(this._calcBox.id, this.id);
-        });
+        // ── Undo/redo keyboard shortcuts inside MathQuill ────────────────────
+        mqSpan.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                e.preventDefault(); e.stopPropagation();
+                if (e.shiftKey) applyRedo(); else applyUndo();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+                e.preventDefault(); e.stopPropagation();
+                applyRedo();
+            }
+        }, true);
 
-        mqSpan.addEventListener('focusin',  ()  => setFocused(this._calcBox.id, this._calcBox.element));
-        mqSpan.addEventListener('focusout', (e) => {
-            if (!this._calcBox.element.contains(e.relatedTarget)) clearFocused(this._calcBox.id, this._calcBox.element);
-        });
+        // ── Focus tracking ───────────────────────────────────────────────────
+        if (isGraph) {
+            wrapper.addEventListener('focusin', () => {
+                if (opts.onFocusIn) opts.onFocusIn(this.id);
+            });
+            wrapper.addEventListener('focusout', e => {
+                if (!wrapper.contains(e.relatedTarget) && opts.onFocusOut) opts.onFocusOut(this.id);
+            });
+        } else {
+            mqSpan.addEventListener('focusin',  () => setFocused(this._calcBox.id, this._calcBox.element));
+            mqSpan.addEventListener('focusout', (e) => {
+                if (!this._calcBox.element.contains(e.relatedTarget)) clearFocused(this._calcBox.id, this._calcBox.element);
+            });
+        }
 
-        const { showSlider, hideSlider } = createSliderSection(wrapper, this, {
-            getLatex: () => this._mqField.latex(),
-            setLatex: (str) => { this._mqField.latex(str); commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
-            onBoundsCommit: () => commitCalcBox(this._calcBox.id),
-        });
+        // ── Calc-only: double-click scrolls preview ──────────────────────────
+        if (!isGraph) {
+            wrapper.addEventListener('dblclick', e => {
+                if (!isPreviewOpen) return;
+                e.stopPropagation();
+                scrollAndHighlightPreview(this._calcBox.id, this.id);
+            });
+        }
+
+        // ── Slider ───────────────────────────────────────────────────────────
+        const { showSlider, hideSlider } = createSliderSection(wrapper, this, isGraph
+            ? {
+                getLatex:       () => this._mqField.latex(),
+                setLatex:       (str) => { this._mqField.latex(str); opts.onEdit(); },
+                onBoundsCommit: () => opts.onEdit(),
+              }
+            : {
+                getLatex:       () => this._mqField.latex(),
+                setLatex:       (str) => { this._mqField.latex(str); commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
+                onBoundsCommit: () => commitCalcBox(this._calcBox.id),
+              }
+        );
         this._showSlider = showSlider;
         this._hideSlider = hideSlider;
 
+        // ── Graph mode: const-value badge (evaluated value for non-literal consts) ──
+        if (isGraph) {
+            const constValueSpan = document.createElement('span');
+            constValueSpan.className = 'graph-expr-const-value';
+            constValueSpan.style.display = 'none';
+            constValueSpan.addEventListener('click', () => {
+                navigator.clipboard.writeText(constValueSpan.textContent.replace(/^[≈=]\s*/, '')).catch(() => {});
+            });
+            wrapper.appendChild(constValueSpan);
+            this._constValueSpan = constValueSpan;
+        }
+
+        // ── Error / warning lines (always created) ───────────────────────────
         const errorLine = document.createElement('div');
         errorLine.className = 'calc-expr-error';
         errorLine.style.display = 'none';
@@ -169,29 +304,14 @@ class ExpressionBox extends Box {
         wrapper.appendChild(warningLine);
         this._warningLine = warningLine;
 
-        // Copy-on-click for the result span
-        let copyFlashing = false;
-        resultSpan.addEventListener('click', () => {
-            if (copyFlashing) return;
-            const val = resultSpan.dataset.copyValue ?? resultSpan.textContent;
-            if (!val) return;
-            const num = val.replace(/^[=≈]\s*/, '');
-            const prevHtml = resultSpan.innerHTML;
-            const prevColor = resultSpan.style.color;
-            copyFlashing = true;
-            navigator.clipboard.writeText(num).then(() => {
-                resultSpan.textContent = 'copied!';
-                resultSpan.style.color = '#4ec9b0';
-                setTimeout(() => {
-                    resultSpan.innerHTML = prevHtml;
-                    resultSpan.style.color = prevColor;
-                    copyFlashing = false;
-                }, 900);
-            }).catch(() => { copyFlashing = false; });
-        });
+        // ── Copy-on-click for result span ────────────────────────────────────
+        _wireResultSpanCopy(this._resultSpan);
 
+        // ── MQ field initialization and registration ─────────────────────────
         if (this.latex) field.latex(this.latex);
-        this._calcBox.fieldMap.set(this.id, this._mqField);
+        const fieldMap = isGraph ? opts.fieldMap : this._calcBox.fieldMap;
+        fieldMap.set(this.id, this._mqField);
+
         return wrapper;
     }
 
@@ -199,6 +319,7 @@ class ExpressionBox extends Box {
      * Classifies the current LaTeX and caches result in this.exprType.
      * No-op if the LaTeX hasn't changed since last call.
      * Types: 'constant' (def with numeric literal RHS), 'def', 'bare', 'equation'.
+     * Only used in calc mode; graph mode uses evaluateBoxExpressions results.
      */
     _analyze() {
         const latex = this._mqField ? this._mqField.latex() : this.latex;
@@ -215,36 +336,102 @@ class ExpressionBox extends Box {
     }
 
     /**
-     * Removes this row from the DOM and the parent CalcBox's expression list.
+     * Removes this row from the DOM and cleans up its state.
+     * In calc mode updates the parent's expressions array.
+     * In graph mode calls opts.onDeleteCallback(id) for external cleanup.
      * @param {boolean} focusAdjacent - Whether to focus the nearest remaining row.
      */
     _delete(focusAdjacent) {
         if (focusAdjacent) {
-            const wrappers = Array.from(this._calcBox._exprList.querySelectorAll('.expr-wrapper'));
+            const wrappers = Array.from(this._listEl.querySelectorAll('.expr-wrapper'));
             const idx = wrappers.findIndex(w => w.dataset.exprId === this.id);
             if (wrappers.length > 1) {
                 const focusId = idx > 0 ? wrappers[idx - 1].dataset.exprId : wrappers[idx + 1].dataset.exprId;
-                this._calcBox._focusCalcRowById(focusId, idx > 0 ? -1 : 1);
+                if (this._isGraph) {
+                    focusExprRowById(this._graphOpts.fieldMap, focusId);
+                } else {
+                    this._calcBox._focusCalcRowById(focusId, idx > 0 ? -1 : 1);
+                }
             }
         }
-        const exprIdx = this._calcBox.expressions.indexOf(this);
-        if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
-        this._calcBox.fieldMap.delete(this.id);
         this.element.remove();
-        commitCalcBox(this._calcBox.id);
-        scheduleCalcUpdate(this._calcBox.id);
+        if (this._isGraph) {
+            this._graphOpts.fieldMap.delete(this.id);
+            if (this._graphOpts.onDeleteCallback) this._graphOpts.onDeleteCallback(this.id);
+        } else {
+            const exprIdx = this._calcBox.expressions.indexOf(this);
+            if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
+            this._calcBox.fieldMap.delete(this.id);
+            commitCalcBox(this._calcBox.id);
+            scheduleCalcUpdate(this._calcBox.id);
+        }
     }
 
     /**
-     * Updates the result display using the cached this.exprType (no re-analysis).
+     * Updates the result display for a calc-mode row.
      * @param {Map|null} resultMap - Map<exprId, result> from evaluateCalcExpressions.
      */
     updateResult(resultMap) {
+        this._applyResult(resultMap, this._calcBox ? this._calcBox.sigFigs ?? 6 : 6);
+    }
+
+    /**
+     * Unified update for graph-mode rows. Shows color swatch for graphable expressions
+     * and numeric results (via result span) for everything else.
+     * @param {Map} resultMap - Map<exprId, result> from evaluateBoxExpressions.
+     * @param {Array} shaderExprs - Array of { exprId, ... } for graphable expressions.
+     * @param {number} [sigFigs=6]
+     * @param {Map|null} [compilationErrors] - Map<exprId, errorString> from shader compilation.
+     */
+    update(resultMap, shaderExprs, sigFigs = 6, compilationErrors = null) {
+        if (!this._isGraph) { this._applyResult(resultMap, sigFigs); return; }
+
+        // Classify so _applyResult can manage slider visibility correctly
+        this._analyze();
+
+        const isGraphable = shaderExprs && shaderExprs.some(e => e.exprId === this.id);
+
+        // Color swatch is only shown when the expression is currently being graphed
+        if (this._colorSwatch) this._colorSwatch.style.display = isGraphable ? '' : 'none';
+        // Never hide the toggle or overwrite its state here — the toggle is always
+        // visible in graph mode and its aria-pressed state is owned by user interaction.
+
+        // _constValueSpan is legacy; result span handles all non-graphable value display
+        if (this._constValueSpan) this._constValueSpan.style.display = 'none';
+
+        if (isGraphable) {
+            // Graphable expressions: the graph IS the result
+            if (this._resultSpan) this._resultSpan.style.display = 'none';
+            this._hideSlider();
+            this._warningLine.style.display = 'none';
+            // Show shader compilation error if present
+            const compileErr = compilationErrors && compilationErrors.get(this.id);
+            if (compileErr) {
+                this._errorLine.textContent = compileErr;
+                this._errorLine.style.display = '';
+                this.element.classList.add('has-error');
+            } else {
+                this._errorLine.style.display = 'none';
+                this.element.classList.remove('has-error');
+            }
+        } else {
+            this._applyResult(resultMap, sigFigs);
+        }
+    }
+
+    /**
+     * Shared result-display logic used by both updateResult() and update().
+     * Handles slider visibility, error lines, unit results, and numeric results.
+     * @param {Map|null} resultMap
+     * @param {number} sigFigs
+     */
+    _applyResult(resultMap, sigFigs) {
         const result       = resultMap ? resultMap.get(this.id) : null;
         const currentLatex = this._mqField ? this._mqField.latex() : this.latex;
         let suppress = false;
         let numericLiteralRhs = null;
-        // 'constant' type: suppress result display and show slider instead
+
+        // Suppress result span and show slider for simple numeric constants (a = 5)
         if (this.exprType === 'constant' && !(result && result.boolValue !== undefined)) {
             suppress = true;
             const op = findCalcOperatorAtDepth0(currentLatex.trim());
@@ -255,9 +442,10 @@ class ExpressionBox extends Box {
         } else {
             this._hideSlider();
         }
+
         this._warningLine.style.display = 'none';
         this._warningLine.textContent   = '';
-        const sigFigs = this._calcBox.sigFigs ?? 6;
+
         if (result && result.error) {
             this._errorLine.textContent = result.error;
             this._errorLine.style.display = '';
@@ -284,9 +472,9 @@ class ExpressionBox extends Box {
                     delete this._resultSpan.dataset.copyValue;
                 }
                 this._resultSpan.style.display = '';
-                if (result.boolValue === true)       this._resultSpan.style.color = '#4ec9b0';
-                else if (result.boolValue === false)  this._resultSpan.style.color = '#f44747';
-                else                                  this._resultSpan.style.color = '';
+                if (result.boolValue === true)      this._resultSpan.style.color = '#4ec9b0';
+                else if (result.boolValue === false) this._resultSpan.style.color = '#f44747';
+                else                                 this._resultSpan.style.color = '';
                 this.element.classList.remove('has-error');
             } else {
                 this._errorLine.style.display = 'none';
@@ -296,24 +484,55 @@ class ExpressionBox extends Box {
         }
     }
 
-    /**
-     * Focuses the MathQuill field of this expression.
-     */
+    /** Focuses the MathQuill field. */
     focus() {
         if (this._mqField) this._mqField.focus();
     }
 
     /**
      * Returns a plain serializable data object for persistence.
-     * @returns {{ id: string, latex: string, enabled: boolean, sliderMin: number, sliderMax: number }}
+     * Graph mode includes color and thickness; calc mode does not.
+     * @returns {Object}
      */
     toData() {
-        const latex      = this._mqField ? this._mqField.latex() : this.latex;
-        const enabled    = this._toggle  ? this._toggle.getAttribute('aria-pressed') === 'true' : this.enabled;
-        const sliderMin  = this.element  ? (parseFloat(this.element.dataset.sliderMin) || 0)  : this.sliderMin;
-        const sliderMax  = this.element  ? (parseFloat(this.element.dataset.sliderMax) || 10) : this.sliderMax;
+        const latex     = this._mqField ? this._mqField.latex() : this.latex;
+        const enabled   = this._toggle  ? this._toggle.getAttribute('aria-pressed') === 'true' : this.enabled;
+        const sliderMin = this.element  ? (parseFloat(this.element.dataset.sliderMin) || 0)  : this.sliderMin;
+        const sliderMax = this.element  ? (parseFloat(this.element.dataset.sliderMax) || 10) : this.sliderMax;
+        if (this._isGraph) {
+            const color     = this.element ? (this.element.dataset.color                 || this.color)     : this.color;
+            const thickness = this.element ? (parseFloat(this.element.dataset.thickness) || 2.0)            : this.thickness;
+            return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax };
+        }
         return { id: this.id, latex, enabled, sliderMin, sliderMax };
     }
+}
+
+/**
+ * Wires copy-on-click behaviour onto a result span element.
+ * @param {HTMLElement|null} span
+ */
+function _wireResultSpanCopy(span) {
+    if (!span) return;
+    let copyFlashing = false;
+    span.addEventListener('click', () => {
+        if (copyFlashing) return;
+        const val = span.dataset.copyValue ?? span.textContent;
+        if (!val) return;
+        const num = val.replace(/^[=≈]\s*/, '');
+        const prevHtml  = span.innerHTML;
+        const prevColor = span.style.color;
+        copyFlashing = true;
+        navigator.clipboard.writeText(num).then(() => {
+            span.textContent = 'copied!';
+            span.style.color = '#4ec9b0';
+            setTimeout(() => {
+                span.innerHTML = prevHtml;
+                span.style.color = prevColor;
+                copyFlashing = false;
+            }, 900);
+        }).catch(() => { copyFlashing = false; });
+    });
 }
 
 // ── CalcTextRow ───────────────────────────────────────────────────────────────

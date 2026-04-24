@@ -482,7 +482,10 @@ Clicking a graph box in the right panel enters graph edit mode:
 - The box list is hidden; `#graph-editor-content` shows instead.
 - The preview panel shows the WebGL canvas.
 - The toolbar swaps to `#graph-toolbar`.
-- Users can add/edit/delete expressions, each with a color swatch, enable toggle, thickness (implicitly), and error badge.
+- A settings row appears above the expression list with Physics/E&M/Chem/Units/Symbolic/Base Units toggles and a sig figs input — mirrors CalcBox settings; non-graphable expressions in a graph box evaluate numerically using these settings.
+- Users can add/edit/delete expressions, each with:
+  - **Graphable expressions** (implicit x/y): color swatch + enable toggle; rendered as curves.
+  - **Non-graphable expressions** (constants, bare, inequalities): numeric result shown (same as CalcBox).
 - Width and height inputs control the output graph dimensions.
 - A crop rectangle can be enabled to define a sub-region for export.
 - A snap tooltip shows `(x, y)` coordinates when hovering near a curve.
@@ -490,22 +493,24 @@ Clicking a graph box in the right panel enters graph edit mode:
 
 ## Implementation
 **Entry/exit:**
-- `enterGraphMode(boxId)` (graph-ui.js) — hides box list, builds expression list, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
+- `enterGraphMode(boxId)` (graph-ui.js) — hides box list, builds settings row + expression list, sets `graphModeBoxId`, calls `scheduleGraphRender()`.
 - `exitGraphMode()` (graph-ui.js) — calls `_teardownGraphModeUI()`, restores box list and preview.
-- `_teardownGraphModeUI()` (graph-ui.js) — clears `graphMqFields`, resets `_activeGraphExprBoxes = []`.
+- `_teardownGraphModeUI()` (graph-ui.js) — clears `graphMqFields`, resets `_activeGraphExprBoxes = []`, clears settings row.
+
+**Settings row:**
+- `_renderGraphSettingsRow(box)` (graph-ui.js) — builds `#graph-settings-row` with toggle buttons for `physicsBasic`, `physicsEM`, `physicsChem`, `useUnits`, `useSymbolic`, `useBaseUnits` and a sig figs input. Toggles write directly to `boxes[idx][flagKey]`, call `syncToText()` and `scheduleGraphRender()`. `GraphBox` fields: `physicsBasic`, `physicsEM`, `physicsChem`, `useUnits`, `useSymbolic`, `useBaseUnits`, `sigFigs` (default 6). These are serialized as optional brace tokens on the `\begin{graph}` header line and parsed back by `parseFromLatex()`.
 
 **Expression list:**
-- `renderGraphExprList(box)` (graph-ui.js) — creates `GraphExpressionBox` instances from `box.expressions`, appends them to `#graph-expr-list`, calls `reflow()` and `updateControls(null)` on each.
-- `GraphExpressionBox` (graph-ui.js) — class extending `Box`. Owns `.element` (.expr-wrapper), `._mqField`, `._colorSwatch`, `._constValueSpan`, slider fns. Key methods: `updateControls(analysis)`, `_delete(focusAdjacent)`, `toData()`, `focus()`. Instances live in `_activeGraphExprBoxes` (script.js global) for the duration of a graph edit session.
-- `addGraphExpression()` / `addGraphExpressionAfter(afterId)` (graph-ui.js) — create a new `GraphExpressionBox`, push to `_activeGraphExprBoxes`, append/insert in DOM.
+- `renderGraphExprList(box)` (graph-ui.js) — creates `ExpressionBox` instances (graph mode via `_createGraphExprBox`) from `box.expressions`, appends them to `#graph-expr-list`, calls `reflow()` on each.
+- `_createGraphExprBox(exprData)` (graph-ui.js) — factory that builds the `opts` object for graph mode and returns `new ExpressionBox(exprData, opts)`. Instances live in `_activeGraphExprBoxes` for the duration of a graph edit session.
+- `addGraphExpression()` / `addGraphExpressionAfter(afterId)` (graph-ui.js) — create a new graph-mode `ExpressionBox` via `_createGraphExprBox`, push to `_activeGraphExprBoxes`, append/insert in DOM.
 - `commitGraphEditorToBox(boxId)` (graph-ui.js) — iterates DOM wrappers in order, calls `toData()` on the matching `_activeGraphExprBoxes` entry, stores plain objects in `boxes[idx].expressions`, then calls `syncToText()`.
 
 **Color picker:** `openColorPopup(anchorEl, exprId)` (graph-ui.js), `closeColorPopup()` (graph-ui.js) — fixed popup with preset palette + `<input type="color">`. Updates `wrapper.dataset.color` directly; `toData()` reads it.
 
 **Render trigger:**
 - `scheduleGraphRender()` (script.js) — rAF-debounced.
-- `renderGraphPreview()` (script.js) — compiles expressions via `compileGraphExpressions` (math.js), calls `graphRenderer.render(...)`, then calls `eb.updateControls(cachedAnalysis)` for each entry in `_activeGraphExprBoxes`.
-- `updateGraphExprErrors(errors)` (script.js) — updates error badges on rows by querying the DOM.
+- `renderGraphPreview()` (script.js) — (1) calls `renderer.updateExpressions()` to compile graphable exprs; (2) renders WebGL canvas; (3) evaluates non-graphable expressions via `evaluateCalcExpressions(nonGraphable, calcOpts)` where `nonGraphable` = expressions not in `renderer._compiledExprs`; (4) calls `eb.update(results, compiledExprs, sigFigs, compiledErrors)` for each row. Color swatches and error badges managed by `ExpressionBox.update()`.
 
 **Crop:** `showGraphCropRect` (script.js) toggled by checkbox. `getGraphCropInfo(box)` (script.js), `updateGraphCropOverlay()` (script.js) manage the dashed overlay.
 
@@ -533,7 +538,7 @@ Each expression row has:
 Arrow keys / Tab navigate between expression rows. Enter in a row inserts a new row after it. Backspace on empty row deletes it.
 
 ### Implementation
-Each row is a `GraphExpressionBox` instance (graph-ui.js). MathQuill fields are registered in the `graphMqFields` map during `createElement()`. `edit` handler calls `commitGraphEditorToBox` + `scheduleGraphRender()` directly. `focusExprRowById(graphMqFields, exprId)` (script.js) focuses a row by id.
+Each row is an `ExpressionBox` instance configured in graph mode (see Calc Box → ExpressionBox). MathQuill fields are registered in the `graphMqFields` map during `createElement()`. `edit` handler calls `commitGraphEditorToBox` + `scheduleGraphRender()` directly. `focusExprRowById(graphMqFields, exprId)` (script.js) focuses a row by id. Color swatch and enable toggle show only for graphable expressions; result span shows for non-graphable ones. This is managed by `ExpressionBox.update()` called from `renderGraphPreview()`.
 
 **Color palette:** `GRAPH_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#ef4444', '#a855f7', '#eab308', '#06b6d4']` (script.js). New expressions cycle via `nextGraphColor()`. Colors are stored as literal CSS hex and passed unchanged to the renderer — do not transform at render time.
 
