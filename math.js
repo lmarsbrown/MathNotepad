@@ -2493,46 +2493,6 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
 }
 
 
-// ── Unified box expression evaluator ────────────────────────────────────────
-
-/**
- * Unified evaluator for calc and graph boxes.
- * In calc mode, delegates entirely to evaluateCalcExpressions.
- * In graph mode, compiles graphable expressions (those with implicit x/y) to GLSL shaders,
- * and evaluates non-graphable expressions numerically using evaluateCalcExpressions on
- * the non-graphable subset (so x/y-undefined errors don't bleed into constant rows).
- * @param {Array<{ id: string, latex: string, enabled: boolean, color?: string, thickness?: number }>} expressions
- * @param {{ graphMode?: boolean, usePhysicsBasic?: boolean, usePhysicsEM?: boolean, usePhysicsChem?: boolean, useUnits?: boolean, useSymbolic?: boolean, useBaseUnits?: boolean }} opts
- * @returns {{ results: Map, shaderExprs: Array, jsEvaluators: Map, analysis: Object|null }}
- */
-function evaluateBoxExpressions(expressions, opts = {}) {
-  const {
-    graphMode = false,
-    usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false,
-    useUnits = false, useSymbolic = false, useBaseUnits = false,
-  } = opts;
-  const calcOpts = { usePhysicsBasic, usePhysicsEM, usePhysicsChem, useUnits, useSymbolic, useBaseUnits };
-
-  if (!graphMode) {
-    // Calc mode: full delegation — no shader compilation needed.
-    const results = evaluateCalcExpressions(expressions, calcOpts);
-    return { results, shaderExprs: [], jsEvaluators: new Map(), analysis: null };
-  }
-
-  // ── Graph mode ─────────────────────────────────────────────────────────────
-  // Step A: compile graphable (implicit x/y) expressions to GLSL shaders.
-  const { analysis, renderExprs, jsEvaluators } = compileGraphExpressions(expressions);
-  const graphableIds = new Set(renderExprs.map(e => e.exprId));
-
-  // Step B: evaluate non-graphable expressions numerically.
-  // Filter out graphable ones so that x/y-dependent definitions don't cause
-  // "Undefined variable 'x'" errors for constant and bare expressions.
-  const nonGraphable = expressions.filter(e => !graphableIds.has(e.id));
-  const results = evaluateCalcExpressions(nonGraphable, calcOpts);
-
-  return { results, shaderExprs: renderExprs, jsEvaluators, analysis };
-}
-
 // ── Calculator expression evaluation ────────────────────────────────────────
 
 /**

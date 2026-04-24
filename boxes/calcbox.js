@@ -38,7 +38,6 @@ class ExpressionBox extends Box {
         this._toggle         = null;
         this._resultSpan     = null;
         this._colorSwatch    = null;  // graph mode only
-        this._constValueSpan = null;  // graph mode only
         this._errorLine      = null;
         this._warningLine    = null;
         this._showSlider     = null;
@@ -279,18 +278,6 @@ class ExpressionBox extends Box {
         this._showSlider = showSlider;
         this._hideSlider = hideSlider;
 
-        // ── Graph mode: const-value badge (evaluated value for non-literal consts) ──
-        if (isGraph) {
-            const constValueSpan = document.createElement('span');
-            constValueSpan.className = 'graph-expr-const-value';
-            constValueSpan.style.display = 'none';
-            constValueSpan.addEventListener('click', () => {
-                navigator.clipboard.writeText(constValueSpan.textContent.replace(/^[≈=]\s*/, '')).catch(() => {});
-            });
-            wrapper.appendChild(constValueSpan);
-            this._constValueSpan = constValueSpan;
-        }
-
         // ── Error / warning lines (always created) ───────────────────────────
         const errorLine = document.createElement('div');
         errorLine.className = 'calc-expr-error';
@@ -378,33 +365,26 @@ class ExpressionBox extends Box {
     /**
      * Unified update for graph-mode rows. Shows color swatch for graphable expressions
      * and numeric results (via result span) for everything else.
-     * @param {Map} resultMap - Map<exprId, result> from evaluateBoxExpressions.
-     * @param {Array} shaderExprs - Array of { exprId, ... } for graphable expressions.
+     * @param {Map} resultMap - Map<exprId, result> from evaluateCalcExpressions.
+     * @param {Set<string>} graphableIds - Set of expression ids currently being graphed.
      * @param {number} [sigFigs=6]
      * @param {Map|null} [compilationErrors] - Map<exprId, errorString> from shader compilation.
      */
-    update(resultMap, shaderExprs, sigFigs = 6, compilationErrors = null) {
+    update(resultMap, graphableIds, sigFigs = 6, compilationErrors = null) {
         if (!this._isGraph) { this._applyResult(resultMap, sigFigs); return; }
 
-        // Classify so _applyResult can manage slider visibility correctly
         this._analyze();
 
-        const isGraphable = shaderExprs && shaderExprs.some(e => e.exprId === this.id);
+        const isGraphable = graphableIds && graphableIds.has(this.id);
 
-        // Color swatch is only shown when the expression is currently being graphed
         if (this._colorSwatch) this._colorSwatch.style.display = isGraphable ? '' : 'none';
         // Never hide the toggle or overwrite its state here — the toggle is always
         // visible in graph mode and its aria-pressed state is owned by user interaction.
 
-        // _constValueSpan is legacy; result span handles all non-graphable value display
-        if (this._constValueSpan) this._constValueSpan.style.display = 'none';
-
         if (isGraphable) {
-            // Graphable expressions: the graph IS the result
             if (this._resultSpan) this._resultSpan.style.display = 'none';
             this._hideSlider();
             this._warningLine.style.display = 'none';
-            // Show shader compilation error if present
             const compileErr = compilationErrors && compilationErrors.get(this.id);
             if (compileErr) {
                 this._errorLine.textContent = compileErr;

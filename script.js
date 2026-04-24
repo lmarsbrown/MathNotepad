@@ -204,34 +204,26 @@ function renderGraphPreview() {
   if (!box) return;
 
   const renderer = getGraphRenderer();
-
-  // 1. Compile graphable expressions to GLSL (renderer caches by latex key)
   renderer.updateExpressions(box.expressions || []);
 
-  // 2. Render the WebGL canvas
   const container = document.getElementById('preview-content');
   const w = container.clientWidth  || box.width  || 600;
   const h = container.clientHeight || box.height || 400;
   renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
   updateGraphCropOverlay();
 
-  // 3. Evaluate non-graphable expressions numerically for result display.
-  //    Filter out graphable (compiled) expressions so that x/y-undefined errors
-  //    don't propagate into constant or bare expression rows.
-  const compiledExprs  = renderer._compiledExprs  || [];
   const compiledErrors = renderer._compiledErrors  || new Map();
-  const graphableIds   = new Set(compiledExprs.map(e => e.exprId));
-  // Exclude disabled expressions: they won't be graphed, and passing y=x^2 (disabled)
-  // to the calc evaluator produces "x is not defined" errors.
-  const nonGraphable   = (box.expressions || []).filter(e => !graphableIds.has(e.id) && e.enabled !== false);
+  const graphableIds   = new Set((renderer._compiledExprs || []).map(e => e.exprId));
+  // Exclude disabled expressions — disabled graphable exprs (e.g. y=x^2) would produce
+  // "x is not defined" errors if passed to the calc evaluator.
+  const nonGraphable = (box.expressions || []).filter(e => !graphableIds.has(e.id) && e.enabled !== false);
   const results = evaluateCalcExpressions(nonGraphable, {
     usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem,
     useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits,
   });
 
-  // 4. Update each expression row: color swatch for graphable, numeric result for others
   const sigFigs = box.sigFigs ?? 6;
-  for (const eb of _activeGraphExprBoxes) eb.update(results, compiledExprs, sigFigs, compiledErrors);
+  for (const eb of _activeGraphExprBoxes) eb.update(results, graphableIds, sigFigs, compiledErrors);
 }
 
 function scheduleGraphRender() {
