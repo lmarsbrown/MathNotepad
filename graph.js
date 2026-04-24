@@ -69,30 +69,26 @@ class GraphRenderer {
     this._compiledKey    = '';          // LaTeX-based change-detection key
     this._lastShaderKey  = '';          // shader-key string; drives clearShaderCache()
 
-    // MRT framebuffer for thicken pass (created lazily on first render)
+    // Framebuffer for thicken pass (created lazily on first render)
     this._thickenFb         = null;
     this._thickenColorTex   = null;
-    this._thickenIdTex      = null;
-    this._thickenMRTWidth   = 0;
-    this._thickenMRTHeight  = 0;
+    this._thickenFbWidth    = 0;
+    this._thickenFbHeight   = 0;
 
-    // Parametric curve renderer
+    // Parametric thin-line renderer — writes closest-point offsets into the ping-pong buffer
     this._parametricProgram = null;
     this._parametricVao     = null;
     this._parametricVbo     = null;
-    this._parametricUniforms = null;
+    this._parametricVboData = null; // reusable Float32Array, grown as needed
 
-    // Offscreen RGBA8 layer for parametric curves (MAX-blended, then composited once)
-    this._parametricLayerTex    = null;
-    this._parametricLayerFb     = null;
-    this._parametricLayerWidth  = 0;
-    this._parametricLayerHeight = 0;
-    this._parametricBlitProgram = null;
-    this._parametricBlitVao     = null;
-    this._parametricBlitUniforms = null;
+    // Snap indicator pass — fullscreen shader rendered after thicken blit
+    this._snapProgram  = null;
+    this._snapVao      = null;
+    this._snapUniforms = null;
 
     this._initThickenShader();
-    this._initParametricRenderer();
+    this._initParametricThinLineShader();
+    this._initSnapPassShader();
     this._setupInteraction();
   }
 
@@ -856,13 +852,7 @@ uniform float u_lightTheme;
 uniform vec2 u_rangeMin;
 uniform vec2 u_rangeMax;
 
-// Snap-to-curve indicator
-uniform vec2  u_snapPoint;   // position in WebGL pixel coords (bottom-left origin)
-uniform float u_showSnap;    // 1.0 = draw, 0.0 = hide
-uniform vec3  u_snapColor;   // color of the snapped expression
-
 layout(location = 0) out vec4 FragColor;
-layout(location = 1) out float fragMaxId; // highest implicit graph ID visible at this pixel
 
 void main() {
     vec2 uv = 0.5 * (v_position + 1.0);
@@ -951,29 +941,7 @@ void main() {
         }
     }
 
-    // Write the highest-indexed visible implicit graph ID to the ID buffer.
-    // Parametric fragment shader reads this to perform z-order testing.
-    float maxId = -1.0;
-    for (int g = 0; g < u_numColors; g++) {
-        if (graphAlphas[g] > 0.05) maxId = max(maxId, float(g));
-    }
-    fragMaxId = maxId;
-
     FragColor = vec4(color, 1.0);
-
-    // Snap indicator: filled dot with contrasting ring
-    if (u_showSnap > 0.5) {
-        float sd = length(gl_FragCoord.xy - u_snapPoint);
-        // float ring = smoothstep(9.5, 8.5, sd) * (1.0 - smoothstep(7.5, 6.5, sd));
-
-        float fill = smoothstep(6.5, 5.5, sd);
-
-        // vec3 ringCol = u_lightTheme > 0.5 ? vec3(0.85, 0.85, 0.85) : vec3(0.15, 0.15, 0.15);
-        // color = mix(color, ringCol, ring);
-
-        color = mix(color, u_snapColor, fill);
-        FragColor = vec4(color, 1.0);
-    }
 }
 `;
     this.thickenProgram = GL.createShaderProgram(gl, GL.GENERIC_VS, fs);
@@ -988,83 +956,39 @@ void main() {
       u_lightTheme:   gl.getUniformLocation(this.thickenProgram, 'u_lightTheme'),
       u_rangeMin:     gl.getUniformLocation(this.thickenProgram, 'u_rangeMin'),
       u_rangeMax:     gl.getUniformLocation(this.thickenProgram, 'u_rangeMax'),
-      u_snapPoint:    gl.getUniformLocation(this.thickenProgram, 'u_snapPoint'),
-      u_showSnap:     gl.getUniformLocation(this.thickenProgram, 'u_showSnap'),
-      u_snapColor:    gl.getUniformLocation(this.thickenProgram, 'u_snapColor'),
     };
   }
 
   /**
-   * Create (or recreate on resize) the MRT framebuffer used by the thicken pass.
-   * Attachment 0: RGBA32F color texture. Attachment 1: R32F implicit-graph ID texture.
+   * Create (or recreate on resize) the framebuffer used by the thicken pass.
    * @param {number} width
    * @param {number} height
    */
-  _initThickenMRT(width, height) {
+  _initThickenFb(width, height) {
     const gl = this.gl;
 
-    // Destroy old resources if they exist
     if (this._thickenFb) {
       gl.deleteFramebuffer(this._thickenFb);
       gl.deleteTexture(this._thickenColorTex);
-      gl.deleteTexture(this._thickenIdTex);
     }
 
     this._thickenColorTex = GL.createTexture(gl, width, height, null);
-
-    // R32F single-channel texture for the ID buffer
-    this._thickenIdTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-
     this._thickenFb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._thickenFb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._thickenColorTex, 0);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this._thickenIdTex, 0);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    this._thickenMRTWidth  = width;
-    this._thickenMRTHeight = height;
+    this._thickenFbWidth  = width;
+    this._thickenFbHeight = height;
   }
 
   /**
-   * Create (or recreate on resize) the RGBA8 offscreen layer used for MAX-blending parametric curves.
-   * @param {number} width
-   * @param {number} height
+   * Compile the parametric thin-line shader and create its VBO/VAO.
+   * This shader writes closest-point offsets into the ping-pong buffer so the thicken
+   * pass composites parametric curves in the same z-order pass as implicit curves.
+   * Vertex layout (stride = 32 bytes): clip-pos(xy), p0(xy), p1(xy), halfWidth, graphId.
    */
-  _initParametricLayer(width, height) {
-    const gl = this.gl;
-    if (this._parametricLayerFb) {
-      gl.deleteFramebuffer(this._parametricLayerFb);
-      gl.deleteTexture(this._parametricLayerTex);
-    }
-    this._parametricLayerTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this._parametricLayerTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-    this._parametricLayerFb = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._parametricLayerFb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._parametricLayerTex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._parametricLayerWidth  = width;
-    this._parametricLayerHeight = height;
-  }
-
-  /**
-   * Compile the parametric curve shader program and create the VBO/VAO for geometry.
-   * Called once from the constructor. The VBO is re-uploaded each frame via STREAM_DRAW.
-   */
-  _initParametricRenderer() {
+  _initParametricThinLineShader() {
     const gl = this.gl;
 
     const vs = `#version 300 es
@@ -1086,47 +1010,29 @@ void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
 
+    // Same vec4(offsetX, offsetY, graphId, 1.0) format as the implicit thin-line shader.
+    // discard (not pass-through) for off-centerline pixels: the pre-blit already preserves
+    // prior curve data, and pass-through would let overlapping quads erase each other's writes.
     const fs = `#version 300 es
 precision highp float;
 in vec2  v_p0;
 in vec2  v_p1;
 in float v_halfWidth;
 flat in float v_graphId;
-uniform sampler2D u_idTex;
-uniform vec3      u_colors[16];
-uniform vec2      u_resolution;
 out vec4 fragColor;
 void main() {
-    // Z-order: discard if a higher-indexed implicit curve is at this pixel
-    vec2  uv = gl_FragCoord.xy / u_resolution;
-    float implicitId = texture(u_idTex, uv).r;
-    if (implicitId > -0.5 && implicitId > v_graphId) discard;
+    vec2  pa      = gl_FragCoord.xy - v_p0;
+    vec2  ba      = v_p1 - v_p0;
+    float h       = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-10), 0.0, 1.0);
+    vec2  closest = v_p0 + h * ba;
+    float dist    = length(gl_FragCoord.xy - closest);
 
-    // Capsule SDF: exact distance from pixel centre to line segment.
-    // Gives accurate coverage at bends and round caps at endpoints.
-    vec2  pa   = gl_FragCoord.xy - v_p0;
-    vec2  ba   = v_p1 - v_p0;
-    float h    = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-    vec2  diff = pa - h * ba;
-    float dist = length(diff);
-
-    // Matches the implicit-curve AA: smoothstep over a ±1 px band around the stroke edge.
-    float alpha = smoothstep(-1.0, 1.0, v_halfWidth - dist);
-    if (alpha <= 0.0) discard;
-
-    // Premultiplied output so MAX blending on the layer gives correct per-pixel coverage.
-    vec3 col = u_colors[int(v_graphId + 0.5)];
-    fragColor = vec4(col * alpha, alpha);
+    if (dist > 1.5) discard;
+    fragColor = vec4(closest - gl_FragCoord.xy, v_graphId, 1.0);
 }`;
 
     this._parametricProgram = GL.createShaderProgram(gl, vs, fs);
 
-    // Vertex layout (stride = 32 bytes = 8 floats):
-    //   offset  0: vec2  a_position  (clip-space xy)
-    //   offset  8: vec2  a_p0        (segment start, pixel coords — matches gl_FragCoord space)
-    //   offset 16: vec2  a_p1        (segment end,   pixel coords)
-    //   offset 24: float a_halfWidth (stroke half-width in pixels)
-    //   offset 28: float a_graphId
     this._parametricVbo = gl.createBuffer();
     this._parametricVao = gl.createVertexArray();
     gl.bindVertexArray(this._parametricVao);
@@ -1148,30 +1054,33 @@ void main() {
     gl.vertexAttribPointer(hwLoc,  1, gl.FLOAT, false, stride, 24);
     gl.enableVertexAttribArray(idLoc);
     gl.vertexAttribPointer(idLoc,  1, gl.FLOAT, false, stride, 28);
-
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
 
-    this._parametricUniforms = {
-      u_idTex:      gl.getUniformLocation(this._parametricProgram, 'u_idTex'),
-      u_colors:     gl.getUniformLocation(this._parametricProgram, 'u_colors'),
-      u_resolution: gl.getUniformLocation(this._parametricProgram, 'u_resolution'),
-    };
-
-    // Blit shader: composites the premultiplied parametric layer onto the screen.
-    const blitFs = `#version 300 es
+  /**
+   * Compile the snap indicator shader.
+   * Renders a filled dot at the snap point with premultiplied-alpha blending,
+   * as a separate pass after the thicken blit so it is never occluded by curves.
+   */
+  _initSnapPassShader() {
+    const gl = this.gl;
+    const fs = `#version 300 es
 precision highp float;
 in vec2 v_position;
-uniform sampler2D u_layer;
+uniform vec2 u_snapPoint;
+uniform vec3 u_snapColor;
 out vec4 fragColor;
 void main() {
-    vec2 uv = 0.5 * v_position + 0.5;
-    fragColor = texture(u_layer, uv);
+    float fill = smoothstep(6.5, 5.5, length(gl_FragCoord.xy - u_snapPoint));
+    if (fill <= 0.0) discard;
+    fragColor = vec4(u_snapColor * fill, fill);
 }`;
-    this._parametricBlitProgram  = GL.createShaderProgram(gl, GL.GENERIC_VS, blitFs);
-    this._parametricBlitVao      = GL.createFullscreenTriangle(gl, this._parametricBlitProgram);
-    this._parametricBlitUniforms = {
-      u_layer: gl.getUniformLocation(this._parametricBlitProgram, 'u_layer'),
+    this._snapProgram  = GL.createShaderProgram(gl, GL.GENERIC_VS, fs);
+    this._snapVao      = GL.createFullscreenTriangle(gl, this._snapProgram);
+    this._snapUniforms = {
+      u_snapPoint: gl.getUniformLocation(this._snapProgram, 'u_snapPoint'),
+      u_snapColor: gl.getUniformLocation(this._snapProgram, 'u_snapColor'),
     };
   }
 
@@ -1232,22 +1141,27 @@ void main() {
       active.push(expr);
     }
 
-    // Recreate MRT framebuffer if dimensions changed
-    if (width !== this._thickenMRTWidth || height !== this._thickenMRTHeight) {
-      this._initThickenMRT(width, height);
+    // Recreate thicken framebuffer if dimensions changed
+    if (width !== this._thickenFbWidth || height !== this._thickenFbHeight) {
+      this._initThickenFb(width, height);
     }
 
-    // Recreate parametric layer if dimensions changed
-    if (width !== this._parametricLayerWidth || height !== this._parametricLayerHeight) {
-      this._initParametricLayer(width, height);
-    }
+    const scaleX = width  / (this.xMax - this.xMin);
+    const scaleY = height / (effYMax - effYMin);
 
-    // Pass 1: Thin-line pass for each implicit graph, stacking into one buffer.
-    // Parametric expressions are skipped here; their graphId is their overall index.
+    // Pass 1: Thin-line pass for each expression in z-order.
+    // Implicits write zero-crossing offsets; parametrics write closest-point offsets.
+    // Both use the same vec4(offsetX, offsetY, graphId, 1.0) format so the thicken
+    // pass composites all curves together in one kernel sweep.
     gl.bindVertexArray(this.vao);
     for (let i = 0; i < active.length; i++) {
       const expr = active[i];
-      if (expr.kind === 'parametric') continue;
+      if (expr.kind === 'parametric') {
+        gl.bindVertexArray(null);
+        this._renderParametricThinLine(i, expr, scaleX, scaleY, effYMin, effYMax, img, width, height);
+        gl.bindVertexArray(this.vao);
+        continue;
+      }
 
       let shaderKey, shaderArg;
       if (expr.shaderInfo) {
@@ -1267,7 +1181,7 @@ void main() {
       gl.uniform2f(entry.u_rangeMin, this.xMin, effYMin);
       gl.uniform2f(entry.u_rangeMax, this.xMax, effYMax);
       gl.uniform2f(entry.u_resolution, width, height);
-      gl.uniform1f(entry.u_graphId, i); // overall index — used by ID buffer for z-ordering
+      gl.uniform1f(entry.u_graphId, i); // overall index — written into ping-pong buffer for z-ordering
       gl.uniform1i(entry.u_prevTex, 0);
 
       // Upload custom constant uniforms
@@ -1294,7 +1208,7 @@ void main() {
     this._effYMin    = effYMin;
     this._effYMax    = effYMax;
 
-    // Pass 2: Thicken + anti-alias + grid → MRT framebuffer (color + ID)
+    // Pass 2: Thicken + anti-alias + grid → thicken framebuffer
     gl.useProgram(this.thickenProgram);
     gl.viewport(0, 0, width, height);
     const u = this._thickenUniforms;
@@ -1325,46 +1239,37 @@ void main() {
     gl.uniform1i(u.u_numColors, Math.min(active.length, 16));
     gl.uniform1i(u.u_tex, 0);
 
-    // Upload snap indicator
-    if (this._snapPoint) {
-      const uv_x = (this._snapPoint.wx - this.xMin) / (this.xMax - this.xMin);
-      const uv_y = (this._snapPoint.wy - effYMin)   / (effYMax - effYMin);
-      gl.uniform1f(u.u_showSnap, 1.0);
-      gl.uniform2f(u.u_snapPoint, uv_x * width, uv_y * height);
-    } else {
-      gl.uniform1f(u.u_showSnap, 0.0);
-      gl.uniform2f(u.u_snapPoint, 0.0, 0.0);
-    }
-
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, img.frontTex);
-    // Render to MRT framebuffer (not the screen canvas)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._thickenFb);
-    // Clear both attachments: color to background, ID buffer to -1
     gl.clearBufferfv(gl.COLOR, 0, lightTheme ? [1, 1, 1, 1] : [0.118, 0.118, 0.180, 1]);
-    gl.clearBufferfv(gl.COLOR, 1, [-1, 0, 0, 0]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
 
-    // Blit color attachment (attachment 0) to the screen canvas
+    // Blit thicken result to the screen canvas
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._thickenFb);
     gl.readBuffer(gl.COLOR_ATTACHMENT0);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
 
-    // Pass 3: Parametric curves — sample on CPU, upload triangle strip, render with z-test
-    const activeParametric = active.filter(e => e.kind === 'parametric');
-    if (activeParametric.length > 0) {
-      const scaleX = width  / (this.xMax - this.xMin);
-      const scaleY = height / (effYMax - effYMin);
-      const sampledCurves = activeParametric.map(expr => ({
-        points:   this._sampleParametricCurve(expr, expr.tMin, expr.tMax, scaleX, scaleY, this.xMin, this.xMax, effYMin, effYMax),
-        graphId:  active.indexOf(expr),
-        thickness: expr.thickness,
-        color:    expr.color,
-      }));
-      const vertexCount = this._buildParametricVBO(sampledCurves, this.xMin, this.xMax, effYMin, effYMax, width, height);
-      if (vertexCount > 0) this._renderParametricPass(vertexCount, colorData, width, height);
+    // Snap indicator pass — drawn after all curves so it is never occluded
+    if (this._snapPoint) {
+      const uv_x  = (this._snapPoint.wx - this.xMin) / (this.xMax - this.xMin);
+      const uv_y  = (this._snapPoint.wy - effYMin)   / (effYMax - effYMin);
+      // Look up snap color from the snapped expression
+      const snapExpr = active.find(e => e.exprId === this._snapExprId);
+      const snapCol  = snapExpr ? this._parseColor(snapExpr.color) : [1, 1, 1];
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      gl.useProgram(this._snapProgram);
+      gl.bindVertexArray(this._snapVao);
+      gl.uniform2f(this._snapUniforms.u_snapPoint, uv_x * width, uv_y * height);
+      gl.uniform3fv(this._snapUniforms.u_snapColor, snapCol);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.disable(gl.BLEND);
+      gl.bindVertexArray(null);
     }
   }
 
@@ -1375,6 +1280,49 @@ void main() {
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
     return [r, g, b];
+  }
+
+  /**
+   * Render a parametric curve into the ping-pong buffer at its correct graphId slot.
+   * Blits frontTex → backFb first to preserve all previously rendered curve data,
+   * then rasterizes segment quads writing closest-point offsets into backFb.
+   * Swaps the ping-pong buffers so frontTex is ready for the next expression.
+   *
+   * @param {number} graphId
+   * @param {object} expr       - Compiled parametric expression
+   * @param {number} scaleX     - Pixels per world unit X
+   * @param {number} scaleY     - Pixels per world unit Y
+   * @param {number} effYMin    - Effective viewport Y min (world)
+   * @param {number} effYMax    - Effective viewport Y max (world)
+   * @param {GPUImage} img      - Ping-pong buffer
+   * @param {number} width
+   * @param {number} height
+   */
+  _renderParametricThinLine(graphId, expr, scaleX, scaleY, effYMin, effYMax, img, width, height) {
+    const gl = this.gl;
+    const points = this._sampleParametricCurve(
+      expr, expr.tMin, expr.tMax, scaleX, scaleY,
+      this.xMin, this.xMax, effYMin, effYMax);
+
+    const curves = [{ points, graphId, thickness: expr.thickness ?? 2.0 }];
+    const vertexCount = this._buildParametricVBO(
+      curves, this.xMin, this.xMax, effYMin, effYMax, width, height);
+    if (vertexCount === 0) return;
+
+    // Preserve all existing curve data by blitting frontTex → backFb before drawing quads
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, img.frontFb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, img.backFb);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+
+    // Render closest-point data into backFb, overwriting the blit data near the curve
+    gl.bindFramebuffer(gl.FRAMEBUFFER, img.backFb);
+    gl.viewport(0, 0, width, height);
+    gl.useProgram(this._parametricProgram);
+    gl.bindVertexArray(this._parametricVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
+    gl.bindVertexArray(null);
+
+    img.swapBuffers();
   }
 
   /**
@@ -1480,7 +1428,11 @@ void main() {
     for (const c of curves) totalPts += c.points.length / 2;
     const STRIDE   = 8;
     const maxVerts = totalPts * 8;
-    const data = new Float32Array(maxVerts * STRIDE);
+    const needed = maxVerts * STRIDE;
+    if (!this._parametricVboData || this._parametricVboData.length < needed) {
+      this._parametricVboData = new Float32Array(needed);
+    }
+    const data = this._parametricVboData;
     let vi = 0;
 
     /** Push one vertex: clip-space pos, segment endpoints in pixel space, half-width, graph ID. */
@@ -1526,12 +1478,13 @@ void main() {
         const m = seg.length / 2; // number of (px, py) pairs
         if (m < 2) continue;
 
-        // Cohen-Sutherland outcode: returns a bitmask of which half-planes (left/right/top/bottom)
-        // the point lies outside of. If two endpoints share a non-zero bit, the segment is
-        // entirely outside the viewport and can be skipped without a visual gap.
+        // Cohen-Sutherland outcode: skip segment if both endpoints are in the same outside
+        // half-plane. Margin of hw+8 ensures segments near the viewport edge are not culled
+        // prematurely — the thicken kernel can reach up to 8px outside the written pixels.
+        const margin = hw + 8;
         const outcode = (px, py) =>
-          (px < -hw ? 1 : 0) | (px > width  + hw ? 2 : 0) |
-          (py < -hw ? 4 : 0) | (py > height + hw ? 8 : 0);
+          (px < -margin ? 1 : 0) | (px > width  + margin ? 2 : 0) |
+          (py < -margin ? 4 : 0) | (py > height + margin ? 8 : 0);
 
         // Emit one oriented capsule quad per consecutive point pair
         for (let i = 0; i < m - 1; i++) {
@@ -1548,12 +1501,9 @@ void main() {
           const tx = dx / segLen, ty = dy / segLen; // unit tangent (pixel space)
           const nx = -ty, ny = tx;                  // unit normal (pixel space)
 
-          // Expand hw+1 px in the normal direction (AA edge band).
-          // 0.5 px tangential extension closes floating-point gaps at joints without
-          // causing visible double-blending: the 1px overlap is entirely within the
-          // fully-opaque interior (alpha=1), so painting it twice changes nothing.
-          const enx = nx * (hw + 1.0), eny = ny * (hw + 1.0);
-          const etx = tx * 0.5,        ety = ty * 0.5;
+          // Expand quads by 2px — covers 1.5px centerline threshold plus rasterization margin.
+          const enx = nx * 2.0, eny = ny * 2.0;
+          const etx = tx * 2.0, ety = ty * 2.0;
 
           // 4 quad corners in clip space, ordered for TRIANGLE_STRIP (TL, BL, TR, BR)
           const v0cx = toClipX(p0x - etx + enx), v0cy = toClipY(p0y - ety + eny); // TL
@@ -1581,57 +1531,6 @@ void main() {
     gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, vi * STRIDE), gl.STREAM_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     return vi;
-  }
-
-  /**
-   * GPU render pass for parametric curves.
-   * Reads the ID buffer from the thicken pass for z-ordering against implicit curves.
-   * Blends the curve geometry on top of the already-blitted screen canvas.
-   *
-   * @param {number} vertexCount     - Number of vertices in the VBO
-   * @param {Float32Array} colorData - Same 16×3 float array used by the thicken pass
-   * @param {number} width           - Canvas pixel width (needed for SDF pixel-coord lookup)
-   * @param {number} height          - Canvas pixel height
-   */
-  _renderParametricPass(vertexCount, colorData, width, height) {
-    const gl = this.gl;
-
-    // Step 1: render all segments into the offscreen layer using MAX blend.
-    // Each pixel receives the maximum premultiplied (col*a, a) from any covering capsule,
-    // which eliminates the double-blend noise that occurs when adjacent segment caps overlap.
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._parametricLayerFb);
-    gl.viewport(0, 0, width, height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
-    gl.useProgram(this._parametricProgram);
-    gl.bindVertexArray(this._parametricVao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
-    gl.uniform1i(this._parametricUniforms.u_idTex, 0);
-    gl.uniform3fv(this._parametricUniforms.u_colors, colorData);
-    gl.uniform2f(this._parametricUniforms.u_resolution, width, height);
-
-    gl.enable(gl.BLEND);
-    gl.blendEquation(gl.MAX);
-    gl.blendFunc(gl.ONE, gl.ONE);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
-
-    // Step 2: composite the layer onto the screen using premultiplied-alpha blending.
-    // ZERO,ONE keeps the canvas alpha at 1 (same halo-prevention as before).
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.blendEquation(gl.FUNC_ADD);
-    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
-
-    gl.useProgram(this._parametricBlitProgram);
-    gl.bindVertexArray(this._parametricBlitVao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this._parametricLayerTex);
-    gl.uniform1i(this._parametricBlitUniforms.u_layer, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    gl.disable(gl.BLEND);
-    gl.bindVertexArray(null);
   }
 
   /**
@@ -1670,8 +1569,18 @@ void main() {
   }
 
   destroy() {
+    const gl = this.gl;
     this.clearShaderCache();
     if (this.image) { this.image.destroy(); this.image = null; }
-    if (this.thickenProgram) { this.gl.deleteProgram(this.thickenProgram); }
+    if (this.thickenProgram)     gl.deleteProgram(this.thickenProgram);
+    if (this._parametricProgram) gl.deleteProgram(this._parametricProgram);
+    if (this._parametricVao)     gl.deleteVertexArray(this._parametricVao);
+    if (this._parametricVbo)     gl.deleteBuffer(this._parametricVbo);
+    if (this._snapProgram)       gl.deleteProgram(this._snapProgram);
+    if (this._snapVao)           gl.deleteVertexArray(this._snapVao);
+    if (this._thickenFb) {
+      gl.deleteFramebuffer(this._thickenFb);
+      gl.deleteTexture(this._thickenColorTex);
+    }
   }
 }
