@@ -1033,37 +1033,55 @@ void main() {
 
     const vs = `#version 300 es
 precision highp float;
-in vec2 a_position;
-in vec2 a_linePos;
+in vec2  a_position;
+in vec2  a_p0;
+in vec2  a_p1;
+in float a_halfWidth;
 in float a_graphId;
-out vec2 v_texCoord;
-out vec2 v_linePos;
+out vec2  v_p0;
+out vec2  v_p1;
+out float v_halfWidth;
 flat out float v_graphId;
 void main() {
-    v_texCoord = a_position * 0.5 + 0.5;
-    v_linePos  = a_linePos;
-    v_graphId  = a_graphId;
+    v_p0        = a_p0;
+    v_p1        = a_p1;
+    v_halfWidth = a_halfWidth;
+    v_graphId   = a_graphId;
     gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
 
     const fs = `#version 300 es
 precision highp float;
-in vec2 v_texCoord;
-in vec2 v_linePos;
+in vec2  v_p0;
+in vec2  v_p1;
+in float v_halfWidth;
 flat in float v_graphId;
 uniform sampler2D u_idTex;
-uniform vec3 u_colors[16];
+uniform vec3      u_colors[16];
+uniform vec2      u_resolution;
 out vec4 fragColor;
 void main() {
-    // Z-order test: discard if a higher-indexed implicit curve is at this pixel
-    float implicitId = texture(u_idTex, v_texCoord).r;
+    // Z-order: discard if a higher-indexed implicit curve is at this pixel
+    vec2  uv = gl_FragCoord.xy / u_resolution;
+    float implicitId = texture(u_idTex, uv).r;
     if (implicitId > -0.5 && implicitId > v_graphId) discard;
 
-    // v_linePos.x = signed pixel distance from center (±(hw+1), expanded 1px for AA)
-    // v_linePos.y = half-width in pixels (hw)
-    // edge_dist: 0 at original stroke edge, 1 at expanded geometry edge → always 1px AA band
-    float edge_dist = abs(v_linePos.x) - v_linePos.y;
-    float alpha = smoothstep(1.0, 0.0, edge_dist);
+    // Capsule SDF: exact distance from pixel centre to line segment.
+    // Gives accurate coverage at bends and round caps at endpoints.
+    vec2  pa   = gl_FragCoord.xy - v_p0;
+    vec2  ba   = v_p1 - v_p0;
+    float h    = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    vec2  diff = pa - h * ba;
+    float dist = length(diff);
+
+    // Analytic pixel coverage for a half-plane edge.
+    // L = |nx|+|ny| (L1 norm of the stroke normal) = projected width of the 1×1 pixel
+    // square onto the stroke normal direction. Coverage = clamp((hw-dist)/L + 0.5, 0, 1).
+    // This is the exact fraction of the pixel square inside the half-plane, giving smooth
+    // AA at all angles (wider fade for diagonal lines, tighter for horizontal/vertical).
+    vec2  n     = dist > 1e-6 ? diff / dist : vec2(0.0, 1.0);
+    float L     = abs(n.x) + abs(n.y);
+    float alpha = clamp((v_halfWidth - dist) / L + 0.5, 0.0, 1.0);
     if (alpha <= 0.0) discard;
 
     fragColor = vec4(u_colors[int(v_graphId + 0.5)], alpha);
@@ -1071,32 +1089,41 @@ void main() {
 
     this._parametricProgram = GL.createShaderProgram(gl, vs, fs);
 
-    // Create VAO and VBO. Vertex layout (stride = 20 bytes = 5 floats):
-    //   offset  0: vec2 a_position  (clip-space xy)
-    //   offset  8: vec2 a_linePos   (local line coords: x along, y across [-1,1])
-    //   offset 16: float a_graphId  (overall expression index)
+    // Vertex layout (stride = 32 bytes = 8 floats):
+    //   offset  0: vec2  a_position  (clip-space xy)
+    //   offset  8: vec2  a_p0        (segment start, pixel coords — matches gl_FragCoord space)
+    //   offset 16: vec2  a_p1        (segment end,   pixel coords)
+    //   offset 24: float a_halfWidth (stroke half-width in pixels)
+    //   offset 28: float a_graphId
     this._parametricVbo = gl.createBuffer();
     this._parametricVao = gl.createVertexArray();
     gl.bindVertexArray(this._parametricVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this._parametricVbo);
 
-    const stride = 20;
-    const posLoc  = gl.getAttribLocation(this._parametricProgram, 'a_position');
-    const lineLoc = gl.getAttribLocation(this._parametricProgram, 'a_linePos');
-    const idLoc   = gl.getAttribLocation(this._parametricProgram, 'a_graphId');
+    const stride = 32;
+    const posLoc = gl.getAttribLocation(this._parametricProgram, 'a_position');
+    const p0Loc  = gl.getAttribLocation(this._parametricProgram, 'a_p0');
+    const p1Loc  = gl.getAttribLocation(this._parametricProgram, 'a_p1');
+    const hwLoc  = gl.getAttribLocation(this._parametricProgram, 'a_halfWidth');
+    const idLoc  = gl.getAttribLocation(this._parametricProgram, 'a_graphId');
     gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc,  2, gl.FLOAT, false, stride, 0);
-    gl.enableVertexAttribArray(lineLoc);
-    gl.vertexAttribPointer(lineLoc, 2, gl.FLOAT, false, stride, 8);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(p0Loc);
+    gl.vertexAttribPointer(p0Loc,  2, gl.FLOAT, false, stride, 8);
+    gl.enableVertexAttribArray(p1Loc);
+    gl.vertexAttribPointer(p1Loc,  2, gl.FLOAT, false, stride, 16);
+    gl.enableVertexAttribArray(hwLoc);
+    gl.vertexAttribPointer(hwLoc,  1, gl.FLOAT, false, stride, 24);
     gl.enableVertexAttribArray(idLoc);
-    gl.vertexAttribPointer(idLoc,   1, gl.FLOAT, false, stride, 16);
+    gl.vertexAttribPointer(idLoc,  1, gl.FLOAT, false, stride, 28);
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
     this._parametricUniforms = {
-      u_idTex:  gl.getUniformLocation(this._parametricProgram, 'u_idTex'),
-      u_colors: gl.getUniformLocation(this._parametricProgram, 'u_colors'),
+      u_idTex:      gl.getUniformLocation(this._parametricProgram, 'u_idTex'),
+      u_colors:     gl.getUniformLocation(this._parametricProgram, 'u_colors'),
+      u_resolution: gl.getUniformLocation(this._parametricProgram, 'u_resolution'),
     };
   }
 
@@ -1284,7 +1311,7 @@ void main() {
         color:    expr.color,
       }));
       const vertexCount = this._buildParametricVBO(sampledCurves, this.xMin, this.xMax, effYMin, effYMax, width, height);
-      if (vertexCount > 0) this._renderParametricPass(vertexCount, colorData);
+      if (vertexCount > 0) this._renderParametricPass(vertexCount, colorData, width, height);
     }
   }
 
@@ -1355,13 +1382,14 @@ void main() {
   }
 
   /**
-   * Build a triangle strip VBO covering all parametric curves.
-   * Each curve point expands into 2 vertices (one on each side of the stroke normal).
-   * Normals are computed in pixel space so the stroke width is isotropic.
-   * Segments separated by NaN, and distinct curves, are joined by degenerate triangles.
+   * Build a triangle strip VBO covering all parametric curves using per-segment capsule quads.
+   * Each segment emits 4 vertices (an oriented rectangle expanded by hw+1 px in all directions).
+   * The fragment shader computes the exact capsule SDF for accurate coverage at bends and caps.
+   * Adjacent segment quads are separated by degenerate triangles.
    *
-   * Vertex layout (5 floats, stride 20 bytes):
-   *   [clipX, clipY, 0, linePosAcross(-1/+1), graphId]
+   * Vertex layout (8 floats, stride 32 bytes):
+   *   [clipX, clipY, p0x, p0y, p1x, p1y, halfWidth, graphId]
+   *   p0/p1 are pixel coords (bottom-left origin, matches gl_FragCoord space).
    *
    * @param {Array<{points: Float32Array, graphId: number, thickness: number}>} curves
    * @returns {number} vertex count uploaded to the VBO
@@ -1371,31 +1399,34 @@ void main() {
     const xRange = xMax - xMin;
     const yRange = effYMax - effYMin;
 
-    // World → pixel space
+    // World → pixel space (Y increases upward, matches gl_FragCoord)
     const toPxX = wx => (wx - xMin) / xRange * width;
     const toPxY = wy => (wy - effYMin) / yRange * height;
-    // Pixel space → clip space
+    // Pixel → clip space
     const toClipX = px =>  2 * px / width  - 1;
     const toClipY = py =>  2 * py / height - 1;
 
-    // Generous pre-allocation (2 verts/pt + 4 degenerate separators per segment)
+    // Generous pre-allocation: ~8 verts per input point (4 real + 4 degenerate max)
     let totalPts = 0;
     for (const c of curves) totalPts += c.points.length / 2;
-    const maxVerts = totalPts * 2 + (totalPts + curves.length) * 4;
-    const data = new Float32Array(maxVerts * 5);
+    const STRIDE   = 8;
+    const maxVerts = totalPts * 8;
+    const data = new Float32Array(maxVerts * STRIDE);
     let vi = 0;
 
-    // signedPxDist: signed pixel distance from center (±(hw+1), expanded for AA)
-    // halfWidthPx:  stroke half-width in pixels (hw); fragment uses these for 1px AA band
-    const pushV = (cx, cy, signedPxDist, halfWidthPx, gid) => {
-      const b = vi * 5;
-      data[b] = cx; data[b+1] = cy; data[b+2] = signedPxDist; data[b+3] = halfWidthPx; data[b+4] = gid;
+    /** Push one vertex: clip-space pos, segment endpoints in pixel space, half-width, graph ID. */
+    const pushV = (cx, cy, p0x, p0y, p1x, p1y, hw, gid) => {
+      const b = vi * STRIDE;
+      data[b]   = cx;  data[b+1] = cy;
+      data[b+2] = p0x; data[b+3] = p0y;
+      data[b+4] = p1x; data[b+5] = p1y;
+      data[b+6] = hw;  data[b+7] = gid;
       vi++;
     };
     const dupLast = () => {
       if (vi === 0) return;
-      const s = (vi - 1) * 5, d = vi * 5;
-      data[d]=data[s]; data[d+1]=data[s+1]; data[d+2]=data[s+2]; data[d+3]=data[s+3]; data[d+4]=data[s+4];
+      const s = (vi - 1) * STRIDE;
+      data.copyWithin(vi * STRIDE, s, s + STRIDE);
       vi++;
     };
 
@@ -1405,9 +1436,9 @@ void main() {
       const n = points.length / 2;
       if (n < 2) continue;
 
-      const hw = thickness * 0.5; // half-width in pixels
+      const hw = thickness * 0.5; // stroke half-width in pixels
 
-      // Split into NaN-free segments
+      // Split into NaN-free sub-polylines
       const segments = [];
       let cur = null;
       for (let i = 0; i < n; i++) {
@@ -1423,38 +1454,43 @@ void main() {
       if (cur && cur.length >= 2) segments.push(cur);
 
       for (const seg of segments) {
-        const m = seg.length / 2; // number of (px,py) pairs
+        const m = seg.length / 2; // number of (px, py) pairs
         if (m < 2) continue;
 
-        for (let i = 0; i < m; i++) {
-          const px = seg[i * 2], py = seg[i * 2 + 1];
+        // Emit one oriented capsule quad per consecutive point pair
+        for (let i = 0; i < m - 1; i++) {
+          const p0x = seg[i * 2],       p0y = seg[i * 2 + 1];
+          const p1x = seg[(i + 1) * 2], p1y = seg[(i + 1) * 2 + 1];
 
-          // Tangent in pixel space via central/forward/backward difference
-          let tx, ty;
-          if (i === 0)     { tx = seg[2] - px;              ty = seg[3] - py; }
-          else if (i===m-1){ tx = px - seg[(i-1)*2];        ty = py - seg[(i-1)*2+1]; }
-          else             { tx = seg[(i+1)*2] - seg[(i-1)*2]; ty = seg[(i+1)*2+1] - seg[(i-1)*2+1]; }
+          const dx = p1x - p0x, dy = p1y - p0y;
+          const segLen = Math.sqrt(dx * dx + dy * dy);
+          if (segLen < 1e-6) continue; // skip zero-length segments
 
-          const len = Math.sqrt(tx * tx + ty * ty);
-          const nx = len > 1e-12 ? -ty / len : 0; // pixel-space unit normal
-          const ny = len > 1e-12 ?  tx / len : 0;
+          const tx = dx / segLen, ty = dy / segLen; // unit tangent (pixel space)
+          const nx = -ty, ny = tx;                  // unit normal (pixel space)
 
-          // Expand geometry by 1px beyond the stroke edge for the 1px AA fringe
-          const hwAA = hw + 1.0;
-          const botCX = toClipX(px - nx * hwAA), botCY = toClipY(py - ny * hwAA);
-          const topCX = toClipX(px + nx * hwAA), topCY = toClipY(py + ny * hwAA);
+          // Expand hw+1 px in the normal direction (AA edge band).
+          // 0.5 px tangential extension closes floating-point gaps at joints without
+          // causing visible double-blending: the 1px overlap is entirely within the
+          // fully-opaque interior (alpha=1), so painting it twice changes nothing.
+          const enx = nx * (hw + 1.0), eny = ny * (hw + 1.0);
+          const etx = tx * 0.5,        ety = ty * 0.5;
 
-          if (i === 0) {
-            // New segment: add degenerate separator if anything already emitted
-            if (anyEmitted) {
-              dupLast();
-              pushV(botCX, botCY, -hwAA, hw, graphId); // duplicate first of new segment
-            }
-            pushV(botCX, botCY, -hwAA, hw, graphId);
-          } else {
-            pushV(botCX, botCY, -hwAA, hw, graphId);
+          // 4 quad corners in clip space, ordered for TRIANGLE_STRIP (TL, BL, TR, BR)
+          const v0cx = toClipX(p0x - etx + enx), v0cy = toClipY(p0y - ety + eny); // TL
+          const v1cx = toClipX(p0x - etx - enx), v1cy = toClipY(p0y - ety - eny); // BL
+          const v2cx = toClipX(p1x + etx + enx), v2cy = toClipY(p1y + ety + eny); // TR
+          const v3cx = toClipX(p1x + etx - enx), v3cy = toClipY(p1y + ety - eny); // BR
+
+          if (anyEmitted) {
+            // Degenerate separator: dup last of previous quad, dup first of this quad
+            dupLast();
+            pushV(v0cx, v0cy, p0x, p0y, p1x, p1y, hw, graphId);
           }
-          pushV(topCX, topCY, hwAA, hw, graphId);
+          pushV(v0cx, v0cy, p0x, p0y, p1x, p1y, hw, graphId);
+          pushV(v1cx, v1cy, p0x, p0y, p1x, p1y, hw, graphId);
+          pushV(v2cx, v2cy, p0x, p0y, p1x, p1y, hw, graphId);
+          pushV(v3cx, v3cy, p0x, p0y, p1x, p1y, hw, graphId);
           anyEmitted = true;
         }
       }
@@ -1463,7 +1499,7 @@ void main() {
     if (vi === 0) return 0;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this._parametricVbo);
-    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, vi * 5), gl.STREAM_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, vi * STRIDE), gl.STREAM_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     return vi;
   }
@@ -1473,10 +1509,12 @@ void main() {
    * Reads the ID buffer from the thicken pass for z-ordering against implicit curves.
    * Blends the curve geometry on top of the already-blitted screen canvas.
    *
-   * @param {number} vertexCount    - Number of vertices in the VBO
+   * @param {number} vertexCount     - Number of vertices in the VBO
    * @param {Float32Array} colorData - Same 16×3 float array used by the thicken pass
+   * @param {number} width           - Canvas pixel width (needed for SDF pixel-coord lookup)
+   * @param {number} height          - Canvas pixel height
    */
-  _renderParametricPass(vertexCount, colorData) {
+  _renderParametricPass(vertexCount, colorData, width, height) {
     const gl = this.gl;
     gl.useProgram(this._parametricProgram);
     gl.bindVertexArray(this._parametricVao);
@@ -1485,6 +1523,7 @@ void main() {
     gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
     gl.uniform1i(this._parametricUniforms.u_idTex, 0);
     gl.uniform3fv(this._parametricUniforms.u_colors, colorData);
+    gl.uniform2f(this._parametricUniforms.u_resolution, width, height);
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
