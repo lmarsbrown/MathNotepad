@@ -491,7 +491,9 @@ class ExpressionBox extends Box {
         if (this._isGraph) {
             const color     = this.element ? (this.element.dataset.color                 || this.color)     : this.color;
             const thickness = this.element ? (parseFloat(this.element.dataset.thickness) || 2.0)            : this.thickness;
-            return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax };
+            const tMin      = this.element ? parseFloat(this.element.dataset.tMin  ?? 0) : (this.tMin  ?? 0);
+            const tMax      = this.element ? parseFloat(this.element.dataset.tMax  ?? 1) : (this.tMax  ?? 1);
+            return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax, tMin, tMax };
         }
         return { id: this.id, latex, enabled, sliderMin, sliderMax };
     }

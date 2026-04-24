@@ -210,6 +210,7 @@ function renderGraphPreview() {
   const w = container.clientWidth  || box.width  || 600;
   const h = container.clientHeight || box.height || 400;
   renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
+  _syncExprBoxMeta(renderer._lastAnalysis);
   updateGraphCropOverlay();
 
   const compiledErrors = renderer._compiledErrors  || new Map();

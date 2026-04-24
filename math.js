@@ -1033,6 +1033,12 @@ function analyzeExpressions(classifiedList) {
       resolved.set(name, r);
       return r;
     }
+    // pi is a known mathematical constant — handled by evaluateAst and astToGlsl
+    if (name === 'pi') {
+      const r = { depth: 0, dependsOnXY: false, error: null };
+      resolved.set(name, r);
+      return r;
+    }
     // Function names are recognized — not undefined variables
     if (funcDefs.has(name)) {
       const r = { depth: 0, dependsOnXY: false, error: null };
@@ -1119,10 +1125,51 @@ function analyzeExpressions(classifiedList) {
     implicits.push({ lhs: expr.lhs, rhs: expr.rhs, deps: expr.deps, exprId: expr.exprId });
   }
 
+  // Validate parametric expressions
+  const parametrics = [];
+  for (const expr of classifiedList) {
+    if (expr.kind !== 'parametric') continue;
+    if (errors.has(expr.exprId)) continue;
+
+    const vars = new Set(expr.deps);
+
+    // x and y are not valid in parametric context (they belong to implicit equations)
+    if (vars.has('x') || vars.has('y')) {
+      errors.set(expr.exprId, "Parametric expressions cannot use x or y");
+      continue;
+    }
+
+    // Must reference t as the free variable
+    if (!vars.has('t')) {
+      errors.set(expr.exprId, "Parametric expressions must use variable t");
+      continue;
+    }
+
+    // All deps other than t must resolve to constants (no xy-dependency)
+    const depsExcludingT = new Set(vars);
+    depsExcludingT.delete('t');
+    let exprError = null;
+    for (const dep of depsExcludingT) {
+      const r = resolve(dep);
+      if (r.error) { exprError = r.error; break; }
+      if (r.dependsOnXY) {
+        exprError = `Variable '${dep}' depends on x or y, which is not valid in a parametric expression`;
+        break;
+      }
+    }
+    if (exprError) {
+      errors.set(expr.exprId, exprError);
+      continue;
+    }
+
+    parametrics.push({ xExpr: expr.xExpr, yExpr: expr.yExpr, deps: expr.deps, exprId: expr.exprId });
+  }
+
   return {
     constants,
     xyDefs,
     implicits,
+    parametrics,
     errors,
     constantValues: new Map(),
     defsMap,
@@ -2468,6 +2515,21 @@ function generateShaderCode(implicitExpr, analysis) {
 // ── Public API: batch analysis of all expressions in a graph box ────────────
 
 /**
+ * Compute and cache derivative ASTs for a parametric expression.
+ * Derivatives are computed once here and reused every frame during sampling.
+ * @param {{ xExpr, yExpr }} parametricExpr - From analysis.parametrics
+ * @param {{ funcDefs: Map }} analysis
+ * @returns {{ xAst, yAst, dxAst, dyAst, funcDefs }}
+ */
+function buildParametricEvaluators(parametricExpr, analysis) {
+  const { xExpr, yExpr } = parametricExpr;
+  const { funcDefs } = analysis;
+  const dxAst = simplifyAst(differentiateAst(xExpr, 't', funcDefs));
+  const dyAst = simplifyAst(differentiateAst(yExpr, 't', funcDefs));
+  return { xAst: xExpr, yAst: yExpr, dxAst, dyAst, funcDefs };
+}
+
+/**
  * Analyze all expressions in a graph box and prepare for rendering.
  * Returns { analysis, renderExprs } where renderExprs is an array of
  * { exprId, shaderInfo, enabled, color, thickness } ready for the renderer,
@@ -2481,10 +2543,22 @@ function compileGraphExpressions(expressions) {
     if (!e.enabled) return { kind: 'disabled', exprId: e.id };
     const p = parseExpression(e.latex);
     if (p.error) {
-      // Bare expressions with no x/y are valid constants evaluated elsewhere — don't flag as errors
+      // Bare expressions with no = sign: could be a constant, a point expression, etc.
       if (p.error === 'Expression must contain =') {
         try {
           const ast = parseLatexToAst(e.latex.trim());
+          // Point expression (t,2t): classify as parametric for the analyzer
+          if (ast.type === 'point') {
+            const vars = collectVariables(ast);
+            return {
+              kind: 'parametric',
+              xExpr: ast.args[0],
+              yExpr: ast.args[1],
+              deps: [...vars],
+              exprId: e.id,
+            };
+          }
+          // Scalar constants with no x/y are evaluated CPU-side — not a graph error
           const vars = collectVariables(ast);
           if (!vars.has('x') && !vars.has('y')) {
             return { kind: 'disabled', exprId: e.id };
@@ -2531,6 +2605,31 @@ function compileGraphExpressions(expressions) {
       color: expr.color,
       enabled: true,
       thickness: expr.thickness != null ? expr.thickness : 2.0,
+    });
+  }
+
+  // 5. Build evaluators for each parametric expression
+  for (const para of analysis.parametrics) {
+    const expr = expressions.find(e => e.id === para.exprId);
+    if (!expr) continue;
+
+    let evaluators;
+    try {
+      evaluators = buildParametricEvaluators(para, analysis);
+    } catch (e) {
+      analysis.errors.set(para.exprId, e.message);
+      continue;
+    }
+
+    renderExprs.push({
+      exprId: para.exprId,
+      kind: 'parametric',
+      ...evaluators,
+      color: expr.color,
+      enabled: true,
+      thickness: expr.thickness != null ? expr.thickness : 2.0,
+      tMin: expr.tMin ?? 0,
+      tMax: expr.tMax ?? 1,
     });
   }
 

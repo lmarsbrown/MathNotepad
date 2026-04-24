@@ -462,6 +462,36 @@ body {
   opacity: 0.45;
 }
 
+/* T-range row for parametric expressions */
+.t-range-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px 2px 2px;
+}
+
+.t-range-input {
+  width: 56px;
+  padding: 2px 4px;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-size: 0.8em;
+  text-align: center;
+}
+
+.t-range-input:focus {
+  outline: none;
+  border-color: #7f849c;
+}
+
+.t-range-label {
+  color: #6c7086;
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
 .expr-row {
   display: flex;
   align-items: center;

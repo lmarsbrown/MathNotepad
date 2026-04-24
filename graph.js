@@ -69,7 +69,21 @@ class GraphRenderer {
     this._compiledKey    = '';          // LaTeX-based change-detection key
     this._lastShaderKey  = '';          // shader-key string; drives clearShaderCache()
 
+    // MRT framebuffer for thicken pass (created lazily on first render)
+    this._thickenFb         = null;
+    this._thickenColorTex   = null;
+    this._thickenIdTex      = null;
+    this._thickenMRTWidth   = 0;
+    this._thickenMRTHeight  = 0;
+
+    // Parametric curve renderer
+    this._parametricProgram = null;
+    this._parametricVao     = null;
+    this._parametricVbo     = null;
+    this._parametricUniforms = null;
+
     this._initThickenShader();
+    this._initParametricRenderer();
     this._setupInteraction();
   }
 
@@ -92,7 +106,16 @@ class GraphRenderer {
 
       this._compiledExprs = renderExprs.map(re => ({
         exprId:     re.exprId,
+        kind:       re.kind,          // 'parametric' | undefined (implicit)
         shaderInfo: re.shaderInfo,
+        // Parametric-specific fields (undefined for implicit)
+        xAst:       re.xAst,
+        yAst:       re.yAst,
+        dxAst:      re.dxAst,
+        dyAst:      re.dyAst,
+        funcDefs:   re.funcDefs,
+        tMin:       re.tMin ?? 0,
+        tMax:       re.tMax ?? 1,
         jsEval:     jsEvaluators.get(re.exprId) || null,
         color:      re.color,
         thickness:  re.thickness,
@@ -118,6 +141,8 @@ class GraphRenderer {
         if (compiled) {
           compiled.color     = src.color;
           compiled.thickness = src.thickness != null ? src.thickness : 2.0;
+          compiled.tMin      = src.tMin ?? 0;
+          compiled.tMax      = src.tMax ?? 1;
         }
       }
     }
@@ -827,7 +852,8 @@ uniform vec2  u_snapPoint;   // position in WebGL pixel coords (bottom-left orig
 uniform float u_showSnap;    // 1.0 = draw, 0.0 = hide
 uniform vec3  u_snapColor;   // color of the snapped expression
 
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out float fragMaxId; // highest implicit graph ID visible at this pixel
 
 void main() {
     vec2 uv = 0.5 * (v_position + 1.0);
@@ -916,6 +942,14 @@ void main() {
         }
     }
 
+    // Write the highest-indexed visible implicit graph ID to the ID buffer.
+    // Parametric fragment shader reads this to perform z-order testing.
+    float maxId = -1.0;
+    for (int g = 0; g < u_numColors; g++) {
+        if (graphAlphas[g] > 0.05) maxId = max(maxId, float(g));
+    }
+    fragMaxId = maxId;
+
     FragColor = vec4(color, 1.0);
 
     // Snap indicator: filled dot with contrasting ring
@@ -948,6 +982,121 @@ void main() {
       u_snapPoint:    gl.getUniformLocation(this.thickenProgram, 'u_snapPoint'),
       u_showSnap:     gl.getUniformLocation(this.thickenProgram, 'u_showSnap'),
       u_snapColor:    gl.getUniformLocation(this.thickenProgram, 'u_snapColor'),
+    };
+  }
+
+  /**
+   * Create (or recreate on resize) the MRT framebuffer used by the thicken pass.
+   * Attachment 0: RGBA32F color texture. Attachment 1: R32F implicit-graph ID texture.
+   * @param {number} width
+   * @param {number} height
+   */
+  _initThickenMRT(width, height) {
+    const gl = this.gl;
+
+    // Destroy old resources if they exist
+    if (this._thickenFb) {
+      gl.deleteFramebuffer(this._thickenFb);
+      gl.deleteTexture(this._thickenColorTex);
+      gl.deleteTexture(this._thickenIdTex);
+    }
+
+    this._thickenColorTex = GL.createTexture(gl, width, height, null);
+
+    // R32F single-channel texture for the ID buffer
+    this._thickenIdTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    this._thickenFb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._thickenFb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._thickenColorTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, this._thickenIdTex, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    this._thickenMRTWidth  = width;
+    this._thickenMRTHeight = height;
+  }
+
+  /**
+   * Compile the parametric curve shader program and create the VBO/VAO for geometry.
+   * Called once from the constructor. The VBO is re-uploaded each frame via STREAM_DRAW.
+   */
+  _initParametricRenderer() {
+    const gl = this.gl;
+
+    const vs = `#version 300 es
+precision highp float;
+in vec2 a_position;
+in vec2 a_linePos;
+in float a_graphId;
+out vec2 v_texCoord;
+out vec2 v_linePos;
+flat out float v_graphId;
+void main() {
+    v_texCoord = a_position * 0.5 + 0.5;
+    v_linePos  = a_linePos;
+    v_graphId  = a_graphId;
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+    const fs = `#version 300 es
+precision highp float;
+in vec2 v_texCoord;
+in vec2 v_linePos;
+flat in float v_graphId;
+uniform sampler2D u_idTex;
+uniform vec3 u_colors[16];
+out vec4 fragColor;
+void main() {
+    // Z-order test: discard if a higher-indexed implicit curve is at this pixel
+    float implicitId = texture(u_idTex, v_texCoord).r;
+    if (implicitId > -0.5 && implicitId > v_graphId) discard;
+
+    // v_linePos.x = signed pixel distance from center (±(hw+1), expanded 1px for AA)
+    // v_linePos.y = half-width in pixels (hw)
+    // edge_dist: 0 at original stroke edge, 1 at expanded geometry edge → always 1px AA band
+    float edge_dist = abs(v_linePos.x) - v_linePos.y;
+    float alpha = smoothstep(1.0, 0.0, edge_dist);
+    if (alpha <= 0.0) discard;
+
+    fragColor = vec4(u_colors[int(v_graphId + 0.5)], alpha);
+}`;
+
+    this._parametricProgram = GL.createShaderProgram(gl, vs, fs);
+
+    // Create VAO and VBO. Vertex layout (stride = 20 bytes = 5 floats):
+    //   offset  0: vec2 a_position  (clip-space xy)
+    //   offset  8: vec2 a_linePos   (local line coords: x along, y across [-1,1])
+    //   offset 16: float a_graphId  (overall expression index)
+    this._parametricVbo = gl.createBuffer();
+    this._parametricVao = gl.createVertexArray();
+    gl.bindVertexArray(this._parametricVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._parametricVbo);
+
+    const stride = 20;
+    const posLoc  = gl.getAttribLocation(this._parametricProgram, 'a_position');
+    const lineLoc = gl.getAttribLocation(this._parametricProgram, 'a_linePos');
+    const idLoc   = gl.getAttribLocation(this._parametricProgram, 'a_graphId');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc,  2, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(lineLoc);
+    gl.vertexAttribPointer(lineLoc, 2, gl.FLOAT, false, stride, 8);
+    gl.enableVertexAttribArray(idLoc);
+    gl.vertexAttribPointer(idLoc,   1, gl.FLOAT, false, stride, 16);
+
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    this._parametricUniforms = {
+      u_idTex:  gl.getUniformLocation(this._parametricProgram, 'u_idTex'),
+      u_colors: gl.getUniformLocation(this._parametricProgram, 'u_colors'),
     };
   }
 
@@ -999,21 +1148,28 @@ void main() {
       }
     }
 
-    // Collect enabled expressions
+    // Collect enabled expressions: both implicit (shaderInfo) and parametric.
+    // The overall index (i) is used as the graphId so z-ordering is consistent.
     const active = [];
     for (const expr of exprs) {
       if (!expr.enabled) continue;
-      // Support both legacy { glsl } and new { shaderInfo } formats
-      if (!expr.glsl && !expr.shaderInfo) continue;
+      if (!expr.glsl && !expr.shaderInfo && expr.kind !== 'parametric') continue;
       active.push(expr);
     }
 
-    // Pass 1: Thin-line pass for each graph, stacking into one buffer
+    // Recreate MRT framebuffer if dimensions changed
+    if (width !== this._thickenMRTWidth || height !== this._thickenMRTHeight) {
+      this._initThickenMRT(width, height);
+    }
+
+    // Pass 1: Thin-line pass for each implicit graph, stacking into one buffer.
+    // Parametric expressions are skipped here; their graphId is their overall index.
     gl.bindVertexArray(this.vao);
     for (let i = 0; i < active.length; i++) {
       const expr = active[i];
-      let shaderKey, shaderArg;
+      if (expr.kind === 'parametric') continue;
 
+      let shaderKey, shaderArg;
       if (expr.shaderInfo) {
         shaderKey = expr.shaderInfo.shaderKey;
         shaderArg = expr.shaderInfo;
@@ -1031,7 +1187,7 @@ void main() {
       gl.uniform2f(entry.u_rangeMin, this.xMin, effYMin);
       gl.uniform2f(entry.u_rangeMax, this.xMax, effYMax);
       gl.uniform2f(entry.u_resolution, width, height);
-      gl.uniform1f(entry.u_graphId, i);
+      gl.uniform1f(entry.u_graphId, i); // overall index — used by ID buffer for z-ordering
       gl.uniform1i(entry.u_prevTex, 0);
 
       // Upload custom constant uniforms
@@ -1058,7 +1214,7 @@ void main() {
     this._effYMin    = effYMin;
     this._effYMax    = effYMax;
 
-    // Pass 2: Thicken + anti-alias + grid, render to screen
+    // Pass 2: Thicken + anti-alias + grid → MRT framebuffer (color + ID)
     gl.useProgram(this.thickenProgram);
     gl.viewport(0, 0, width, height);
     const u = this._thickenUniforms;
@@ -1074,7 +1230,7 @@ void main() {
     }
     gl.uniform1f(u.u_lightTheme, lightTheme ? 1.0 : 0.0);
 
-    // Upload graph colors and thicknesses
+    // Upload graph colors and thicknesses (indexed by overall position, not implicit-only)
     const colorData = new Float32Array(16 * 3);
     const thicknessData = new Float32Array(16);
     for (let i = 0; i < active.length && i < 16; i++) {
@@ -1102,9 +1258,34 @@ void main() {
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, img.frontTex);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // Render to MRT framebuffer (not the screen canvas)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._thickenFb);
+    // Clear both attachments: color to background, ID buffer to -1
+    gl.clearBufferfv(gl.COLOR, 0, lightTheme ? [1, 1, 1, 1] : [0.118, 0.118, 0.180, 1]);
+    gl.clearBufferfv(gl.COLOR, 1, [-1, 0, 0, 0]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
+
+    // Blit color attachment (attachment 0) to the screen canvas
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._thickenFb);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+
+    // Pass 3: Parametric curves — sample on CPU, upload triangle strip, render with z-test
+    const activeParametric = active.filter(e => e.kind === 'parametric');
+    if (activeParametric.length > 0) {
+      const scaleX = width  / (this.xMax - this.xMin);
+      const scaleY = height / (effYMax - effYMin);
+      const sampledCurves = activeParametric.map(expr => ({
+        points:   this._sampleParametricCurve(expr, expr.tMin, expr.tMax, scaleX, scaleY),
+        graphId:  active.indexOf(expr),
+        thickness: expr.thickness,
+        color:    expr.color,
+      }));
+      const vertexCount = this._buildParametricVBO(sampledCurves, this.xMin, this.xMax, effYMin, effYMax, width, height);
+      if (vertexCount > 0) this._renderParametricPass(vertexCount, colorData);
+    }
   }
 
   /** Parse a CSS hex color to [r, g, b] floats. */
@@ -1114,6 +1295,204 @@ void main() {
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
     return [r, g, b];
+  }
+
+  /**
+   * Adaptively sample a parametric curve (x(t), y(t)) on the CPU.
+   * Step size targets ~1 screen pixel of arc length. Cusps (zero speed) use a minimum dt.
+   * Hard cap at 50 000 points to prevent runaway computation.
+   *
+   * @param {object} compiled  - From _compiledExprs: { xAst, yAst, dxAst, dyAst, funcDefs }
+   * @param {number} tMin
+   * @param {number} tMax
+   * @param {number} scaleX    - Pixels per world unit in X (width / (xMax - xMin))
+   * @param {number} scaleY    - Pixels per world unit in Y
+   * @returns {Float32Array}   - Flat [x0, y0, x1, y1, …]; NaN pairs mark gaps
+   */
+  _sampleParametricCurve(compiled, tMin, tMax, scaleX, scaleY) {
+    const { xAst, yAst, dxAst, dyAst, funcDefs } = compiled;
+    const TARGET_PX = 1.0;
+    const range     = Math.abs(tMax - tMin) || 1;
+    const MIN_DT    = range * 1e-5;
+    const MAX_PTS   = 50000;
+
+    // Reuse a single values Map, mutating only t each iteration (avoids per-step allocation)
+    const vals = new Map(this._constantValues);
+
+    const buf = new Float32Array(MAX_PTS * 2);
+    let count = 0;
+    let t = tMin;
+
+    while (count < MAX_PTS) {
+      vals.set('t', t);
+      let x, y;
+      try {
+        x = evaluateAst(xAst, vals, funcDefs);
+        y = evaluateAst(yAst, vals, funcDefs);
+      } catch (_) {
+        x = NaN; y = NaN;
+      }
+      buf[count * 2]     = (isFinite(x) && isFinite(y)) ? x : NaN;
+      buf[count * 2 + 1] = (isFinite(x) && isFinite(y)) ? y : NaN;
+      count++;
+
+      if (t >= tMax) break;
+
+      // Compute speed in screen pixels per unit t to choose next step size
+      let dx, dy;
+      try {
+        dx = evaluateAst(dxAst, vals, funcDefs);
+        dy = evaluateAst(dyAst, vals, funcDefs);
+      } catch (_) {
+        dx = 0; dy = 0;
+      }
+      const speed = Math.sqrt((dx * scaleX) ** 2 + (dy * scaleY) ** 2);
+      const dt    = Math.max(MIN_DT, speed > 1e-10 ? TARGET_PX / speed : MIN_DT);
+      t = Math.min(t + dt, tMax);
+    }
+
+    return buf.subarray(0, count * 2);
+  }
+
+  /**
+   * Build a triangle strip VBO covering all parametric curves.
+   * Each curve point expands into 2 vertices (one on each side of the stroke normal).
+   * Normals are computed in pixel space so the stroke width is isotropic.
+   * Segments separated by NaN, and distinct curves, are joined by degenerate triangles.
+   *
+   * Vertex layout (5 floats, stride 20 bytes):
+   *   [clipX, clipY, 0, linePosAcross(-1/+1), graphId]
+   *
+   * @param {Array<{points: Float32Array, graphId: number, thickness: number}>} curves
+   * @returns {number} vertex count uploaded to the VBO
+   */
+  _buildParametricVBO(curves, xMin, xMax, effYMin, effYMax, width, height) {
+    const gl = this.gl;
+    const xRange = xMax - xMin;
+    const yRange = effYMax - effYMin;
+
+    // World → pixel space
+    const toPxX = wx => (wx - xMin) / xRange * width;
+    const toPxY = wy => (wy - effYMin) / yRange * height;
+    // Pixel space → clip space
+    const toClipX = px =>  2 * px / width  - 1;
+    const toClipY = py =>  2 * py / height - 1;
+
+    // Generous pre-allocation (2 verts/pt + 4 degenerate separators per segment)
+    let totalPts = 0;
+    for (const c of curves) totalPts += c.points.length / 2;
+    const maxVerts = totalPts * 2 + (totalPts + curves.length) * 4;
+    const data = new Float32Array(maxVerts * 5);
+    let vi = 0;
+
+    // signedPxDist: signed pixel distance from center (±(hw+1), expanded for AA)
+    // halfWidthPx:  stroke half-width in pixels (hw); fragment uses these for 1px AA band
+    const pushV = (cx, cy, signedPxDist, halfWidthPx, gid) => {
+      const b = vi * 5;
+      data[b] = cx; data[b+1] = cy; data[b+2] = signedPxDist; data[b+3] = halfWidthPx; data[b+4] = gid;
+      vi++;
+    };
+    const dupLast = () => {
+      if (vi === 0) return;
+      const s = (vi - 1) * 5, d = vi * 5;
+      data[d]=data[s]; data[d+1]=data[s+1]; data[d+2]=data[s+2]; data[d+3]=data[s+3]; data[d+4]=data[s+4];
+      vi++;
+    };
+
+    let anyEmitted = false;
+
+    for (const { points, graphId, thickness } of curves) {
+      const n = points.length / 2;
+      if (n < 2) continue;
+
+      const hw = thickness * 0.5; // half-width in pixels
+
+      // Split into NaN-free segments
+      const segments = [];
+      let cur = null;
+      for (let i = 0; i < n; i++) {
+        const wx = points[i * 2], wy = points[i * 2 + 1];
+        if (isNaN(wx) || isNaN(wy)) {
+          if (cur && cur.length >= 2) segments.push(cur);
+          cur = null;
+        } else {
+          if (!cur) cur = [];
+          cur.push(toPxX(wx), toPxY(wy));
+        }
+      }
+      if (cur && cur.length >= 2) segments.push(cur);
+
+      for (const seg of segments) {
+        const m = seg.length / 2; // number of (px,py) pairs
+        if (m < 2) continue;
+
+        for (let i = 0; i < m; i++) {
+          const px = seg[i * 2], py = seg[i * 2 + 1];
+
+          // Tangent in pixel space via central/forward/backward difference
+          let tx, ty;
+          if (i === 0)     { tx = seg[2] - px;              ty = seg[3] - py; }
+          else if (i===m-1){ tx = px - seg[(i-1)*2];        ty = py - seg[(i-1)*2+1]; }
+          else             { tx = seg[(i+1)*2] - seg[(i-1)*2]; ty = seg[(i+1)*2+1] - seg[(i-1)*2+1]; }
+
+          const len = Math.sqrt(tx * tx + ty * ty);
+          const nx = len > 1e-12 ? -ty / len : 0; // pixel-space unit normal
+          const ny = len > 1e-12 ?  tx / len : 0;
+
+          // Expand geometry by 1px beyond the stroke edge for the 1px AA fringe
+          const hwAA = hw + 1.0;
+          const botCX = toClipX(px - nx * hwAA), botCY = toClipY(py - ny * hwAA);
+          const topCX = toClipX(px + nx * hwAA), topCY = toClipY(py + ny * hwAA);
+
+          if (i === 0) {
+            // New segment: add degenerate separator if anything already emitted
+            if (anyEmitted) {
+              dupLast();
+              pushV(botCX, botCY, -hwAA, hw, graphId); // duplicate first of new segment
+            }
+            pushV(botCX, botCY, -hwAA, hw, graphId);
+          } else {
+            pushV(botCX, botCY, -hwAA, hw, graphId);
+          }
+          pushV(topCX, topCY, hwAA, hw, graphId);
+          anyEmitted = true;
+        }
+      }
+    }
+
+    if (vi === 0) return 0;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._parametricVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, vi * 5), gl.STREAM_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    return vi;
+  }
+
+  /**
+   * GPU render pass for parametric curves.
+   * Reads the ID buffer from the thicken pass for z-ordering against implicit curves.
+   * Blends the curve geometry on top of the already-blitted screen canvas.
+   *
+   * @param {number} vertexCount    - Number of vertices in the VBO
+   * @param {Float32Array} colorData - Same 16×3 float array used by the thicken pass
+   */
+  _renderParametricPass(vertexCount, colorData) {
+    const gl = this.gl;
+    gl.useProgram(this._parametricProgram);
+    gl.bindVertexArray(this._parametricVao);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
+    gl.uniform1i(this._parametricUniforms.u_idTex, 0);
+    gl.uniform3fv(this._parametricUniforms.u_colors, colorData);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
+    gl.disable(gl.BLEND);
+
+    gl.bindVertexArray(null);
   }
 
   /**

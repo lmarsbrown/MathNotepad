@@ -38,7 +38,63 @@ function _createGraphExprBox(exprData) {
         },
     };
     exprBox = new ExpressionBox(exprData, opts);
+
+    // t-range row: shown only when the expression is classified as parametric
+    const tRow = document.createElement('div');
+    tRow.className = 't-range-row';
+    tRow.style.display = 'none';
+
+    const tMinInput = document.createElement('input');
+    tMinInput.type = 'number'; tMinInput.step = 'any'; tMinInput.className = 't-range-input';
+    tMinInput.value = exprData.tMin ?? 0;
+
+    const tLabel = document.createElement('span');
+    tLabel.className = 't-range-label';
+    tLabel.textContent = ' ≤ t ≤ ';
+
+    const tMaxInput = document.createElement('input');
+    tMaxInput.type = 'number'; tMaxInput.step = 'any'; tMaxInput.className = 't-range-input';
+    tMaxInput.value = exprData.tMax ?? 1;
+
+    tRow.appendChild(tMinInput);
+    tRow.appendChild(tLabel);
+    tRow.appendChild(tMaxInput);
+
+    // Store current values in the wrapper dataset so toData() can read them
+    const wrapper = exprBox.element;
+    wrapper.dataset.tMin = exprData.tMin ?? 0;
+    wrapper.dataset.tMax = exprData.tMax ?? 1;
+
+    const onTRangeChange = () => {
+        wrapper.dataset.tMin = tMinInput.value;
+        wrapper.dataset.tMax = tMaxInput.value;
+        commitGraphEditorToBox(graphModeBoxId);
+        scheduleGraphRender();
+    };
+    tMinInput.addEventListener('change', onTRangeChange);
+    tMaxInput.addEventListener('change', onTRangeChange);
+    // Prevent mouse interactions from bubbling to graph pan/zoom handlers
+    tMinInput.addEventListener('mousedown', e => e.stopPropagation());
+    tMaxInput.addEventListener('mousedown', e => e.stopPropagation());
+
+    exprBox.element.appendChild(tRow);
     return exprBox;
+}
+
+/**
+ * Update t-range row visibility and dataset for each active expression box.
+ * Called after each render so the UI reflects the current classification.
+ * @param {object|null} analysis - The analysis result from the last updateExpressions call
+ */
+function _syncExprBoxMeta(analysis) {
+    if (!analysis) return;
+    const parametricIds = new Set((analysis.parametrics || []).map(p => p.exprId));
+    for (const exprBox of _activeGraphExprBoxes) {
+        const tRow = exprBox.element.querySelector('.t-range-row');
+        if (!tRow) continue;
+        const isParametric = parametricIds.has(exprBox.id);
+        tRow.style.display = isParametric ? '' : 'none';
+    }
 }
 
 // ── Graph settings row ───────────────────────────────────────────────────────
@@ -572,7 +628,7 @@ function updateGraphBoxCount(boxId) {
 function addGraphExpression() {
   if (!graphModeBoxId) return;
   const exprBox = _createGraphExprBox({
-    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0,
+    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0, tMin: 0, tMax: 1,
   });
   _activeGraphExprBoxes.push(exprBox);
   document.getElementById('graph-expr-list').appendChild(exprBox.element);
@@ -587,7 +643,7 @@ function addGraphExpressionAfter(afterId) {
   commitGraphEditorToBox(graphModeBoxId);
 
   const exprBox = _createGraphExprBox({
-    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0,
+    id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0, tMin: 0, tMax: 1,
   });
 
   const listEl = document.getElementById('graph-expr-list');

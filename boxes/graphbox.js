@@ -5,7 +5,7 @@ class GraphBox extends Box{
         this.height = data.height || 400;
         this.lightTheme = !!data.lightTheme;
         this.expressions = data.expressions || [
-            { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0 },
+            { id: 'ge' + (graphExprNextId++), latex: '', color: nextGraphColor(), enabled: true, thickness: 2.0, tMin: 0, tMax: 1 },
         ];
         // Calc-mode settings (mirror CalcBox flags so graph boxes support full evaluation)
         this.physicsBasic = !!data.physicsBasic;
