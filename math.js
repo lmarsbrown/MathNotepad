@@ -13,6 +13,8 @@
 //     name is one of: 'add', 'sub', 'mul', 'div', 'pow', 'neg',
 //                     'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
 //                     'ln', 'log', 'exp', 'abs', 'sqrt'
+//   \csc/\sec/\cot expand to div(1, sin/cos/tan(...)) at parse time.
+//   sin^{n}(x) and similar expand to pow(sin(x), n) at parse time.
 
 class CompileError extends Error {
   constructor(msg) { super(msg); this.name = 'CompileError'; }
@@ -690,12 +692,15 @@ class Parser {
         this.next();
         return { type: 'number', value: 0 };
       }
-      case '\\sin':    return { type: 'call', name: 'sin', args: [this.parseFuncArg()] };
-      case '\\cos':    return { type: 'call', name: 'cos', args: [this.parseFuncArg()] };
-      case '\\tan':    return { type: 'call', name: 'tan', args: [this.parseFuncArg()] };
-      case '\\arcsin': return { type: 'call', name: 'asin', args: [this.parseFuncArg()] };
-      case '\\arccos': return { type: 'call', name: 'acos', args: [this.parseFuncArg()] };
-      case '\\arctan': return { type: 'call', name: 'atan', args: [this.parseFuncArg()] };
+      case '\\sin':    return this.parseTrigCall('sin');
+      case '\\cos':    return this.parseTrigCall('cos');
+      case '\\tan':    return this.parseTrigCall('tan');
+      case '\\csc':    return this.parseRecipTrigCall('sin');
+      case '\\sec':    return this.parseRecipTrigCall('cos');
+      case '\\cot':    return this.parseRecipTrigCall('tan');
+      case '\\arcsin': return this.parseTrigCall('asin');
+      case '\\arccos': return this.parseTrigCall('acos');
+      case '\\arctan': return this.parseTrigCall('atan');
       case '\\ln':     return { type: 'call', name: 'ln', args: [this.parseFuncArg()] };
       case '\\log': {
         const arg = this.parseFuncArg();
@@ -767,6 +772,34 @@ class Parser {
       return this.parseAtom();
     }
     return this.parseAtom();
+  }
+
+  /**
+   * Parse a trig function call with an optional power: sin^{n}(x) → pow(sin(x), n).
+   * @param {string} funcName - AST call name (e.g. 'sin', 'cos')
+   * @returns {object} AST node
+   */
+  parseTrigCall(funcName) {
+    let exp = null;
+    if (this.peek().type === TK.CARET) {
+      this.next(); // consume ^
+      exp = this.parseAtom(); // parse exponent e.g. {2} or {-1}
+    }
+    const arg = this.parseFuncArg();
+    const call = { type: 'call', name: funcName, args: [arg] };
+    if (exp === null) return call;
+    return { type: 'call', name: 'pow', args: [call, exp] };
+  }
+
+  /**
+   * Parse a reciprocal trig function (csc/sec/cot) with optional power.
+   * csc^{n}(x) → div(1, pow(sin(x), n)); csc(x) → div(1, sin(x)).
+   * @param {string} innerFunc - base trig name ('sin', 'cos', or 'tan')
+   * @returns {object} AST node
+   */
+  parseRecipTrigCall(innerFunc) {
+    const inner = this.parseTrigCall(innerFunc);
+    return { type: 'call', name: 'div', args: [{ type: 'number', value: 1 }, inner] };
   }
 }
 

@@ -66,7 +66,7 @@ function createExprRow(expr, opts) {
   const field = MQ.MathField(mqSpan, {
     spaceBehavesLikeTab: false,
     autoCommands: autoCommands,
-    autoOperatorNames: 'sin cos tan arcsin arccos arctan ln log exp mat',
+    autoOperatorNames: 'sin cos tan cot sec csc arcsin arccos arctan ln log exp mat',
     handlers: {
       edit:      ()    => { if (onEdit)    onEdit(field.latex()); },
       enter:     ()    => { if (onEnter)   onEnter(); },
