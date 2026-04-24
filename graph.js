@@ -82,6 +82,15 @@ class GraphRenderer {
     this._parametricVbo     = null;
     this._parametricUniforms = null;
 
+    // Offscreen RGBA8 layer for parametric curves (MAX-blended, then composited once)
+    this._parametricLayerTex    = null;
+    this._parametricLayerFb     = null;
+    this._parametricLayerWidth  = 0;
+    this._parametricLayerHeight = 0;
+    this._parametricBlitProgram = null;
+    this._parametricBlitVao     = null;
+    this._parametricBlitUniforms = null;
+
     this._initThickenShader();
     this._initParametricRenderer();
     this._setupInteraction();
@@ -1025,6 +1034,33 @@ void main() {
   }
 
   /**
+   * Create (or recreate on resize) the RGBA8 offscreen layer used for MAX-blending parametric curves.
+   * @param {number} width
+   * @param {number} height
+   */
+  _initParametricLayer(width, height) {
+    const gl = this.gl;
+    if (this._parametricLayerFb) {
+      gl.deleteFramebuffer(this._parametricLayerFb);
+      gl.deleteTexture(this._parametricLayerTex);
+    }
+    this._parametricLayerTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this._parametricLayerTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this._parametricLayerFb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._parametricLayerFb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._parametricLayerTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._parametricLayerWidth  = width;
+    this._parametricLayerHeight = height;
+  }
+
+  /**
    * Compile the parametric curve shader program and create the VBO/VAO for geometry.
    * Called once from the constructor. The VBO is re-uploaded each frame via STREAM_DRAW.
    */
@@ -1074,17 +1110,13 @@ void main() {
     vec2  diff = pa - h * ba;
     float dist = length(diff);
 
-    // Analytic pixel coverage for a half-plane edge.
-    // L = |nx|+|ny| (L1 norm of the stroke normal) = projected width of the 1×1 pixel
-    // square onto the stroke normal direction. Coverage = clamp((hw-dist)/L + 0.5, 0, 1).
-    // This is the exact fraction of the pixel square inside the half-plane, giving smooth
-    // AA at all angles (wider fade for diagonal lines, tighter for horizontal/vertical).
-    vec2  n     = dist > 1e-6 ? diff / dist : vec2(0.0, 1.0);
-    float L     = abs(n.x) + abs(n.y);
-    float alpha = clamp((v_halfWidth - dist) / L + 0.5, 0.0, 1.0);
+    // Matches the implicit-curve AA: smoothstep over a ±1 px band around the stroke edge.
+    float alpha = smoothstep(-1.0, 1.0, v_halfWidth - dist);
     if (alpha <= 0.0) discard;
 
-    fragColor = vec4(u_colors[int(v_graphId + 0.5)], alpha);
+    // Premultiplied output so MAX blending on the layer gives correct per-pixel coverage.
+    vec3 col = u_colors[int(v_graphId + 0.5)];
+    fragColor = vec4(col * alpha, alpha);
 }`;
 
     this._parametricProgram = GL.createShaderProgram(gl, vs, fs);
@@ -1124,6 +1156,22 @@ void main() {
       u_idTex:      gl.getUniformLocation(this._parametricProgram, 'u_idTex'),
       u_colors:     gl.getUniformLocation(this._parametricProgram, 'u_colors'),
       u_resolution: gl.getUniformLocation(this._parametricProgram, 'u_resolution'),
+    };
+
+    // Blit shader: composites the premultiplied parametric layer onto the screen.
+    const blitFs = `#version 300 es
+precision highp float;
+in vec2 v_position;
+uniform sampler2D u_layer;
+out vec4 fragColor;
+void main() {
+    vec2 uv = 0.5 * v_position + 0.5;
+    fragColor = texture(u_layer, uv);
+}`;
+    this._parametricBlitProgram  = GL.createShaderProgram(gl, GL.GENERIC_VS, blitFs);
+    this._parametricBlitVao      = GL.createFullscreenTriangle(gl, this._parametricBlitProgram);
+    this._parametricBlitUniforms = {
+      u_layer: gl.getUniformLocation(this._parametricBlitProgram, 'u_layer'),
     };
   }
 
@@ -1187,6 +1235,11 @@ void main() {
     // Recreate MRT framebuffer if dimensions changed
     if (width !== this._thickenMRTWidth || height !== this._thickenMRTHeight) {
       this._initThickenMRT(width, height);
+    }
+
+    // Recreate parametric layer if dimensions changed
+    if (width !== this._parametricLayerWidth || height !== this._parametricLayerHeight) {
+      this._initParametricLayer(width, height);
     }
 
     // Pass 1: Thin-line pass for each implicit graph, stacking into one buffer.
@@ -1436,7 +1489,7 @@ void main() {
       const n = points.length / 2;
       if (n < 2) continue;
 
-      const hw = thickness * 0.5; // stroke half-width in pixels
+      const hw = thickness; // stroke radius in pixels (matches implicit lineRadius convention)
 
       // Split into NaN-free sub-polylines
       const segments = [];
@@ -1516,9 +1569,17 @@ void main() {
    */
   _renderParametricPass(vertexCount, colorData, width, height) {
     const gl = this.gl;
+
+    // Step 1: render all segments into the offscreen layer using MAX blend.
+    // Each pixel receives the maximum premultiplied (col*a, a) from any covering capsule,
+    // which eliminates the double-blend noise that occurs when adjacent segment caps overlap.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._parametricLayerFb);
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
     gl.useProgram(this._parametricProgram);
     gl.bindVertexArray(this._parametricVao);
-
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this._thickenIdTex);
     gl.uniform1i(this._parametricUniforms.u_idTex, 0);
@@ -1526,11 +1587,24 @@ void main() {
     gl.uniform2f(this._parametricUniforms.u_resolution, width, height);
 
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.blendEquation(gl.MAX);
+    gl.blendFunc(gl.ONE, gl.ONE);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
-    gl.disable(gl.BLEND);
 
+    // Step 2: composite the layer onto the screen using premultiplied-alpha blending.
+    // ZERO,ONE keeps the canvas alpha at 1 (same halo-prevention as before).
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+
+    gl.useProgram(this._parametricBlitProgram);
+    gl.bindVertexArray(this._parametricBlitVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this._parametricLayerTex);
+    gl.uniform1i(this._parametricBlitUniforms.u_layer, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
   }
 
