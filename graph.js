@@ -1358,7 +1358,7 @@ void main() {
       const scaleX = width  / (this.xMax - this.xMin);
       const scaleY = height / (effYMax - effYMin);
       const sampledCurves = activeParametric.map(expr => ({
-        points:   this._sampleParametricCurve(expr, expr.tMin, expr.tMax, scaleX, scaleY),
+        points:   this._sampleParametricCurve(expr, expr.tMin, expr.tMax, scaleX, scaleY, this.xMin, this.xMax, effYMin, effYMax),
         graphId:  active.indexOf(expr),
         thickness: expr.thickness,
         color:    expr.color,
@@ -1379,22 +1379,26 @@ void main() {
 
   /**
    * Adaptively sample a parametric curve (x(t), y(t)) on the CPU.
-   * Step size targets ~1 screen pixel of arc length. Cusps (zero speed) use a minimum dt.
-   * Hard cap at 50 000 points to prevent runaway computation.
+   * Step size targets ~1 screen pixel of arc length when near the viewport, and ~20px when
+   * clearly outside (more than one viewport-width/height beyond the visible area).
+   * Cusps (zero speed) use a minimum dt. Hard cap at 50 000 points.
    *
    * @param {object} compiled  - From _compiledExprs: { xAst, yAst, dxAst, dyAst, funcDefs }
    * @param {number} tMin
    * @param {number} tMax
    * @param {number} scaleX    - Pixels per world unit in X (width / (xMax - xMin))
    * @param {number} scaleY    - Pixels per world unit in Y
+   * @param {number} xMin      - Viewport left in world coords
+   * @param {number} xMax      - Viewport right in world coords
+   * @param {number} yMin      - Viewport bottom in world coords
+   * @param {number} yMax      - Viewport top in world coords
    * @returns {Float32Array}   - Flat [x0, y0, x1, y1, …]; NaN pairs mark gaps
    */
-  _sampleParametricCurve(compiled, tMin, tMax, scaleX, scaleY) {
+  _sampleParametricCurve(compiled, tMin, tMax, scaleX, scaleY, xMin, xMax, yMin, yMax) {
     const { xAst, yAst, dxAst, dyAst, funcDefs } = compiled;
-    const TARGET_PX = 1.0;
-    const range     = Math.abs(tMax - tMin) || 1;
-    const MIN_DT    = range * 1e-5;
-    const MAX_PTS   = 50000;
+    const range  = Math.abs(tMax - tMin) || 1;
+    const MIN_DT = range * 1e-5;
+    const MAX_PTS = 50000;
 
     // Reuse a single values Map, mutating only t each iteration (avoids per-step allocation)
     const vals = new Map(this._constantValues);
@@ -1427,7 +1431,19 @@ void main() {
         dx = 0; dy = 0;
       }
       const speed = Math.sqrt((dx * scaleX) ** 2 + (dy * scaleY) ** 2);
-      const dt    = Math.max(MIN_DT, speed > 1e-10 ? TARGET_PX / speed : MIN_DT);
+
+      // Pixel distance from the current point to the nearest viewport edge (0 when inside).
+      // targetPx grows linearly with off-screen distance so sampling coarsens continuously:
+      // fine (~1px/sample) near the viewport, coarse farther away. The 1/20 factor means
+      // roughly 20 steps are used to traverse each off-screen "distance-unit", giving
+      // enough resolution to detect re-entries while drastically cutting samples at extreme zoom.
+      const distPx = (isFinite(x) && isFinite(y))
+        ? Math.max(0,
+            (xMin - x) * scaleX, (x - xMax) * scaleX,
+            (yMin - y) * scaleY, (y - yMax) * scaleY)
+        : 0;
+      const targetPx = 1.0 + distPx / 20.0;
+      const dt = Math.max(MIN_DT, speed > 1e-10 ? targetPx / speed : MIN_DT);
       t = Math.min(t + dt, tMax);
     }
 
@@ -1510,10 +1526,20 @@ void main() {
         const m = seg.length / 2; // number of (px, py) pairs
         if (m < 2) continue;
 
+        // Cohen-Sutherland outcode: returns a bitmask of which half-planes (left/right/top/bottom)
+        // the point lies outside of. If two endpoints share a non-zero bit, the segment is
+        // entirely outside the viewport and can be skipped without a visual gap.
+        const outcode = (px, py) =>
+          (px < -hw ? 1 : 0) | (px > width  + hw ? 2 : 0) |
+          (py < -hw ? 4 : 0) | (py > height + hw ? 8 : 0);
+
         // Emit one oriented capsule quad per consecutive point pair
         for (let i = 0; i < m - 1; i++) {
           const p0x = seg[i * 2],       p0y = seg[i * 2 + 1];
           const p1x = seg[(i + 1) * 2], p1y = seg[(i + 1) * 2 + 1];
+
+          // Skip segment if both endpoints are outside the same viewport half-plane
+          if (outcode(p0x, p0y) & outcode(p1x, p1y)) continue;
 
           const dx = p1x - p0x, dy = p1y - p0y;
           const segLen = Math.sqrt(dx * dx + dy * dy);
