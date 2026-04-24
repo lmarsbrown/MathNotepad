@@ -236,7 +236,10 @@ function createPreviewElement(box) {
           ? (() => { const op = findCalcOperatorAtDepth0(latex); const rhs = op ? latex.slice(op.idx + op.len).trim() : ''; return !isNumericLiteralLatex(rhs) && box.showResultsDefs !== false; })()
           : (kind === 'bare' && box.showResultsBare !== false);
         if (shouldShow) {
-          if (result.unitAst !== undefined) {
+          if (result.pointAst !== undefined) {
+            resultLatex = `= ${astToLatex(result.pointAst, box.sigFigs ?? 6)}`;
+            showResult = true;
+          } else if (result.unitAst !== undefined) {
             resultLatex = astToLatex(result.unitAst, box.sigFigs ?? 6);
             showResult = true;
           } else {

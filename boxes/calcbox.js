@@ -42,11 +42,13 @@ class ExpressionBox extends Box {
         this._warningLine    = null;
         this._showSlider     = null;
         this._hideSlider     = null;
-        this._listEl         = null;
 
         this.element = this.createElement();
         if (!isGraph) this._analyze();
     }
+
+    /** @returns {HTMLElement} The list container for this expression's siblings. */
+    get _listEl() { return this._isGraph ? this._graphOpts.listEl : this._calcBox._exprList; }
 
     /**
      * Builds the .expr-wrapper DOM for this expression row.
@@ -159,9 +161,6 @@ class ExpressionBox extends Box {
             wrapper.dataset.color     = this.color;
             wrapper.dataset.thickness = this.thickness;
         }
-
-        // ── List element for drag-to-reorder (resolved at construction time) ──
-        this._listEl = isGraph ? opts.listEl : this._calcBox._exprList;
 
         // ── Drag-to-reorder (shared implementation, mode-specific onUp) ───────
         if (handle) handle.addEventListener('mousedown', e => {
@@ -431,6 +430,16 @@ class ExpressionBox extends Box {
             this._errorLine.style.display = '';
             this._resultSpan.style.display = 'none';
             this.element.classList.add('has-error');
+        } else if (result && result.pointAst !== undefined && !suppress) {
+            this._errorLine.style.display = 'none';
+            this.element.classList.remove('has-error');
+            const xText = buildAstText(result.pointAst.args[0], sigFigs);
+            const yText = buildAstText(result.pointAst.args[1], sigFigs);
+            const ptText = (xText !== null && yText !== null) ? `= (${xText}, ${yText})` : '= (?, ?)';
+            this._resultSpan.textContent = ptText.length > CALC_RESULT_MAX_CHARS ? 'Too Bulky!' : ptText;
+            this._resultSpan.dataset.copyValue = ptText;
+            this._resultSpan.style.display = '';
+            this._resultSpan.style.color = '';
         } else if (result && result.unitAst !== undefined && !suppress) {
             this._errorLine.style.display = 'none';
             this.element.classList.remove('has-error');
@@ -1005,6 +1014,10 @@ function formatCalcResult(result, sigFigs = 6) {
   if (!result) return null;
   if (result.error) return null;
   if (result.boolValue !== undefined) return result.boolValue ? 'true' : 'false';
+  if (result.pointValue !== undefined) {
+    const { px, py } = result.pointValue;
+    return `= (${_astNumStr(px, sigFigs)}, ${_astNumStr(py, sigFigs)})`;
+  }
   if (result.value !== undefined) return formatConstantValue(result.value, sigFigs);
   return null;
 }
@@ -1051,6 +1064,10 @@ function _numToLatex(v, sigFigs = 6) {
 function formatCalcResultLatex(result, sigFigs = 6) {
   if (!result || result.error) return null;
   if (result.boolValue !== undefined) return `\\text{${result.boolValue ? 'true' : 'false'}}`;
+  if (result.pointValue !== undefined) {
+    const { px, py } = result.pointValue;
+    return `= \\left(${_numToLatex(px, sigFigs)},\\, ${_numToLatex(py, sigFigs)}\\right)`;
+  }
   if (result.value !== undefined) {
     if (!isFinite(result.value)) return null;
     if (Number.isInteger(result.value) && Math.abs(result.value) < 10000)
@@ -1075,6 +1092,14 @@ function buildAstText(ast, sigFigs = 6) {
   if (!ast) return '?';
   if (ast.type === 'number') return _astNumStr(ast.value, sigFigs);
   if (ast.type === 'variable') return ast.name;
+  if (ast.type === 'point') {
+    const lx = buildAstText(ast.args[0], sigFigs), ly = buildAstText(ast.args[1], sigFigs);
+    return (lx !== null && ly !== null) ? `(${lx}, ${ly})` : null;
+  }
+  if (ast.type === 'member') {
+    const s = buildAstText(ast.arg, sigFigs);
+    return s !== null ? `${s}.${ast.field}` : null;
+  }
   if (ast.type !== 'call') return '?';
   const [a, b] = ast.args || [];
   switch (ast.name) {
@@ -1128,6 +1153,8 @@ function buildAstHtml(ast, sigFigs = 6) {
   if (!ast) return txt('?');
   if (ast.type === 'number') return txt(_astNumStr(ast.value, sigFigs));
   if (ast.type === 'variable') return txt(ast.name);
+  if (ast.type === 'point') return span('(', rec(ast.args[0]), ', ', rec(ast.args[1]), ')');
+  if (ast.type === 'member') return span(rec(ast.arg), `.${ast.field}`);
   if (ast.type !== 'call') return txt('?');
   const [a, b] = ast.args || [];
   switch (ast.name) {

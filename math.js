@@ -279,6 +279,7 @@ const TK = {
   CARET: 'CARET', UNDERSCORE: 'UNDERSCORE',
   PIPE: 'PIPE',
   COMMA: 'COMMA',
+  DOT: 'DOT',
   PRIME: 'PRIME',
   EOF: 'EOF',
 };
@@ -289,7 +290,7 @@ function tokenize(src) {
   while (i < src.length) {
     const c = src[i];
     if (c === ' ' || c === '\t' || c === '\n') { i++; continue; }
-    if (c >= '0' && c <= '9' || c === '.') {
+    if (c >= '0' && c <= '9' || c === '.' && src[i+1] >= '0' && src[i+1] <= '9') {
       let num = '';
       while (i < src.length && (src[i] >= '0' && src[i] <= '9' || src[i] === '.')) num += src[i++];
       tokens.push({ type: TK.NUM, val: num });
@@ -379,6 +380,7 @@ function tokenize(src) {
     if (c === '|') { tokens.push({ type: TK.PIPE }); i++; continue; }
     if (c === ',') { tokens.push({ type: TK.COMMA }); i++; continue; }
     if (c === "'" || c === '\u2032') { tokens.push({ type: TK.PRIME }); i++; continue; } // apostrophe or Unicode prime ′
+    if (c === '.') { tokens.push({ type: TK.DOT }); i++; continue; }
     // Skip other characters silently
     i++;
   }
@@ -479,6 +481,15 @@ class Parser {
 
   parsePower() {
     let base = this.parseAtom();
+    // Member access: base.x or base.y
+    while (this.peek().type === TK.DOT) {
+      this.next();
+      const tok = this.peek();
+      if (tok.type !== TK.IDENT || (tok.val !== 'x' && tok.val !== 'y'))
+        throw new CompileError(`Expected 'x' or 'y' after '.'`);
+      this.next();
+      base = { type: 'member', arg: base, field: tok.val };
+    }
     if (this.peek().type === TK.CARET) {
       this.next();
       const exp = this.parseAtom();
@@ -496,12 +507,18 @@ class Parser {
       return { type: 'number', value: parseFloat(t.val) };
     }
 
-    // Parenthesised group
+    // Parenthesised group or point literal (a,b)
     if (t.type === TK.LPAREN) {
       this.next();
-      const inner = this.parseExpr();
+      const first = this.parseExpr();
+      if (this.peek().type === TK.COMMA) {
+        this.next();
+        const second = this.parseExpr();
+        if (this.peek().type === TK.RPAREN) this.next();
+        return { type: 'point', args: [first, second] };
+      }
       if (this.peek().type === TK.RPAREN) this.next();
-      return inner;
+      return first;
     }
 
     // Braced group
@@ -647,10 +664,17 @@ class Parser {
         const delim = this.peek();
         if (delim.type === TK.LPAREN) {
           this.next();
-          const inner = this.parseExpr();
+          const first = this.parseExpr();
+          if (this.peek().type === TK.COMMA) {
+            this.next();
+            const second = this.parseExpr();
+            if (this.peek().type === TK.CMD && this.peek().val === '\\right') this.next();
+            if (this.peek().type === TK.RPAREN) this.next();
+            return { type: 'point', args: [first, second] };
+          }
           if (this.peek().type === TK.CMD && this.peek().val === '\\right') this.next();
           if (this.peek().type === TK.RPAREN) this.next();
-          return inner;
+          return first;
         }
         if (delim.type === TK.PIPE) {
           this.next();
@@ -768,6 +792,8 @@ function collectVariables(ast) {
     if (node.type === 'variable') vars.add(node.name);
     else if (node.type === 'call' || node.type === 'primecall') for (const a of node.args) stack.push(a);
     else if (node.type === 'derivative') stack.push(node.arg);
+    else if (node.type === 'point') for (const a of node.args) stack.push(a);
+    else if (node.type === 'member') stack.push(node.arg);
   }
   return vars;
 }
@@ -791,6 +817,8 @@ function substituteAst(ast, paramMap) {
   if (ast.type === 'derivative') return { ...ast, arg: substituteAst(ast.arg, paramMap) };
   if (ast.type === 'call' || ast.type === 'primecall')
     return { ...ast, args: ast.args.map(a => substituteAst(a, paramMap)) };
+  if (ast.type === 'point') return { ...ast, args: ast.args.map(a => substituteAst(a, paramMap)) };
+  if (ast.type === 'member') return { ...ast, arg: substituteAst(ast.arg, paramMap) };
   return ast;
 }
 
@@ -1072,7 +1100,10 @@ function analyzeExpressions(classifiedList) {
 
 // ── Constant evaluation (CPU) ───────────────────────────────────────────────
 
-/** Evaluate an AST node to a numeric value, given a map of known values. */
+/** @returns {boolean} true if v is a runtime point object {px, py} */
+function isPoint(v) { return v !== null && typeof v === 'object' && 'px' in v; }
+
+/** Evaluate an AST node to a numeric or point value, given a map of known values. */
 function evaluateAst(ast, values, funcDefs = new Map()) {
   switch (ast.type) {
     case 'number': return ast.value;
@@ -1099,25 +1130,65 @@ function evaluateAst(ast, values, funcDefs = new Map()) {
       innerValues.set(def.params[0], evaluateAst(ast.args[0], values, funcDefs));
       return evaluateAst(bodyAst, innerValues, funcDefs);
     }
+    case 'point': {
+      const xv = evaluateAst(ast.args[0], values, funcDefs);
+      const yv = evaluateAst(ast.args[1], values, funcDefs);
+      if (isPoint(xv) || isPoint(yv)) throw new Error('Point components must be scalar');
+      return { px: xv, py: yv };
+    }
+    case 'member': {
+      const inner = evaluateAst(ast.arg, values, funcDefs);
+      if (!isPoint(inner)) throw new Error(`Cannot use '.' on a non-point value`);
+      return ast.field === 'x' ? inner.px : inner.py;
+    }
     case 'call': {
       // Built-in functions evaluated directly
       switch (ast.name) {
-        case 'add': return evaluateAst(ast.args[0], values, funcDefs) + evaluateAst(ast.args[1], values, funcDefs);
-        case 'sub': return evaluateAst(ast.args[0], values, funcDefs) - evaluateAst(ast.args[1], values, funcDefs);
-        case 'mul': return evaluateAst(ast.args[0], values, funcDefs) * evaluateAst(ast.args[1], values, funcDefs);
-        case 'div': return evaluateAst(ast.args[0], values, funcDefs) / evaluateAst(ast.args[1], values, funcDefs);
-        case 'pow': return Math.pow(evaluateAst(ast.args[0], values, funcDefs), evaluateAst(ast.args[1], values, funcDefs));
-        case 'neg': return -evaluateAst(ast.args[0], values, funcDefs);
-        case 'sin': return Math.sin(evaluateAst(ast.args[0], values, funcDefs));
-        case 'cos': return Math.cos(evaluateAst(ast.args[0], values, funcDefs));
-        case 'tan': return Math.tan(evaluateAst(ast.args[0], values, funcDefs));
-        case 'asin': return Math.asin(evaluateAst(ast.args[0], values, funcDefs));
-        case 'acos': return Math.acos(evaluateAst(ast.args[0], values, funcDefs));
-        case 'atan': return Math.atan(evaluateAst(ast.args[0], values, funcDefs));
-        case 'ln':  return Math.log(evaluateAst(ast.args[0], values, funcDefs));
-        case 'exp': return Math.exp(evaluateAst(ast.args[0], values, funcDefs));
-        case 'abs': return Math.abs(evaluateAst(ast.args[0], values, funcDefs));
-        case 'sqrt': return Math.sqrt(evaluateAst(ast.args[0], values, funcDefs));
+        case 'add': {
+          const l = evaluateAst(ast.args[0], values, funcDefs), r = evaluateAst(ast.args[1], values, funcDefs);
+          if (isPoint(l) && isPoint(r)) return { px: l.px + r.px, py: l.py + r.py };
+          if (isPoint(l) || isPoint(r)) throw new Error('Cannot add a point and a scalar');
+          return l + r;
+        }
+        case 'sub': {
+          const l = evaluateAst(ast.args[0], values, funcDefs), r = evaluateAst(ast.args[1], values, funcDefs);
+          if (isPoint(l) && isPoint(r)) return { px: l.px - r.px, py: l.py - r.py };
+          if (isPoint(l) || isPoint(r)) throw new Error('Cannot subtract a point and a scalar');
+          return l - r;
+        }
+        case 'mul': {
+          const l = evaluateAst(ast.args[0], values, funcDefs), r = evaluateAst(ast.args[1], values, funcDefs);
+          if (isPoint(l) && !isPoint(r)) return { px: l.px * r, py: l.py * r };
+          if (!isPoint(l) && isPoint(r)) return { px: l * r.px, py: l * r.py };
+          if (isPoint(l) && isPoint(r)) throw new Error('Cannot multiply two points');
+          return l * r;
+        }
+        case 'div': {
+          const l = evaluateAst(ast.args[0], values, funcDefs), r = evaluateAst(ast.args[1], values, funcDefs);
+          if (isPoint(l) && !isPoint(r)) return { px: l.px / r, py: l.py / r };
+          if (isPoint(r)) throw new Error('Cannot divide by a point');
+          return l / r;
+        }
+        case 'pow': {
+          const b = evaluateAst(ast.args[0], values, funcDefs), e = evaluateAst(ast.args[1], values, funcDefs);
+          if (isPoint(b) || isPoint(e)) throw new Error('Cannot apply pow to a point');
+          return Math.pow(b, e);
+        }
+        case 'neg': {
+          const v = evaluateAst(ast.args[0], values, funcDefs);
+          if (isPoint(v)) return { px: -v.px, py: -v.py };
+          return -v;
+        }
+        case 'sin':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply sin to a point');  return Math.sin(v);  }
+        case 'cos':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply cos to a point');  return Math.cos(v);  }
+        case 'tan':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply tan to a point');  return Math.tan(v);  }
+        case 'asin': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply asin to a point'); return Math.asin(v); }
+        case 'acos': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply acos to a point'); return Math.acos(v); }
+        case 'atan': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply atan to a point'); return Math.atan(v); }
+        case 'ln':   { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply ln to a point');   return Math.log(v);  }
+        case 'exp':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply exp to a point');  return Math.exp(v);  }
+        case 'abs':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply abs to a point');  return Math.abs(v);  }
+        case 'sqrt': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply sqrt to a point'); return Math.sqrt(v); }
         default: {
           // User-defined function call
           if (funcDefs.has(ast.name)) {
@@ -1342,6 +1413,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
       const TRIG = new Set(['sin','cos','tan','asin','acos','atan','ln','exp','abs']);
       if (TRIG.has(ast.name)) {
         const arg = simplifyAst(recurse(ast.args[0]));
+        if (arg.type === 'point') throw new Error(`Cannot apply ${ast.name}() to a point`);
         if (arg.type === 'number') {
           // Purely numeric — evaluate
           switch (ast.name) {
@@ -1365,6 +1437,30 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
 
       if (['add','sub','mul','div','pow','neg'].includes(ast.name)) {
         const args = ast.args.map(recurse);
+        const [l, r] = args;
+        const lp = l && l.type === 'point', rp = r && r.type === 'point';
+        if (lp || rp) {
+          const sx = (a, b) => simplifyAst({ type: 'call', name: ast.name, args: [a, b] });
+          const s1 = a => simplifyAst({ type: 'call', name: 'neg', args: [a] });
+          switch (ast.name) {
+            case 'add':
+              if (lp && rp) return { type: 'point', args: [sx(l.args[0], r.args[0]), sx(l.args[1], r.args[1])] };
+              throw new Error('Cannot add a point and a scalar');
+            case 'sub':
+              if (lp && rp) return { type: 'point', args: [sx(l.args[0], r.args[0]), sx(l.args[1], r.args[1])] };
+              throw new Error('Cannot subtract a point and a scalar');
+            case 'mul':
+              if (lp && !rp) return { type: 'point', args: [sx(l.args[0], r), sx(l.args[1], r)] };
+              if (!lp && rp) return { type: 'point', args: [sx(l, r.args[0]), sx(l, r.args[1])] };
+              throw new Error('Cannot multiply two points');
+            case 'div':
+              if (lp && !rp) return { type: 'point', args: [sx(l.args[0], r), sx(l.args[1], r)] };
+              throw new Error('Cannot divide by a point');
+            case 'pow': throw new Error('Cannot apply pow to a point');
+            case 'neg':
+              if (lp) return { type: 'point', args: [s1(l.args[0]), s1(l.args[1])] };
+          }
+        }
         return simplifyAst({ type: 'call', name: ast.name, args });
       }
 
@@ -1378,6 +1474,14 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
         return evaluateAstSymbolic(def.body, innerMap, funcDefs, opts);
       }
       throw new Error(`Unknown function '${ast.name}'`);
+    }
+
+    case 'point': return { type: 'point', args: ast.args.map(recurse) };
+
+    case 'member': {
+      const inner = recurse(ast.arg);
+      if (inner.type === 'point') return ast.field === 'x' ? inner.args[0] : inner.args[1];
+      return { type: 'member', arg: inner, field: ast.field };
     }
 
     case 'derivative': {
@@ -1966,6 +2070,8 @@ function astToLatex(ast, sigFigs = 6) {
         default:     return `\\operatorname{${ast.name}}\\left(${(ast.args||[]).map(rec).join(', ')}\\right)`;
       }
     }
+    case 'point':  return `\\left(${rec(ast.args[0])},\\, ${rec(ast.args[1])}\\right)`;
+    case 'member': return `${rec(ast.arg)}.${ast.field}`;
     default: return '?';
   }
 }
@@ -2697,11 +2803,13 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         const warnings = [];
         const val = evaluateAstSymbolic(processed, unitValues, funcDefs, { useSymbolic, warnings });
         if (val.type === 'number') return { value: val.value };
+        if (val.type === 'point') return { pointAst: val };
         let unitAst = val;
         try { unitAst = useBaseUnits ? simplifyAstToBase(val) : simplifyAst(val); } catch (_) {}
         return { unitAst, warnings };
       }
       const val = evaluateAst(processed, allValues, funcDefs);
+      if (isPoint(val)) return { pointValue: val };
       return { value: val };
     };
 
@@ -2710,7 +2818,11 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       try {
         const ast = parseLatexToAst(trimmed);
         const res = evalToResult(ast);
-        if (res.unitAst) {
+        if (res.pointValue) {
+          results.set(e.id, res);
+        } else if (res.pointAst) {
+          results.set(e.id, res);
+        } else if (res.unitAst) {
           results.set(e.id, res);
         } else if (isFinite(res.value)) {
           results.set(e.id, { value: res.value });
@@ -2735,9 +2847,12 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
         if (useUnits && unitValues.has(lhsVarName)) {
           const v = unitValues.get(lhsVarName);
           if (typeof v === 'number') results.set(e.id, { value: v });
+          else if (v && v.type === 'point') results.set(e.id, { pointAst: v });
           else { let unitAst = v; try { unitAst = useBaseUnits ? simplifyAstToBase(v) : simplifyAst(v); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
         } else if (!useUnits && allValues.has(lhsVarName)) {
-          results.set(e.id, { value: allValues.get(lhsVarName) });
+          const v = allValues.get(lhsVarName);
+          if (isPoint(v)) results.set(e.id, { pointValue: v });
+          else results.set(e.id, { value: v });
         } else {
           const errMsg = evalErrors.get(lhsVarName) || `Could not evaluate '${lhsStr}'`;
           results.set(e.id, { error: errMsg });
@@ -2749,7 +2864,12 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
           const rhsRes = evalToResult(parseLatexToAst(rhsStr));
 
           
-          if (lhsRes.value !== undefined && rhsRes.value !== undefined) {
+          if (lhsRes.pointValue && rhsRes.pointValue) {
+            const lp = lhsRes.pointValue, rp = rhsRes.pointValue;
+            results.set(e.id, { boolValue: Math.abs(lp.px - rp.px) < 1e-9 && Math.abs(lp.py - rp.py) < 1e-9 });
+          } else if (lhsRes.pointValue || rhsRes.pointValue) {
+            results.set(e.id, { error: 'Cannot compare a point and a scalar' });
+          } else if (lhsRes.value !== undefined && rhsRes.value !== undefined) {
             
             //The average scale of the values so that differences in tiny values don't get marked as a rounding error. 
             let scale = 10**Math.ceil(
