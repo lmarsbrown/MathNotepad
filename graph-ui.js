@@ -95,6 +95,20 @@ function _syncExprBoxMeta(analysis) {
         const isParametric = parametricIds.has(exprBox.id);
         tRow.style.display = isParametric ? '' : 'none';
     }
+
+    // Set point-related dataset attributes (kind and isDraggableEligible) on each wrapper.
+    // Used by openColorPopup to decide which controls to show.
+    const pointMap = new Map();
+    for (const e of (graphRenderer ? (graphRenderer._compiledExprs || []) : [])) {
+        if (e.kind === 'point') pointMap.set(e.exprId, e);
+    }
+    for (const exprBox of _activeGraphExprBoxes) {
+        const pt = pointMap.get(exprBox.id);
+        // 'kind' distinguishes point expressions from curve/graph expressions
+        exprBox.element.dataset.kind = pt ? 'point' : 'graph';
+        // 'isDraggableEligible' is true only for named literal points like a=(1,2)
+        exprBox.element.dataset.isDraggableEligible = (pt && pt.varName != null) ? '1' : '0';
+    }
 }
 
 // ── Graph settings row ───────────────────────────────────────────────────────
@@ -230,6 +244,35 @@ function enterGraphMode(boxId) {
   // Set up re-render callback for pan/zoom
   renderer._onRender = () => scheduleGraphRender();
 
+  // Drag callback: called by the renderer on every mousemove while dragging a point.
+  // Updates the compiled position directly for smooth visuals; defers MQ field update to drag end.
+  renderer._onPointDrag = (exprId, varName, newX, newY) => {
+    renderer._updatePointPosition(exprId, newX, newY);
+    // Update stored expression data so the next recompile uses the latest position
+    const fmt = v => parseFloat(v.toPrecision(5)).toString();
+    const newLatex = varName
+      ? `${varName}=\\left(${fmt(newX)},${fmt(newY)}\\right)`
+      : `\\left(${fmt(newX)},${fmt(newY)}\\right)`;
+    const box = boxes.find(b => b.id === graphModeBoxId);
+    if (box) {
+      const exprData = box.expressions.find(e => e.id === exprId);
+      if (exprData) exprData.latex = newLatex;
+    }
+    scheduleGraphRender();
+  };
+
+  // Drag-end callback: fires once on mouseup after a point drag.
+  // Updates the MQ field to match the final position, then triggers a full recompile.
+  renderer._onPointDragEnd = (exprId, varName, finalX, finalY) => {
+    const fmt = v => parseFloat(v.toPrecision(5)).toString();
+    const finalLatex = varName
+      ? `${varName}=\\left(${fmt(finalX)},${fmt(finalY)}\\right)`
+      : `\\left(${fmt(finalX)},${fmt(finalY)}\\right)`;
+    const field = graphMqFields.get(exprId);
+    if (field) field.latex(finalLatex);
+    scheduleGraphRender();
+  };
+
   // Background click: defocus whatever expression row is active
   renderer._onBackgroundClick = () => {
     if (focusedGraphExprId !== null) {
@@ -273,7 +316,7 @@ function enterGraphMode(boxId) {
 
 function _teardownGraphModeUI() {
   clearTimeout(graphCommitTimer);
-  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; }
+  if (graphRenderer) { graphRenderer._onRender = null; graphRenderer._onPick = null; graphRenderer._onSnapUpdate = null; graphRenderer._onBackgroundClick = null; graphRenderer._onPointDrag = null; graphRenderer._onPointDragEnd = null; }
   graphMqFields.clear();
   _activeGraphExprBoxes = [];
   focusedGraphExprId = null;
@@ -507,6 +550,10 @@ function openColorPopup(anchorEl, exprId) {
   const row = anchorEl.closest('.expr-wrapper');
   const currentColor = row.dataset.color || '#3b82f6';
   const currentThickness = parseFloat(row.dataset.thickness) || 2.0;
+  const currentPointSize = parseFloat(row.dataset.pointSize) || 8.0;
+  const isDraggable = row.dataset.draggable === '1';
+  const isPointExpr = row.dataset.kind === 'point';
+  const isDraggableEligible = row.dataset.isDraggableEligible === '1';
 
   const popup = document.createElement('div');
   popup.className = 'graph-color-popup';
@@ -553,27 +600,73 @@ function openColorPopup(anchorEl, exprId) {
   customRow.appendChild(customInput);
   popup.appendChild(customRow);
 
-  // Thickness number input row
-  const thickRow = document.createElement('div');
-  thickRow.className = 'graph-color-thickness';
-  const thickLabel = document.createElement('span');
-  thickLabel.textContent = 'Thickness:';
-  const thickInput = document.createElement('input');
-  thickInput.type = 'number';
-  thickInput.min = '0.5';
-  thickInput.max = '7';
-  thickInput.step = '0.5';
-  thickInput.value = currentThickness;
-  thickInput.addEventListener('change', () => {
-    const val = Math.min(7, Math.max(0.5, parseFloat(thickInput.value) || 2.0));
-    thickInput.value = val;
-    row.dataset.thickness = val;
-    commitGraphEditorToBox(graphModeBoxId);
-    scheduleGraphRender();
-  });
-  thickRow.appendChild(thickLabel);
-  thickRow.appendChild(thickInput);
-  popup.appendChild(thickRow);
+  if (isPointExpr) {
+    // Point size row — replaces thickness for point expressions
+    const sizeRow = document.createElement('div');
+    sizeRow.className = 'graph-color-thickness';
+    const sizeLabel = document.createElement('span');
+    sizeLabel.textContent = 'Point size:';
+    const sizeInput = document.createElement('input');
+    sizeInput.type = 'number';
+    sizeInput.min = '2';
+    sizeInput.max = '40';
+    sizeInput.step = '1';
+    sizeInput.value = currentPointSize;
+    sizeInput.addEventListener('change', () => {
+      const val = Math.min(40, Math.max(2, parseFloat(sizeInput.value) || 8.0));
+      sizeInput.value = val;
+      row.dataset.pointSize = val;
+      commitGraphEditorToBox(graphModeBoxId);
+      scheduleGraphRender();
+    });
+    sizeRow.appendChild(sizeLabel);
+    sizeRow.appendChild(sizeInput);
+    popup.appendChild(sizeRow);
+
+    // Draggable checkbox — only shown for named literal points like a=(1,2)
+    if (isDraggableEligible) {
+      const dragRow = document.createElement('div');
+      dragRow.className = 'graph-color-thickness';
+      const dragLabel = document.createElement('label');
+      dragLabel.style.cssText = 'display:flex;gap:6px;align-items:center;cursor:pointer;';
+      const dragCheck = document.createElement('input');
+      dragCheck.type = 'checkbox';
+      dragCheck.checked = isDraggable;
+      const dragText = document.createElement('span');
+      dragText.textContent = 'Draggable';
+      dragLabel.appendChild(dragCheck);
+      dragLabel.appendChild(dragText);
+      dragCheck.addEventListener('change', () => {
+        row.dataset.draggable = dragCheck.checked ? '1' : '0';
+        commitGraphEditorToBox(graphModeBoxId);
+        scheduleGraphRender();
+      });
+      dragRow.appendChild(dragLabel);
+      popup.appendChild(dragRow);
+    }
+  } else {
+    // Thickness number input row — for curve/graph expressions
+    const thickRow = document.createElement('div');
+    thickRow.className = 'graph-color-thickness';
+    const thickLabel = document.createElement('span');
+    thickLabel.textContent = 'Thickness:';
+    const thickInput = document.createElement('input');
+    thickInput.type = 'number';
+    thickInput.min = '0.5';
+    thickInput.max = '7';
+    thickInput.step = '0.5';
+    thickInput.value = currentThickness;
+    thickInput.addEventListener('change', () => {
+      const val = Math.min(7, Math.max(0.5, parseFloat(thickInput.value) || 2.0));
+      thickInput.value = val;
+      row.dataset.thickness = val;
+      commitGraphEditorToBox(graphModeBoxId);
+      scheduleGraphRender();
+    });
+    thickRow.appendChild(thickLabel);
+    thickRow.appendChild(thickInput);
+    popup.appendChild(thickRow);
+  }
 
   document.body.appendChild(popup);
 

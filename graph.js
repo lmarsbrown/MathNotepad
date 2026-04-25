@@ -86,9 +86,27 @@ class GraphRenderer {
     this._snapVao      = null;
     this._snapUniforms = null;
 
+    // Point rendering pass
+    this._pointProgram  = null;
+    this._pointVao      = null;
+    this._pointQuadVbo  = null;
+    this._pointInstVbo  = null;
+    this._pointUniforms = null;
+    this._pointInstData = null;
+
+    // Draggable point interaction
+    this._draggingPoint    = false;
+    this._dragPointExprId  = null;
+    this._dragPointVarName = null;
+    this._dragLastX        = 0;
+    this._dragLastY        = 0;
+    this._onPointDrag      = null;
+    this._onPointDragEnd   = null;
+
     this._initThickenShader();
     this._initParametricThinLineShader();
     this._initSnapPassShader();
+    this._initPointPassShader();
     this._setupInteraction();
   }
 
@@ -102,7 +120,7 @@ class GraphRenderer {
    */
   updateExpressions(boxExpressions) {
     const latexKey = boxExpressions
-      .map(e => `${e.id}:${e.latex}:${e.enabled ? '1' : '0'}`)
+      .map(e => `${e.id}:${e.latex}:${e.enabled ? '1' : '0'}:${e.draggable ? '1' : '0'}`)
       .join('|');
 
     if (latexKey !== this._compiledKey) {
@@ -111,9 +129,9 @@ class GraphRenderer {
 
       this._compiledExprs = renderExprs.map(re => ({
         exprId:     re.exprId,
-        kind:       re.kind,          // 'parametric' | undefined (implicit)
+        kind:       re.kind,          // 'parametric' | 'point' | undefined (implicit)
         shaderInfo: re.shaderInfo,
-        // Parametric-specific fields (undefined for implicit)
+        // Parametric-specific fields (undefined for implicit/point)
         xAst:       re.xAst,
         yAst:       re.yAst,
         dxAst:      re.dxAst,
@@ -125,6 +143,12 @@ class GraphRenderer {
         color:      re.color,
         thickness:  re.thickness,
         enabled:    re.enabled,
+        // Point-specific fields (undefined for non-point kinds)
+        x:          re.x,
+        y:          re.y,
+        pointSize:  re.pointSize ?? 8.0,
+        draggable:  re.draggable ?? false,
+        varName:    re.varName ?? null,
       }));
       this._constantValues = analysis.constantValues;
       this._compiledErrors = analysis.errors;
@@ -148,6 +172,7 @@ class GraphRenderer {
           compiled.thickness = src.thickness != null ? src.thickness : 2.0;
           compiled.tMin      = src.tMin ?? 0;
           compiled.tMax      = src.tMax ?? 1;
+          compiled.pointSize = src.pointSize != null ? src.pointSize : 8.0;
         }
       }
     }
@@ -173,6 +198,20 @@ class GraphRenderer {
       const rect = c.getBoundingClientRect();
       const px = Math.round((e.clientX - rect.left) * (this.width  / rect.width));
       const py = Math.round((e.clientY - rect.top)  * (this.height / rect.height));
+      // Check for a draggable point hit first — takes priority over curve snap
+      const ptHit = this._pickPointAt(px, py);
+      if (ptHit) {
+        this._draggingPoint    = true;
+        this._dragPointExprId  = ptHit.exprId;
+        this._dragPointVarName = ptHit.varName;
+        // Seed _dragLastX/Y with the point's current position so a click-without-move
+        // fires dragEnd at the correct location rather than the previous drag's endpoint.
+        this._dragLastX        = ptHit.x;
+        this._dragLastY        = ptHit.y;
+        this._pendingDrag      = false;   // suppress pan
+        this._mousedownHitCurve = true;   // suppress background click
+        return;
+      }
       // Focus the curve immediately on press; begin snap mode if a curve was hit
       const exprId = this.pickAt(px, py);
       this._mousedownHitCurve = exprId !== null;
@@ -194,7 +233,8 @@ class GraphRenderer {
       const rect = c.getBoundingClientRect();
       const px = Math.round((e.clientX - rect.left) * (this.width  / rect.width));
       const py = Math.round((e.clientY - rect.top)  * (this.height / rect.height));
-      c.style.cursor = this.pickAt(px, py) !== null ? 'pointer' : '';
+      const ptHover = this._pickPointAt(px, py);
+      c.style.cursor = ptHover ? 'grab' : (this.pickAt(px, py) !== null ? 'pointer' : '');
       if (this._holding) {
         this._updateSnap(px, py);
         if (this._onRender) this._onRender();
@@ -202,6 +242,18 @@ class GraphRenderer {
     });
 
     window.addEventListener('mousemove', e => {
+      // Handle draggable point drag — fires onPointDrag callback with world coordinates
+      if (this._draggingPoint) {
+        const rect = c.getBoundingClientRect();
+        const mpx = (e.clientX - rect.left) * (this.width  / rect.width);
+        const mpy = (e.clientY - rect.top)  * (this.height / rect.height);
+        const wx = this.xMin + (mpx / this.width) * (this.xMax - this.xMin);
+        const wy = this._effYMin + (1 - mpy / this.height) * (this._effYMax - this._effYMin);
+        this._dragLastX = wx;
+        this._dragLastY = wy;
+        if (this._onPointDrag) this._onPointDrag(this._dragPointExprId, this._dragPointVarName, wx, wy);
+        return;
+      }
       if (!this._pendingDrag && !this._dragging) return;
       const dx = e.clientX - this._dragStartX;
       const dy = e.clientY - this._dragStartY;
@@ -223,6 +275,17 @@ class GraphRenderer {
     });
 
     window.addEventListener('mouseup', () => {
+      // Release draggable point drag
+      if (this._draggingPoint) {
+        if (this._onPointDragEnd) {
+          this._onPointDragEnd(this._dragPointExprId, this._dragPointVarName, this._dragLastX, this._dragLastY);
+        }
+        this._draggingPoint    = false;
+        this._dragPointExprId  = null;
+        this._dragPointVarName = null;
+        c.style.cursor = '';
+        return;
+      }
       this._pendingDrag = false;
       if (this._holding) {
         this._holding    = false;
@@ -308,6 +371,57 @@ class GraphRenderer {
       }
     }
     return bestExprId;
+  }
+
+  // ── Draggable point picking ───────────────────────────────────────────
+
+  /**
+   * Finds the closest draggable point expression to the given canvas coordinates.
+   * Converts canvas pixels to world space, then checks each compiled point expression.
+   * Returns the compiled expression entry or null if none is within the threshold.
+   *
+   * @param {number} canvasX     - Canvas X coordinate (CSS pixel, top-left origin)
+   * @param {number} canvasY     - Canvas Y coordinate (CSS pixel, top-left origin)
+   * @param {number} thresholdPx - Maximum distance in pixels for a hit (default 16)
+   * @returns {object|null}      - Matching compiled expression, or null
+   */
+  _pickPointAt(canvasX, canvasY, thresholdPx = 16) {
+    // Convert canvas pixels to world coordinates
+    const wx = this.xMin + (canvasX / this.width) * (this.xMax - this.xMin);
+    const wy = this._effYMin + (1 - canvasY / this.height) * (this._effYMax - this._effYMin);
+    // World units per canvas pixel (for converting threshold from pixels to world units)
+    const worldPerPxX = (this.xMax - this.xMin) / this.width;
+    const worldPerPxY = (this._effYMax - this._effYMin) / this.height;
+    let bestDist = Infinity;
+    let bestExpr = null;
+    for (const expr of this._compiledExprs) {
+      if (expr.kind !== 'point' || !expr.enabled || !expr.draggable) continue;
+      // Measure distance in pixels (not world space) so threshold is screen-consistent
+      const dx = (expr.x - wx) / worldPerPxX;
+      const dy = (expr.y - wy) / worldPerPxY;
+      const dist = Math.hypot(dx, dy);
+      if (dist < thresholdPx && dist < bestDist) {
+        bestDist = dist;
+        bestExpr = expr;
+      }
+    }
+    return bestExpr;
+  }
+
+  /**
+   * Directly patches the position of a compiled point expression.
+   * Used during drag for smooth real-time updates without full recompilation.
+   *
+   * @param {string} exprId - The expression ID to update
+   * @param {number} x      - New world X coordinate
+   * @param {number} y      - New world Y coordinate
+   */
+  _updatePointPosition(exprId, x, y) {
+    const entry = this._compiledExprs.find(e => e.exprId === exprId);
+    if (entry && entry.kind === 'point') {
+      entry.x = x;
+      entry.y = y;
+    }
   }
 
   // ── Snap-to-curve ─────────────────────────────────────────────────────
@@ -1084,6 +1198,119 @@ void main() {
     };
   }
 
+  /**
+   * Compile the point rendering shaders and create the VAO with a base quad VBO
+   * (per-vertex a_corner) and an instance VBO (per-point position, color, size, draggable).
+   * Uses premultiplied-alpha blending and SDF-based circle/ring shading.
+   */
+  _initPointPassShader() {
+    const gl = this.gl;
+
+    const vs = `#version 300 es
+precision highp float;
+in vec2  a_corner;
+in vec2  a_worldPos;
+in vec3  a_color;
+in float a_size;
+in float a_isDraggable;
+uniform vec2 u_rangeMin;
+uniform vec2 u_rangeMax;
+uniform vec2 u_resolution;
+out vec2  v_uv;
+out vec3  v_color;
+out float v_isDraggable;
+out float v_size;
+void main() {
+    vec2 ndc = (a_worldPos - u_rangeMin) / (u_rangeMax - u_rangeMin) * 2.0 - 1.0;
+    float expandPx = a_size + 18.0;
+    vec2 clipOffset = a_corner * expandPx / u_resolution * 2.0;
+    gl_Position = vec4(ndc + clipOffset, 0.0, 1.0);
+    v_uv = a_corner;
+    v_color = a_color;
+    v_isDraggable = a_isDraggable;
+    v_size = a_size;
+}`;
+
+    const fs = `#version 300 es
+precision highp float;
+in vec2  v_uv;
+in vec3  v_color;
+in float v_isDraggable;
+in float v_size;
+out vec4 fragColor;
+void main() {
+    float expandPx = v_size + 18.0;
+    float dist = length(v_uv) * expandPx;
+    float r = v_size * 0.5;
+    float solid = smoothstep(r + 1.0, r - 1.0, dist);
+    if (v_isDraggable > 0.5) {
+        float ringR1 = r + 3.0;
+        float ringR2 = r + 7.0;
+        float ring = (1.0 - smoothstep(ringR2 - 1.0, ringR2, dist)) * smoothstep(ringR1, ringR1 + 1.0, dist);
+        float alpha = max(solid, ring * 0.4);
+        if (alpha < 0.001) discard;
+        fragColor = vec4(v_color * alpha, alpha);
+    } else {
+        if (solid < 0.001) discard;
+        fragColor = vec4(v_color * solid, solid);
+    }
+}`;
+
+    this._pointProgram = GL.createShaderProgram(gl, vs, fs);
+
+    // Base quad: 4 corners for a unit square centered at origin, used as TRIANGLE_STRIP
+    const quadData = new Float32Array([-0.5, -0.5,  -0.5, 0.5,  0.5, -0.5,  0.5, 0.5]);
+    this._pointQuadVbo = gl.createBuffer();
+    this._pointInstVbo = gl.createBuffer();
+    this._pointVao     = gl.createVertexArray();
+
+    gl.bindVertexArray(this._pointVao);
+
+    // Bind and configure base quad buffer (divisor 0 — same 4 corners for every instance)
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._pointQuadVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, quadData, gl.STATIC_DRAW);
+    const cornerLoc = gl.getAttribLocation(this._pointProgram, 'a_corner');
+    gl.enableVertexAttribArray(cornerLoc);
+    gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 8, 0);
+    gl.vertexAttribDivisor(cornerLoc, 0); // per-vertex
+
+    // Bind and configure instance buffer (divisor 1 — one entry per point instance)
+    // Stride = 28 bytes: worldPos(2) + color(3) + size(1) + isDraggable(1) = 7 floats
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._pointInstVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STREAM_DRAW); // initially empty
+
+    const INST_STRIDE = 28;
+    const worldPosLoc    = gl.getAttribLocation(this._pointProgram, 'a_worldPos');
+    const colorLoc       = gl.getAttribLocation(this._pointProgram, 'a_color');
+    const sizeLoc        = gl.getAttribLocation(this._pointProgram, 'a_size');
+    const draggableLoc   = gl.getAttribLocation(this._pointProgram, 'a_isDraggable');
+
+    gl.enableVertexAttribArray(worldPosLoc);
+    gl.vertexAttribPointer(worldPosLoc,  2, gl.FLOAT, false, INST_STRIDE, 0);
+    gl.vertexAttribDivisor(worldPosLoc, 1);
+
+    gl.enableVertexAttribArray(colorLoc);
+    gl.vertexAttribPointer(colorLoc,     3, gl.FLOAT, false, INST_STRIDE, 8);
+    gl.vertexAttribDivisor(colorLoc, 1);
+
+    gl.enableVertexAttribArray(sizeLoc);
+    gl.vertexAttribPointer(sizeLoc,      1, gl.FLOAT, false, INST_STRIDE, 20);
+    gl.vertexAttribDivisor(sizeLoc, 1);
+
+    gl.enableVertexAttribArray(draggableLoc);
+    gl.vertexAttribPointer(draggableLoc, 1, gl.FLOAT, false, INST_STRIDE, 24);
+    gl.vertexAttribDivisor(draggableLoc, 1);
+
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    this._pointUniforms = {
+      u_rangeMin:   gl.getUniformLocation(this._pointProgram, 'u_rangeMin'),
+      u_rangeMax:   gl.getUniformLocation(this._pointProgram, 'u_rangeMax'),
+      u_resolution: gl.getUniformLocation(this._pointProgram, 'u_resolution'),
+    };
+  }
+
   // ── Main render entry ──────────────────────────────────────────────────
 
   /**
@@ -1132,11 +1359,14 @@ void main() {
       }
     }
 
-    // Collect enabled expressions: both implicit (shaderInfo) and parametric.
-    // The overall index (i) is used as the graphId so z-ordering is consistent.
+    // Collect enabled expressions: points go to a separate list for the instanced pass;
+    // implicit (shaderInfo) and parametric go into the thin-line pipeline.
+    // The overall index (i) in active[] is used as the graphId so z-ordering is consistent.
     const active = [];
+    const pointExprs = [];
     for (const expr of exprs) {
       if (!expr.enabled) continue;
+      if (expr.kind === 'point') { pointExprs.push(expr); continue; }
       if (!expr.glsl && !expr.shaderInfo && expr.kind !== 'parametric') continue;
       active.push(expr);
     }
@@ -1158,7 +1388,7 @@ void main() {
       const expr = active[i];
       if (expr.kind === 'parametric') {
         gl.bindVertexArray(null);
-        this._renderParametricThinLine(i, expr, scaleX, scaleY, effYMin, effYMax, img, width, height);
+        this._renderParametricThinLine(i, expr, scaleX, scaleY, effYMin, effYMax, img);
         gl.bindVertexArray(this.vao);
         continue;
       }
@@ -1271,6 +1501,11 @@ void main() {
       gl.disable(gl.BLEND);
       gl.bindVertexArray(null);
     }
+
+    // Point pass — rendered on top of everything including snap indicator
+    if (pointExprs.length > 0) {
+      this._renderPoints(pointExprs, effYMin, effYMax, width, height);
+    }
   }
 
   /** Parse a CSS hex color to [r, g, b] floats. */
@@ -1280,6 +1515,66 @@ void main() {
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
     return [r, g, b];
+  }
+
+  /**
+   * Renders a list of point expressions as instanced quads with SDF circle shading.
+   * Uploads per-point instance data (position, color, size, draggable flag) to the GPU
+   * and issues a single instanced draw call on top of the existing framebuffer contents.
+   *
+   * @param {Array} pointExprs - Compiled point expressions with x, y, color, pointSize, draggable fields
+   * @param {number} effYMin   - Effective viewport Y minimum (world coords)
+   * @param {number} effYMax   - Effective viewport Y maximum (world coords)
+   * @param {number} width     - Canvas pixel width
+   * @param {number} height    - Canvas pixel height
+   */
+  _renderPoints(pointExprs, effYMin, effYMax, width, height) {
+    const gl = this.gl;
+    const count = pointExprs.length;
+    const STRIDE_FLOATS = 7;
+    const needed = count * STRIDE_FLOATS;
+
+    // Grow the reusable CPU buffer as needed (double on growth to amortise allocations)
+    if (!this._pointInstData || this._pointInstData.length < needed) {
+      this._pointInstData = new Float32Array(Math.max(needed * 2, 28));
+    }
+    const d = this._pointInstData;
+
+    // Pack per-instance data: [worldX, worldY, r, g, b, size, isDraggable]
+    for (let i = 0; i < count; i++) {
+      const e = pointExprs[i];
+      const c = this._parseColor(e.color);
+      const b = i * STRIDE_FLOATS;
+      d[b]   = e.x;    d[b+1] = e.y;
+      d[b+2] = c[0];   d[b+3] = c[1];  d[b+4] = c[2];
+      d[b+5] = e.pointSize ?? 8.0;
+      d[b+6] = e.draggable ? 1.0 : 0.0;
+    }
+
+    // Upload instance data to GPU
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._pointInstVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, d.subarray(0, needed), gl.STREAM_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // Draw directly to the screen canvas with premultiplied-alpha blending
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+
+    gl.useProgram(this._pointProgram);
+    gl.bindVertexArray(this._pointVao);
+
+    const u = this._pointUniforms;
+    gl.uniform2f(u.u_rangeMin, this.xMin, effYMin);
+    gl.uniform2f(u.u_rangeMax, this.xMax, effYMax);
+    gl.uniform2f(u.u_resolution, width, height);
+
+    // One TRIANGLE_STRIP quad (4 verts) per point instance
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
   }
 
   /**
@@ -1294,12 +1589,11 @@ void main() {
    * @param {number} scaleY     - Pixels per world unit Y
    * @param {number} effYMin    - Effective viewport Y min (world)
    * @param {number} effYMax    - Effective viewport Y max (world)
-   * @param {GPUImage} img      - Ping-pong buffer
-   * @param {number} width
-   * @param {number} height
+   * @param {GPUImage} img      - Ping-pong buffer (img.width/height used for blit)
    */
-  _renderParametricThinLine(graphId, expr, scaleX, scaleY, effYMin, effYMax, img, width, height) {
+  _renderParametricThinLine(graphId, expr, scaleX, scaleY, effYMin, effYMax, img) {
     const gl = this.gl;
+    const { width, height } = img;
     const points = this._sampleParametricCurve(
       expr, expr.tMin, expr.tMax, scaleX, scaleY,
       this.xMin, this.xMax, effYMin, effYMax);
@@ -1578,6 +1872,10 @@ void main() {
     if (this._parametricVbo)     gl.deleteBuffer(this._parametricVbo);
     if (this._snapProgram)       gl.deleteProgram(this._snapProgram);
     if (this._snapVao)           gl.deleteVertexArray(this._snapVao);
+    if (this._pointProgram)      gl.deleteProgram(this._pointProgram);
+    if (this._pointVao)          gl.deleteVertexArray(this._pointVao);
+    if (this._pointQuadVbo)      gl.deleteBuffer(this._pointQuadVbo);
+    if (this._pointInstVbo)      gl.deleteBuffer(this._pointInstVbo);
     if (this._thickenFb) {
       gl.deleteFramebuffer(this._thickenFb);
       gl.deleteTexture(this._thickenColorTex);

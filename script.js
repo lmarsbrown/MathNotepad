@@ -511,9 +511,14 @@ function serializeToLatex(boxArray) {
       serialized = `\\begin{image}${modeFlag}${lockedFlag}\n${lines.join('\n')}\n\\end{image}`;
     }
     else if (b.type === 'graph') {
-      const exprLines = (b.expressions || []).map(e =>
-        `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.sliderMin != null ? e.sliderMin : 0} ${e.sliderMax != null ? e.sliderMax : 10} ${e.latex}`
-      );
+      const exprLines = (b.expressions || []).map(e => {
+        const extraTokens = [];
+        if (e.pointSize != null && e.pointSize !== 8.0) extraTokens.push(`ps:${e.pointSize}`);
+        if (e.draggable) extraTokens.push('drag');
+        if ((e.tMin != null && e.tMin !== 0) || (e.tMax != null && e.tMax !== 1)) extraTokens.push(`t:${e.tMin ?? 0}:${e.tMax ?? 1}`);
+        const extras = extraTokens.length > 0 ? extraTokens.join(' ') + ' ' : '';
+        return `% ${e.id} ${e.color} ${e.enabled ? 'on' : 'off'} ${e.thickness != null ? e.thickness : 2.0} ${e.sliderMin != null ? e.sliderMin : 0} ${e.sliderMax != null ? e.sliderMax : 10} ${extras}${e.latex}`;
+      });
       // Build optional calc-mode flags; omit defaults so old parsers ignore unknown braces
       const flags = [
         b.lightTheme    ? '{light}'       : '',
@@ -731,8 +736,29 @@ function parseFromLatex(src) {
               sliderMax = parseFloat(parts[latexStart + 1]);
               latexStart += 2;
             }
+            // Scan optional tokens (ps:<N>, drag, t:<min>:<max>) before the latex content
+            let pointSize = 8.0;
+            let draggable = false;
+            let tMin = 0, tMax = 1;
+            while (latexStart < parts.length) {
+              const tok = parts[latexStart];
+              if (tok.startsWith('ps:')) {
+                pointSize = parseFloat(tok.slice(3)) || 8.0;
+                latexStart++;
+              } else if (tok === 'drag') {
+                draggable = true;
+                latexStart++;
+              } else if (tok.startsWith('t:')) {
+                const tParts = tok.slice(2).split(':');
+                tMin = parseFloat(tParts[0]) || 0;
+                tMax = parseFloat(tParts[1]) ?? 1;
+                latexStart++;
+              } else {
+                break;
+              }
+            }
             const latex = parts.slice(latexStart).join(' ');
-            graphData.expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax });
+            graphData.expressions.push({ id: exprId, latex, color, enabled, thickness, sliderMin, sliderMax, tMin, tMax, pointSize, draggable });
           }
         }
         i++;

@@ -25,9 +25,11 @@ class ExpressionBox extends Box {
         this._calcBox    = isGraph ? null : (opts || null);
         this._graphOpts  = isGraph ? opts : null;
 
-        // Graph-specific properties; color/thickness stored on wrapper.dataset too
+        // Graph-specific properties; color/thickness/pointSize/draggable stored on wrapper.dataset too
         this.color     = isGraph ? (data.color     ?? opts.color     ?? '#3b82f6') : null;
         this.thickness = isGraph ? (data.thickness ?? opts.thickness ?? 2.0)       : null;
+        this.pointSize = isGraph ? (data.pointSize != null ? data.pointSize : 8.0) : null;
+        this.draggable = isGraph ? (data.draggable ?? false) : null;
 
         /** Cached expression type (calc mode): 'constant' | 'def' | 'bare' | 'equation' */
         this.exprType           = null;
@@ -127,20 +129,70 @@ class ExpressionBox extends Box {
                 }
             };
 
-        const { wrapper, row, mqField: field, toggle, mqSpan, handle } = createExprRow(
-            { id: this.id, enabled: this.enabled },
-            {
-                autoCommands,
-                rightSlot,
-                showDragHandle:   true,
-                onEdit,
-                onEnter,
-                onToggle,
-                onDelete:         () => this._delete(false),
-                onBackspaceEmpty: () => this._delete(true),
-                onMoveOut,
+        // ── Build wrapper, row, and interactive elements ─────────────────────
+        const wrapper = document.createElement('div');
+        wrapper.className = 'expr-wrapper';
+        wrapper.dataset.exprId = this.id;
+        if (!this.enabled) wrapper.classList.add('expr-disabled');
+
+        const row = document.createElement('div');
+        row.className = 'expr-row';
+        wrapper.appendChild(row);
+
+        const handle = document.createElement('div');
+        handle.className = 'expr-drag-handle';
+        handle.innerHTML = '&#8942;&#8942;';
+        handle.title = 'Drag to reorder';
+        row.appendChild(handle);
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'expr-toggle';
+        toggle.setAttribute('aria-pressed', this.enabled ? 'true' : 'false');
+        toggle.title = this.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+        toggle.addEventListener('click', () => {
+            const isEnabled = toggle.getAttribute('aria-pressed') !== 'true';
+            toggle.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            toggle.title = isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+            wrapper.classList.toggle('expr-disabled', !isEnabled);
+            onToggle(isEnabled);
+        });
+        row.appendChild(toggle);
+
+        const mqSpan = document.createElement('span');
+        mqSpan.className = 'expr-mq';
+        row.appendChild(mqSpan);
+
+        row.appendChild(rightSlot);
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'expr-delete';
+        delBtn.textContent = '×';
+        delBtn.title = 'Delete expression';
+        delBtn.addEventListener('mousedown', e => e.preventDefault());
+        delBtn.addEventListener('click', () => this._delete(false));
+        row.appendChild(delBtn);
+
+        const field = MQ.MathField(mqSpan, {
+            spaceBehavesLikeTab: false,
+            autoCommands,
+            autoOperatorNames: 'sin cos tan cot sec csc arcsin arccos arctan ln log exp mat',
+            handlers: {
+                edit:      ()    => onEdit(field.latex()),
+                enter:     ()    => onEnter(),
+                moveOutOf: (dir) => onMoveOut(dir),
+                upOutOf:   ()    => onMoveOut(-1),
+                downOutOf: ()    => onMoveOut(1),
+            },
+        });
+
+        mqSpan.addEventListener('keydown', e => {
+            if (e.key === 'Backspace' && field.latex() === '') {
+                e.preventDefault();
+                this._delete(true);
             }
-        );
+        }, true);
         this._mqField = field;
         this._toggle  = toggle;
 
@@ -157,9 +209,11 @@ class ExpressionBox extends Box {
             if (delBtn) row.insertBefore(resultSpan, delBtn);
             else        row.appendChild(resultSpan);
 
-            // Store color/thickness in wrapper dataset so color popup and toData() can read them
+            // Store color/thickness/pointSize/draggable in wrapper dataset so color popup and toData() can read them
             wrapper.dataset.color     = this.color;
             wrapper.dataset.thickness = this.thickness;
+            wrapper.dataset.pointSize = this.pointSize != null ? this.pointSize : 8.0;
+            wrapper.dataset.draggable = this.draggable ? '1' : '0';
         }
 
         // ── Drag-to-reorder (shared implementation, mode-specific onUp) ───────
@@ -493,7 +547,13 @@ class ExpressionBox extends Box {
             const thickness = this.element ? (parseFloat(this.element.dataset.thickness) || 2.0)            : this.thickness;
             const tMin      = this.element ? parseFloat(this.element.dataset.tMin  ?? 0) : (this.tMin  ?? 0);
             const tMax      = this.element ? parseFloat(this.element.dataset.tMax  ?? 1) : (this.tMax  ?? 1);
-            return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax, tMin, tMax };
+            const pointSize = this.element
+                ? (parseFloat(this.element.dataset.pointSize) || 8.0)
+                : (this.pointSize ?? 8.0);
+            const draggable = this.element
+                ? (this.element.dataset.draggable === '1')
+                : (this.draggable ?? false);
+            return { id: this.id, latex, enabled, color, thickness, sliderMin, sliderMax, tMin, tMax, pointSize, draggable };
         }
         return { id: this.id, latex, enabled, sliderMin, sliderMax };
     }

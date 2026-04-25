@@ -1170,6 +1170,7 @@ function analyzeExpressions(classifiedList) {
     xyDefs,
     implicits,
     parametrics,
+    staticPoints: [],
     errors,
     constantValues: new Map(),
     defsMap,
@@ -1182,6 +1183,30 @@ function analyzeExpressions(classifiedList) {
 
 /** @returns {boolean} true if v is a runtime point object {px, py} */
 function isPoint(v) { return v !== null && typeof v === 'object' && 'px' in v; }
+
+/**
+ * Returns true if the AST node is a plain number or a negated number (neg(3)).
+ * Negative coordinates parse as neg(number) rather than number, so both must be accepted.
+ * @param {object} node - AST node
+ * @returns {boolean}
+ */
+function isLiteralNumberAst(node) {
+  if (!node) return false;
+  if (node.type === 'number') return true;
+  return node.type === 'call' && node.name === 'neg' && node.args.length === 1 && node.args[0].type === 'number';
+}
+
+/**
+ * Returns true if the given AST node is a literal point expression —
+ * i.e. `(number, number)` with no variables or sub-expressions.
+ * Accepts negated numbers (e.g. (-3, 2)) since -3 parses as neg(3).
+ * Used to determine whether a point constant is draggable.
+ * @param {object} ast - AST node to inspect
+ * @returns {boolean}
+ */
+function isLiteralPointAst(ast) {
+  return ast && ast.type === 'point' && isLiteralNumberAst(ast.args[0]) && isLiteralNumberAst(ast.args[1]);
+}
 
 /** Evaluate an AST node to a numeric or point value, given a map of known values. */
 function evaluateAst(ast, values, funcDefs = new Map()) {
@@ -2567,6 +2592,22 @@ function compileGraphExpressions(expressions) {
   // 3. Evaluate constants
   evaluateConstants(analysis);
 
+  // 3c. Detect named point constants (e.g. A = (1, 2)) from constantValues.
+  // These are added to staticPoints for rendering; isDraggable is true when both
+  // components are literal numbers (no sub-expressions).
+  {
+    const seenExprIds = new Set(analysis.staticPoints.map(p => p.exprId));
+    for (const [varName, val] of analysis.constantValues) {
+      if (!isPoint(val)) continue;
+      const defEntry = analysis.defsMap.get(varName);
+      if (!defEntry || defEntry.exprId == null) continue;
+      if (seenExprIds.has(defEntry.exprId)) continue;
+      const isDraggable = !!(defEntry.rhs && isLiteralPointAst(defEntry.rhs));
+      analysis.staticPoints.push({ xVal: val.px, yVal: val.py, exprId: defEntry.exprId, isDraggable, varName });
+      seenExprIds.add(defEntry.exprId);
+    }
+  }
+
   // 3b. Deferred parametric detection: try to reduce each bareExpr to a point using
   // fully-evaluated constantValues and funcDefs so all variable/function types are known.
   // Convert runtime point values {px,py} to AST point nodes for evaluateAstSymbolic.
@@ -2591,6 +2632,17 @@ function compileGraphExpressions(expressions) {
       const vars = collectVariables(reducedAst);
       if (vars.has('x') || vars.has('y')) {
         analysis.errors.set(exprId, 'Parametric expressions cannot use x or y');
+        continue;
+      }
+      // Static point: no free variables at all — evaluate both components and record
+      if (!vars.has('t') && vars.size === 0) {
+        try {
+          const xVal = evaluateAst(reducedAst.args[0], analysis.constantValues, analysis.funcDefs);
+          const yVal = evaluateAst(reducedAst.args[1], analysis.constantValues, analysis.funcDefs);
+          analysis.staticPoints.push({ xVal, yVal, exprId, isDraggable: false, varName: null });
+        } catch (e) {
+          analysis.errors.set(exprId, e.message);
+        }
         continue;
       }
       if (!vars.has('t')) {
@@ -2669,6 +2721,24 @@ function compileGraphExpressions(expressions) {
       thickness: expr.thickness != null ? expr.thickness : 2.0,
       tMin: expr.tMin ?? 0,
       tMax: expr.tMax ?? 1,
+    });
+  }
+
+  // 6. Emit static point entries
+  for (const pt of analysis.staticPoints) {
+    const expr = expressions.find(e => e.id === pt.exprId);
+    if (!expr || !expr.enabled) continue;
+    const color = expr.color || '#2196F3';
+    renderExprs.push({
+      exprId: pt.exprId,
+      kind: 'point',
+      x: pt.xVal,
+      y: pt.yVal,
+      color,
+      enabled: true,
+      pointSize: expr.pointSize != null ? expr.pointSize : 8.0,
+      draggable: !!(pt.isDraggable && expr.draggable),
+      varName: pt.varName ?? null,
     });
   }
 
