@@ -2662,11 +2662,24 @@ function compileGraphExpressions(expressions) {
       if (exprError) { analysis.errors.set(exprId, exprError); continue; }
       analysis.parametrics.push({ xExpr: reducedAst.args[0], yExpr: reducedAst.args[1], deps: [...vars], exprId });
     } else {
-      // Not a point: error unless it's a pure scalar constant (no x/y/t → silently ignore)
-      const vars = collectVariables(ast);
-      if (vars.has('x') || vars.has('y') || vars.has('t')) {
+      // Not a point: check if it's a standard function y=f(x) style (only x, no y/t)
+      const vars = collectVariables(reducedAst);
+      if (vars.has('x') && !vars.has('y') && !vars.has('t')) {
+        // Test-evaluate to catch undefined functions/variables (e.g. g(x) where g is not defined)
+        try {
+          const testVals = new Map(analysis.constantValues);
+          testVals.set('x', 0);
+          evaluateAst(reducedAst, testVals, analysis.funcDefs);
+        } catch (e) {
+          analysis.errors.set(exprId, e.message);
+          continue;
+        }
+        analysis.standardFuncs = analysis.standardFuncs || [];
+        analysis.standardFuncs.push({ yExpr: reducedAst, exprId });
+      } else if (vars.has('x') || vars.has('y') || vars.has('t')) {
         analysis.errors.set(exprId, 'Expression must contain =');
       }
+      // Pure scalar constants (no x/y/t) are silently ignored
     }
   }
 
@@ -2677,6 +2690,17 @@ function compileGraphExpressions(expressions) {
   for (const impl of analysis.implicits) {
     const expr = expressions.find(e => e.id === impl.exprId);
     if (!expr) continue;
+
+    // Redirect y = f(x) (LHS is y, RHS has no y or t) to standard function rendering
+    const lhsIsY = impl.lhs.type === 'var' && impl.lhs.name === 'y';
+    if (lhsIsY) {
+      const rhsVars = collectVariables(impl.rhs);
+      if (!rhsVars.has('y') && !rhsVars.has('t')) {
+        analysis.standardFuncs = analysis.standardFuncs || [];
+        analysis.standardFuncs.push({ yExpr: impl.rhs, exprId: impl.exprId });
+        continue;
+      }
+    }
 
     let shaderInfo;
     try {
@@ -2693,6 +2717,21 @@ function compileGraphExpressions(expressions) {
     renderExprs.push({
       exprId: impl.exprId,
       shaderInfo,
+      color: expr.color,
+      enabled: true,
+      thickness: expr.thickness != null ? expr.thickness : 2.0,
+    });
+  }
+
+  // 4b. Build renderExprs for standard functions (y = f(x) and bare f(x))
+  for (const sf of (analysis.standardFuncs || [])) {
+    const expr = expressions.find(e => e.id === sf.exprId);
+    if (!expr) continue;
+    renderExprs.push({
+      exprId: sf.exprId,
+      kind: 'standard',
+      yAst: sf.yExpr,
+      funcDefs: analysis.funcDefs,
       color: expr.color,
       enabled: true,
       thickness: expr.thickness != null ? expr.thickness : 2.0,

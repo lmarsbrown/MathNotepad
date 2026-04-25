@@ -1367,7 +1367,7 @@ void main() {
     for (const expr of exprs) {
       if (!expr.enabled) continue;
       if (expr.kind === 'point') { pointExprs.push(expr); continue; }
-      if (!expr.glsl && !expr.shaderInfo && expr.kind !== 'parametric') continue;
+      if (!expr.glsl && !expr.shaderInfo && expr.kind !== 'parametric' && expr.kind !== 'standard') continue;
       active.push(expr);
     }
 
@@ -1389,6 +1389,12 @@ void main() {
       if (expr.kind === 'parametric') {
         gl.bindVertexArray(null);
         this._renderParametricThinLine(i, expr, scaleX, scaleY, effYMin, effYMax, img);
+        gl.bindVertexArray(this.vao);
+        continue;
+      }
+      if (expr.kind === 'standard') {
+        gl.bindVertexArray(null);
+        this._renderStandardThinLine(i, expr, scaleX, scaleY, effYMin, effYMax, img);
         gl.bindVertexArray(this.vao);
         continue;
       }
@@ -1690,6 +1696,73 @@ void main() {
     }
 
     return buf.subarray(0, count * 2);
+  }
+
+  /**
+   * Sample a standard function y = f(x) at one x per screen pixel column.
+   * Each pixel column gets exactly one point, giving one segment per pixel regardless of slope.
+   * NaN pairs mark evaluation errors (discontinuities / domain gaps).
+   *
+   * @param {object} yAst      - AST for f(x)
+   * @param {Map}    funcDefs  - User-defined function definitions
+   * @param {number} xMin      - Viewport left in world coords
+   * @param {number} xMax      - Viewport right in world coords
+   * @param {number} width     - Canvas width in pixels
+   * @returns {Float32Array}   - Flat [x0,y0, x1,y1, …]; NaN pairs mark gaps
+   */
+  _sampleStandardCurve(yAst, funcDefs, xMin, xMax, width) {
+    const vals = new Map(this._constantValues);
+    const buf = new Float32Array(width * 2);
+    for (let i = 0; i < width; i++) {
+      const x = xMin + (i / (width - 1)) * (xMax - xMin);
+      vals.set('x', x);
+      let y;
+      try {
+        y = evaluateAst(yAst, vals, funcDefs);
+      } catch (_) {
+        y = NaN;
+      }
+      buf[i * 2]     = isFinite(y) ? x : NaN;
+      buf[i * 2 + 1] = isFinite(y) ? y : NaN;
+    }
+    return buf;
+  }
+
+  /**
+   * Render a standard function y = f(x) into the ping-pong buffer.
+   * Samples one point per pixel column then feeds into the parametric capsule pipeline.
+   *
+   * @param {number} graphId
+   * @param {object} expr       - Compiled standard expression: { yAst, funcDefs, thickness }
+   * @param {number} scaleX     - Pixels per world unit X
+   * @param {number} scaleY     - Pixels per world unit Y
+   * @param {number} effYMin    - Effective viewport Y min (world)
+   * @param {number} effYMax    - Effective viewport Y max (world)
+   * @param {GPUImage} img      - Ping-pong buffer
+   */
+  _renderStandardThinLine(graphId, expr, scaleX, scaleY, effYMin, effYMax, img) {
+    const gl = this.gl;
+    const { width, height } = img;
+    const points = this._sampleStandardCurve(
+      expr.yAst, expr.funcDefs, this.xMin, this.xMax, width);
+
+    const curves = [{ points, graphId, thickness: expr.thickness ?? 2.0 }];
+    const vertexCount = this._buildParametricVBO(
+      curves, this.xMin, this.xMax, effYMin, effYMax, width, height);
+    if (vertexCount === 0) return;
+
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, img.frontFb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, img.backFb);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, img.backFb);
+    gl.viewport(0, 0, width, height);
+    gl.useProgram(this._parametricProgram);
+    gl.bindVertexArray(this._parametricVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
+    gl.bindVertexArray(null);
+
+    img.swapBuffers();
   }
 
   /**
