@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-page browser app (no build step, no server) — open `index.html` directly in a browser. All logic lives in six files: `index.html`, `script.js`,`graph.js`,`gpuimage.js`,`gl_utils.js`, `style.css`.
+A single-page browser app (no build step, no server) — open `index.html` directly in a browser.
 
 There are more details about the structure of this project in docs.md. 
 

@@ -1322,6 +1322,7 @@ void main() {
    */
   render(width, height, lightTheme, focusedExprId = null) {
     const gl = this.gl;
+    this._lightTheme = lightTheme;
     width  = Math.max(1, Math.round(width));
     height = Math.max(1, Math.round(height));
 
@@ -1511,6 +1512,99 @@ void main() {
     // Point pass — rendered on top of everything including snap indicator
     if (pointExprs.length > 0) {
       this._renderPoints(pointExprs, effYMin, effYMax, width, height);
+    }
+  }
+
+  /**
+   * Draws numeric axis labels onto a 2D canvas overlay, matching the shader's gridStep.
+   * Call this after render() with a canvas sized to the same pixel dimensions.
+   * @param {HTMLCanvasElement} canvas - The 2D overlay canvas to draw on.
+   */
+  drawAxisLabels(canvas) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (w === 0 || h === 0) return;
+
+    const xMin    = this.xMin;
+    const xMax    = this.xMax;
+    const effYMin = this._effYMin;
+    const effYMax = this._effYMax;
+    const xRange  = xMax - xMin;
+    const yRange  = effYMax - effYMin;
+
+    // Replicate shader gridStep formula
+    const rawStep  = xRange / 8.0;
+    const exp      = Math.floor(Math.log10(rawStep));
+    const base     = Math.pow(10, exp);
+    const ratio    = rawStep / base;
+    const gridStep = ratio < 2 ? base : ratio < 5 ? 2 * base : 5 * base;
+
+    // World→canvas coordinate helpers
+    const toCanvasX = wx => (wx - xMin) / xRange * w;
+    const toCanvasY = wy => (1 - (wy - effYMin) / yRange) * h;
+
+    // Canvas position of the axes (clamped so labels stay on-screen when axis is off-canvas)
+    const axisCanvasX = Math.max(2, Math.min(w - 2, toCanvasX(0)));
+    const axisCanvasY = Math.max(2, Math.min(h - 2, toCanvasY(0)));
+
+    // Threshold for skipping values too close to origin
+    const originThresh = gridStep * 0.01;
+
+    // Format: trim trailing zeros without scientific notation where possible
+    const fmt = v => {
+      if (Math.abs(v) < originThresh) return '0';
+      return parseFloat(v.toPrecision(6)).toString();
+    };
+
+    const light = this._lightTheme;
+    ctx.font         = '11px sans-serif';
+    ctx.fillStyle    = light ? '#555' : '#aaa';
+
+    // -- X-axis labels --
+    ctx.textBaseline = 'top';
+    ctx.textAlign    = 'center';
+    const xStart = Math.ceil(xMin / gridStep) * gridStep;
+    for (let x = xStart; x <= xMax + originThresh; x += gridStep) {
+      if (Math.abs(x) < originThresh) continue; // skip origin
+      const cx = toCanvasX(x);
+      if (cx < 5 || cx > w - 5) continue;
+      // Place label just below the x-axis; flip above if axis is near the bottom
+      let ly = axisCanvasY + 3;
+      if (ly > h - 16) ly = axisCanvasY - 14;
+      ctx.fillText(fmt(x), cx, ly);
+    }
+
+    // -- Y-axis labels --
+    ctx.textBaseline = 'middle';
+    const yStart = Math.ceil(effYMin / gridStep) * gridStep;
+    for (let y = yStart; y <= effYMax + originThresh; y += gridStep) {
+      if (Math.abs(y) < originThresh) continue; // skip origin
+      const cy = toCanvasY(y);
+      if (cy < 5 || cy > h - 5) continue;
+      // Place label just left of the y-axis; flip right if axis is near the left edge
+      let lx = axisCanvasX - 4;
+      if (lx < 28) {
+        ctx.textAlign = 'left';
+        lx = axisCanvasX + 4;
+      } else {
+        ctx.textAlign = 'right';
+      }
+      ctx.fillText(fmt(y), lx, cy);
+    }
+
+    // -- Origin label (only when both axes are on-screen) --
+    const xAxisVisible = effYMin < 0 && effYMax > 0;
+    const yAxisVisible = xMin < 0 && xMax > 0;
+    if (xAxisVisible && yAxisVisible) {
+      ctx.textAlign    = 'right';
+      ctx.textBaseline = 'top';
+      let olx = axisCanvasX - 4;
+      let oly = axisCanvasY + 3;
+      if (olx < 14) { ctx.textAlign = 'left'; olx = axisCanvasX + 4; }
+      if (oly > h - 16) oly = axisCanvasY - 14;
+      ctx.fillText('0', olx, oly);
     }
   }
 

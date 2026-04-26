@@ -616,7 +616,7 @@ function deleteBox(id) {
 
   mqFields.delete(id);
   boxResizers.delete(id);
-  cleanupCalcBox(id);
+  boxes[idx].dispose?.();
   cleanupImageBox(id);
   boxes.splice(idx, 1);
   rebuildBoxList();

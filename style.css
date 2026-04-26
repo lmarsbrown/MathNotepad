@@ -973,6 +973,31 @@ body {
   overflow: hidden;
 }
 
+#graph-home-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  line-height: 1;
+  background: rgba(30, 30, 46, 0.75);
+  color: #cdd6f4;
+  border: 1px solid rgba(205, 214, 244, 0.25);
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+#graph-home-btn:hover {
+  background: rgba(30, 30, 46, 0.95);
+  color: #89b4fa;
+}
+
 #graph-snap-tooltip {
   display: none;
   position: absolute;

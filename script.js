@@ -56,11 +56,6 @@ const imageObjectUrls = new Map();        // boxId → blob object URL (revoke o
 // ── Calc box state ────────────────────────────────────────────────────────────
 let calcExprNextId = 1;
 let calcTextNextId = 1;
-// let calcMqFields = new Map();       // boxId → Map<exprId, MQField>
-let calcTextAreaMap = new Map();    // boxId → Map<exprId, HTMLTextAreaElement>
-let calcAddExprFns = new Map();     // boxId → (afterExprId?: string) => void
-let calcAddTextFns = new Map();     // boxId → (afterExprId?: string) => void
-let calcPendingUpdate = new Set();  // boxIds with a pending rAF update
 
 const GRAPH_RENDER_DEBOUNCE_MS = 300; // debounce delay (ms) between typing in a graph expression and re-rendering
 const PREVIEW_DEBOUNCE_MS = 400;      // debounce delay (ms) between editing a box and re-rendering the preview
@@ -210,6 +205,11 @@ function renderGraphPreview() {
   const w = container.clientWidth  || box.width  || 600;
   const h = container.clientHeight || box.height || 400;
   renderer.render(w, h, !!box.lightTheme, focusedGraphExprId);
+  if (renderer._labelCanvas) {
+    renderer._labelCanvas.width  = w;
+    renderer._labelCanvas.height = h;
+    renderer.drawAxisLabels(renderer._labelCanvas);
+  }
   _syncExprBoxMeta(renderer._lastAnalysis);
   updateGraphCropOverlay();
 
@@ -221,7 +221,15 @@ function renderGraphPreview() {
   const results = evaluateCalcExpressions(nonGraphable, {
     usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem,
     useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits,
+    preloadedValues: renderer._constantValues,
   });
+
+  // Inject computed coordinates for graphed point expressions so their result cards can display them.
+  for (const e of (renderer._compiledExprs || [])) {
+    if (e.kind === 'point' && e.enabled !== false) {
+      results.set(e.exprId, { pointValue: { px: e.x, py: e.y } });
+    }
+  }
 
   const sigFigs = box.sigFigs ?? 6;
   for (const eb of _activeGraphExprBoxes) eb.update(results, graphableIds, sigFigs, compiledErrors);
@@ -832,10 +840,6 @@ function rebuildBoxList() {
   for (const [id] of mqFields) {
     if (!currentIds.has(id)) { mqFields.delete(id); boxResizers.delete(id); }
   }
-//   for (const [id] of calcMqFields) {
-    // if (!currentIds.has(id)) cleanupCalcBox(id);
-//   }
-
   // Remove stale DOM elements
   for (const child of [...boxList.children]) {
     if (!currentIds.has(child.dataset.id)) {
@@ -1047,6 +1051,7 @@ function diffAndApply(newBoxes) {
     return nb;
   });
 
+  const prevBoxes = boxes;
   boxes = result;
 
   // Remove extra DOM elements
@@ -1054,7 +1059,7 @@ function diffAndApply(newBoxes) {
     const last = boxList.lastElementChild;
     mqFields.delete(last.dataset.id);
     boxResizers.delete(last.dataset.id);
-    cleanupCalcBox(last.dataset.id);
+    prevBoxes.find(b => b.id === last.dataset.id)?.dispose();
     cleanupImageBox(last.dataset.id);
     boxList.removeChild(last);
   }
@@ -1072,7 +1077,7 @@ function diffAndApply(newBoxes) {
       if (box.type === 'calc') {
         // Calc boxes always rebuild their DOM so the expression list stays in sync
         // with any changes made via the LaTeX source panel.
-        cleanupCalcBox(box.id);
+        box.dispose();
         box.element = box.createElement();
         boxList.replaceChild(box.element, existingEl);
         reflowBox(box);
@@ -1111,7 +1116,7 @@ function diffAndApply(newBoxes) {
     _dbg('DIFF_TRIM_TAIL', { removedId: last.dataset.id });
     mqFields.delete(last.dataset.id);
     boxResizers.delete(last.dataset.id);
-    cleanupCalcBox(last.dataset.id);
+    prevBoxes.find(b => b.id === last.dataset.id)?.dispose();
     cleanupImageBox(last.dataset.id);
     boxList.removeChild(last);
   }
@@ -1314,7 +1319,7 @@ function cutBox(id) {
     if (field) content = field.latex();
   } else if (box.type === 'calc') {
     // For calc boxes, commit live state then copy expressions
-    commitCalcBox(id);
+    box.commit();
     boxClipboard = { type: 'calc', content: '', expressions: (box.expressions || []).map(e => e.toData ? e.toData() : { ...e }), showResultsDefs: box.showResultsDefs !== false, showResultsBare: box.showResultsBare !== false, physicsBasic: !!box.physicsBasic, physicsEM: !!box.physicsEM, physicsChem: !!box.physicsChem };
     deleteBox(id);
     return;
@@ -1377,7 +1382,7 @@ function pasteBox() {
     // Replace the empty box in-place
     mqFields.delete(focusedBoxId);
     boxResizers.delete(focusedBoxId);
-    cleanupCalcBox(focusedBoxId);
+    boxes.find(b => b.id === focusedBoxId)?.dispose();
     cleanupImageBox(focusedBoxId);
     boxes.splice(idx, 1, newBox);
   } else {
@@ -1406,8 +1411,7 @@ document.addEventListener('keydown', e => {
           const exprIdx = getFocusedCalcExprIdx();
           const wrappers = [...boxList.querySelectorAll(`[data-id="${focusedBoxId}"] .expr-wrapper`)];
           const afterId = exprIdx >= 0 ? wrappers[exprIdx]?.dataset.exprId ?? null : null;
-          const addText = calcAddTextFns.get(focusedBoxId);
-          if (addText) addText(afterId);
+          focusedBox._addTextAfter(afterId);
           return;
         }
       }

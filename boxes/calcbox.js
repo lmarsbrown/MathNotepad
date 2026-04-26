@@ -96,7 +96,7 @@ class ExpressionBox extends Box {
 
         const onEdit = isGraph
             ? () => opts.onEdit()
-            : () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); this._analyze(); };
+            : () => { this._calcBox.commit(); this._calcBox.scheduleUpdate(); this._analyze(); };
 
         const onEnter = isGraph
             ? () => opts.onEnter()
@@ -104,7 +104,7 @@ class ExpressionBox extends Box {
 
         const onToggle = isGraph
             ? () => opts.onToggle()
-            : () => { commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); };
+            : () => { this._calcBox.commit(); this._calcBox.scheduleUpdate(); };
 
         const onMoveOut = isGraph
             ? (dir) => {
@@ -270,8 +270,8 @@ class ExpressionBox extends Box {
                     this._calcBox.expressions = newWrappers
                         .map(w => this._calcBox.expressions.find(ex => ex.id === w.dataset.exprId))
                         .filter(Boolean);
-                    commitCalcBox(this._calcBox.id);
-                    scheduleCalcUpdate(this._calcBox.id);
+                    this._calcBox.commit();
+                    this._calcBox.scheduleUpdate();
                 }
             };
 
@@ -324,8 +324,8 @@ class ExpressionBox extends Box {
               }
             : {
                 getLatex:       () => this._mqField.latex(),
-                setLatex:       (str) => { this._mqField.latex(str); commitCalcBox(this._calcBox.id); scheduleCalcUpdate(this._calcBox.id); },
-                onBoundsCommit: () => commitCalcBox(this._calcBox.id),
+                setLatex:       (str) => { this._mqField.latex(str); this._calcBox.commit(); this._calcBox.scheduleUpdate(); },
+                onBoundsCommit: () => this._calcBox.commit(),
               }
         );
         this._showSlider = showSlider;
@@ -402,8 +402,8 @@ class ExpressionBox extends Box {
             const exprIdx = this._calcBox.expressions.indexOf(this);
             if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
             this._calcBox.fieldMap.delete(this.id);
-            commitCalcBox(this._calcBox.id);
-            scheduleCalcUpdate(this._calcBox.id);
+            this._calcBox.commit();
+            this._calcBox.scheduleUpdate();
         }
     }
 
@@ -429,12 +429,13 @@ class ExpressionBox extends Box {
         this._analyze();
 
         const isGraphable = graphableIds && graphableIds.has(this.id);
+        const isPoint = this.element && this.element.dataset.kind === 'point';
 
         if (this._colorSwatch) this._colorSwatch.style.display = isGraphable ? '' : 'none';
         // Never hide the toggle or overwrite its state here — the toggle is always
         // visible in graph mode and its aria-pressed state is owned by user interaction.
 
-        if (isGraphable) {
+        if (isGraphable && !isPoint) {
             if (this._resultSpan) this._resultSpan.style.display = 'none';
             this._hideSlider();
             this._warningLine.style.display = 'none';
@@ -616,7 +617,7 @@ class CalcTextRow extends Box {
      * @returns {HTMLElement}
      */
     createElement() {
-        const taMap = calcTextAreaMap.get(this._calcBox.id);
+        const taMap = this._calcBox.textAreaMap;
 
         const wrapper = document.createElement('div');
         wrapper.className = 'expr-wrapper';
@@ -721,12 +722,11 @@ class CalcTextRow extends Box {
                 this._calcBox._focusCalcRowById(focusId, rowIdx > 0 ? -1 : 1);
             }
         }
-        const taMap = calcTextAreaMap.get(this._calcBox.id);
-        if (taMap) taMap.delete(this.id);
+        this._calcBox.textAreaMap.delete(this.id);
         const exprIdx = this._calcBox.expressions.indexOf(this);
         if (exprIdx !== -1) this._calcBox.expressions.splice(exprIdx, 1);
         this.element.remove();
-        commitCalcBox(this._calcBox.id);
+        this._calcBox.commit();
     }
 
     /**
@@ -756,8 +756,9 @@ class CalcBox extends Box{
         this.collapsed = !!data.collapsed;
         this.sigFigs = data.sigFigs || 6;
         // Initialize maps early so ExpressionBox/CalcTextRow constructors can register into them
-        this.fieldMap = new Map();
-        calcTextAreaMap.set(this.id, new Map());
+        this.fieldMap    = new Map();
+        this.textAreaMap = new Map();
+        this._pendingUpdate = false;
         // Map plain data objects to class instances
         const defaultExpr = { id: 'ce' + (calcExprNextId++), latex: '', enabled: true };
         this.expressions = (data.expressions || [defaultExpr]).map(e =>
@@ -773,7 +774,7 @@ class CalcBox extends Box{
      * @param {number} dir - 1 = arriving from above (start), -1 = arriving from below (end).
      */
     _focusCalcRowById(exprId, dir) {
-        const taMap    = calcTextAreaMap.get(this.id);
+        const taMap = this.textAreaMap;
         const field = this.fieldMap && this.fieldMap.get(exprId);
         if (field) { field.focus(); return; }
         const ta = taMap && taMap.get(exprId);
@@ -805,7 +806,7 @@ class CalcBox extends Box{
             setFlag(idx, !getFlag());
             btn.classList.toggle('active', getFlag());
             syncToText();
-            scheduleCalcUpdate(this.id);
+            this.scheduleUpdate();
         });
         return btn;
     }
@@ -831,7 +832,7 @@ class CalcBox extends Box{
             boxes[idx][flagKey] = !boxes[idx][flagKey];
             btn.classList.toggle('active', boxes[idx][flagKey]);
             syncToText();
-            scheduleCalcUpdate(this.id);
+            this.scheduleUpdate();
         });
         return btn;
     }
@@ -862,8 +863,8 @@ class CalcBox extends Box{
         }
         newExprBox._mqField.reflow();
         setTimeout(() => newExprBox._mqField.focus(), 0);
-        commitCalcBox(this.id);
-        scheduleCalcUpdate(this.id);
+        this.commit();
+        this.scheduleUpdate();
     }
 
     /**
@@ -891,7 +892,7 @@ class CalcBox extends Box{
             this._exprList.appendChild(newTextRow.element);
         }
         setTimeout(() => newTextRow._textarea?.focus(), 0);
-        commitCalcBox(this.id);
+        this.commit();
     }
 
     createElement(){
@@ -951,7 +952,7 @@ class CalcBox extends Box{
         baseUnitsBtn.disabled = !boxes[idx].useUnits;
         baseUnitsBtn.classList.toggle('btn-disabled', !boxes[idx].useUnits);
         syncToText();
-        scheduleCalcUpdate(this.id);
+        this.scheduleUpdate();
         });
         toolbar.appendChild(unitsBtn);
 
@@ -970,7 +971,7 @@ class CalcBox extends Box{
         boxes[idx].useSymbolic = !boxes[idx].useSymbolic;
         symbolicBtn.classList.toggle('active', boxes[idx].useSymbolic);
         syncToText();
-        scheduleCalcUpdate(this.id);
+        this.scheduleUpdate();
         });
         toolbar.appendChild(symbolicBtn);
 
@@ -989,7 +990,7 @@ class CalcBox extends Box{
         boxes[idx].useBaseUnits = !boxes[idx].useBaseUnits;
         baseUnitsBtn.classList.toggle('active', boxes[idx].useBaseUnits);
         syncToText();
-        scheduleCalcUpdate(this.id);
+        this.scheduleUpdate();
         });
         toolbar.appendChild(baseUnitsBtn);
 
@@ -1020,7 +1021,7 @@ class CalcBox extends Box{
         if (!isNaN(v) && v >= 1 && v <= 15) {
             boxes[idx].sigFigs = v;
             syncToText();
-            scheduleCalcUpdate(this.id);
+            this.scheduleUpdate();
         } else {
             sigFigsInput.value = boxes[idx].sigFigs ?? 6;
         }
@@ -1057,16 +1058,57 @@ class CalcBox extends Box{
         syncToText(false); // collapsed state doesn't affect preview output
         });
 
-        // ── Register the "add expression after" and "add text row after" functions ─
-        calcAddExprFns.set(this.id, (afterId) => this._addExprAfter(afterId));
-        calcAddTextFns.set(this.id, (afterId) => this._addTextAfter(afterId));
-
         div.appendChild(this._createDeleteButton());
 
         // Initial result update after elements are in the DOM
-        requestAnimationFrame(() => scheduleCalcUpdate(this.id));
+        requestAnimationFrame(() => this.scheduleUpdate());
         
         return div;
+    }
+
+    /**
+     * Debounces result evaluation using requestAnimationFrame.
+     * Safe to call multiple times per frame; only one update will run.
+     */
+    scheduleUpdate() {
+        if (this._pendingUpdate) return;
+        this._pendingUpdate = true;
+        requestAnimationFrame(() => {
+            this._pendingUpdate = false;
+            this.updateResults();
+        });
+    }
+
+    /**
+     * Evaluates all expressions in this calc box and updates each row's result display.
+     */
+    updateResults() {
+        const exprData = this.expressions.map(e => e.toData ? e.toData() : e);
+        const results = evaluateCalcExpressions(exprData, {
+            usePhysicsBasic: !!this.physicsBasic,
+            usePhysicsEM:    !!this.physicsEM,
+            usePhysicsChem:  !!this.physicsChem,
+            useUnits:        !!this.useUnits,
+            useSymbolic:     !!this.useSymbolic,
+            useBaseUnits:    !!this.useBaseUnits,
+        });
+        for (const exprBox of this.expressions) {
+            if (exprBox instanceof ExpressionBox) exprBox.updateResult(results);
+        }
+    }
+
+    /**
+     * Syncs this calc box's state to the LaTeX source panel (right → left sync).
+     */
+    commit() {
+        syncToText();
+    }
+
+    /**
+     * Cancels any pending update. Called when the box is removed from the document.
+     */
+    dispose() {
+        this._pendingUpdate = false;
     }
 }
 
@@ -1312,44 +1354,6 @@ function classifyCalcExpr(latex) {
 function isNumericLiteralLatex(latex) {
   return /^-?\d+(\.\d+)?$/.test((latex || '').trim());
 }
-
-function scheduleCalcUpdate(boxId) {
-  if (calcPendingUpdate.has(boxId)) return;
-  calcPendingUpdate.add(boxId);
-  requestAnimationFrame(() => {
-    calcPendingUpdate.delete(boxId);
-    updateCalcResults(boxId);
-  });
-}
-
-function updateCalcResults(boxId) {
-  const box = boxes.find(b => b.id === boxId);
-  if (!box || box.type !== 'calc') return;
-  // Use toData() to read live values from MQ fields; avoids needing commitCalcBox to pre-sync
-  const exprData = (box.expressions || []).map(e => e.toData ? e.toData() : e);
-  const results = evaluateCalcExpressions(exprData, { usePhysicsBasic: !!box.physicsBasic, usePhysicsEM: !!box.physicsEM, usePhysicsChem: !!box.physicsChem, useUnits: !!box.useUnits, useSymbolic: !!box.useSymbolic, useBaseUnits: !!box.useBaseUnits });
-  for (const exprBox of (box.expressions || [])) {
-    if (exprBox instanceof ExpressionBox) exprBox.updateResult(results);
-  }
-}
-
-/**
- * Syncs the CalcBox state to storage. serializeToLatex() calls toData() on each
- * ExpressionBox/CalcTextRow to read live values, so no pre-sync of instance
- * properties is needed here.
- * @param {string} boxId - The ID of the calc box to commit.
- */
-function commitCalcBox(boxId) {
-  syncToText();
-}
-
-function cleanupCalcBox(boxId) {
-  calcTextAreaMap.delete(boxId);
-  calcAddExprFns.delete(boxId);
-  calcAddTextFns.delete(boxId);
-  calcPendingUpdate.delete(boxId);
-}
-
 
 function collectMathBlock(lines, startLine) {
   // Handle single-line: \[content\]

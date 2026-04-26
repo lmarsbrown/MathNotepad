@@ -216,8 +216,6 @@ const SI_ALL_UNIT_NAMES = [
 ].sort((a, b) => b.length - a.length);
 const SI_ALL_UNIT_NAMES_SET = new Set(SI_ALL_UNIT_NAMES);
 
-// Module-level flag: set in evaluateCalcExpressions before each evaluation.
-let _activePhysicsChem = false;
 
 function findEqAtDepth0(s) {
   let depth = 0;
@@ -928,103 +926,116 @@ function classifyExpression(parsed) {
 }
 
 /**
- * Analyze all expressions in a graph box: resolve dependencies, detect errors,
- * classify definitions as constants vs xy-dependent, and collect function definitions.
+ * Phase A of analyzeExpressions: build defsMap and funcDefs from the input list,
+ * collecting duplicate definitions as implicit equations instead of mutating the list.
  *
- * @param {Array} classifiedList - Array of { kind, exprId, ... } objects
- * @returns {Object} Analysis result (includes funcDefs)
+ * @param {Array} classifiedList
+ * @returns {{ defsMap: Map, rawFuncDefs: Map, expandedList: Array, parseErrors: Map }}
  */
-function analyzeExpressions(classifiedList) {
-  const errors = new Map();       // exprId → error string
-  const defsMap = new Map();      // variable name → { rhs, deps, dependsOnXY, exprId }
+function _buildExpandedList(classifiedList) {
+  const defsMap = new Map();     // variable name → { rhs, deps, dependsOnXY, exprId }
+  const rawFuncDefs = new Map(); // function name → { params, body, exprId }
+  const parseErrors = new Map(); // exprId → error string (for kind:'error' entries)
+  const reclassifiedVars = [];   // duplicate variable defs → implicit equations
+  const reclassifiedFuncs = [];  // duplicate func defs → implicit equations
 
-  // Build definitions map. If a variable is defined more than once,
-  // the first definition wins and subsequent ones are reclassified as implicit.
-  const reclassified = [];
+  // First pass: collect variable definitions and parse errors.
   for (const expr of classifiedList) {
     if (expr.kind === 'error') {
-      errors.set(expr.exprId, expr.error);
+      parseErrors.set(expr.exprId, expr.error);
       continue;
     }
-    if (expr.kind === 'funcdef') continue; // handled separately below
-    if (expr.kind === 'definition') {
-      if (defsMap.has(expr.name)) {
-        // Reclassify as implicit: treat "f = 1" as the equation f - 1 = 0
-        const lhs = { type: 'variable', name: expr.name };
-        const allVars = new Set([...collectVariables(lhs), ...collectVariables(expr.rhs)]);
-        const deps = new Set(allVars);
-        deps.delete('x');
-        deps.delete('y');
-        reclassified.push({ kind: 'implicit', lhs, rhs: expr.rhs, deps, allVars, exprId: expr.exprId });
-        continue;
-      }
-      defsMap.set(expr.name, {
-        rhs: expr.rhs,
-        deps: expr.deps,
-        dependsOnXY: expr.dependsOnXY,
-        exprId: expr.exprId,
-      });
+    if (expr.kind !== 'definition') continue;
+    if (defsMap.has(expr.name)) {
+      // Reclassify as implicit: treat duplicate "a = expr" as the equation a - expr = 0
+      const lhs = { type: 'variable', name: expr.name };
+      const allVars = new Set([...collectVariables(lhs), ...collectVariables(expr.rhs)]);
+      const deps = new Set(allVars);
+      deps.delete('x');
+      deps.delete('y');
+      reclassifiedVars.push({ kind: 'implicit', lhs, rhs: expr.rhs, deps, allVars, exprId: expr.exprId });
+    } else {
+      defsMap.set(expr.name, { rhs: expr.rhs, deps: expr.deps, dependsOnXY: expr.dependsOnXY, exprId: expr.exprId });
     }
   }
-  // Add reclassified expressions back so they're processed as implicits
-  classifiedList = [...classifiedList, ...reclassified];
 
-  // ── Collect and validate function definitions ─────────────────────────────
-  // Duplicate definitions (same function name) are reclassified as implicit
-  // equations so they get graphed as boolean curves rather than silently ignored.
-  const funcDefs = new Map(); // name → { params, body, exprId }
-  const reclassifiedFuncs = [];
+  // Second pass: collect function definitions (over the original list only).
+  // Duplicate function definitions are reclassified as implicit equations.
   for (const expr of classifiedList) {
     if (expr.kind !== 'funcdef') continue;
-    if (funcDefs.has(expr.name)) {
-      // Reconstruct lhs call node from name + params, treat as implicit equation
+    if (rawFuncDefs.has(expr.name)) {
+      // Reconstruct lhs call node, treat as implicit equation
       const lhs = { type: 'call', name: expr.name, args: expr.params.map(p => ({ type: 'variable', name: p })) };
       const allVars = new Set([...collectVariables(lhs), ...collectVariables(expr.body)]);
       const deps = new Set(allVars);
       deps.delete('x');
       deps.delete('y');
       reclassifiedFuncs.push({ kind: 'implicit', lhs, rhs: expr.body, deps, allVars, exprId: expr.exprId });
-      continue;
-    }
-    funcDefs.set(expr.name, { params: expr.params, body: expr.body, exprId: expr.exprId });
-  }
-  classifiedList = [...classifiedList, ...reclassifiedFuncs];
-
-  // Cycle detection for function definitions (DFS)
-  {
-    const funcResolved  = new Map();
-    const funcResolving = new Set();
-    function resolveFunc(name) {
-      if (funcResolved.has(name)) return funcResolved.get(name);
-      if (!funcDefs.has(name)) return { error: null };
-      if (funcResolving.has(name))
-        return { error: `Circular function dependency on '${name}'` };
-      funcResolving.add(name);
-      const def = funcDefs.get(name);
-      const calledFuncs = collectFunctionCalls(def.body, funcDefs);
-      let error = null;
-      for (const calledName of calledFuncs) {
-        const r = resolveFunc(calledName);
-        if (r.error) { error = r.error; break; }
-      }
-      funcResolving.delete(name);
-      const result = { error };
-      funcResolved.set(name, result);
-      return result;
-    }
-    for (const [name, def] of funcDefs) {
-      const r = resolveFunc(name);
-      if (r.error) {
-        errors.set(def.exprId, r.error);
-        funcDefs.delete(name);
-      }
+    } else {
+      rawFuncDefs.set(expr.name, { params: expr.params, body: expr.body, exprId: expr.exprId });
     }
   }
 
-  // Resolve dependencies: detect circular refs, undefined vars, compute depth,
-  // and propagate xy-dependency
-  const resolved = new Map();  // name → { depth, dependsOnXY, error }
-  const resolving = new Set(); // currently on the path (for cycle detection)
+  const expandedList = [...classifiedList, ...reclassifiedVars, ...reclassifiedFuncs];
+  return { defsMap, rawFuncDefs, expandedList, parseErrors };
+}
+
+/**
+ * Phase B of analyzeExpressions: DFS cycle detection on a function-definitions map.
+ * Returns valid function defs (cycles removed) and cycle errors keyed by exprId.
+ *
+ * @param {Map} rawFuncDefs - function name → { params, body, exprId }
+ * @returns {{ validFuncDefs: Map, cycleErrors: Map }}
+ */
+function _detectFuncCycles(rawFuncDefs) {
+  const validFuncDefs = new Map(rawFuncDefs); // start with all, remove cycles below
+  const cycleErrors = new Map();
+  const funcResolved  = new Map();
+  const funcResolving = new Set();
+
+  function resolveFunc(name) {
+    if (funcResolved.has(name)) return funcResolved.get(name);
+    if (!validFuncDefs.has(name)) return { error: null };
+    if (funcResolving.has(name))
+      return { error: `Circular function dependency on '${name}'` };
+    funcResolving.add(name);
+    const def = validFuncDefs.get(name);
+    const calledFuncs = collectFunctionCalls(def.body, validFuncDefs);
+    let error = null;
+    for (const calledName of calledFuncs) {
+      const r = resolveFunc(calledName);
+      if (r.error) { error = r.error; break; }
+    }
+    funcResolving.delete(name);
+    const result = { error };
+    funcResolved.set(name, result);
+    return result;
+  }
+
+  for (const [name, def] of rawFuncDefs) {
+    const r = resolveFunc(name);
+    if (r.error) {
+      cycleErrors.set(def.exprId, r.error);
+      validFuncDefs.delete(name);
+    }
+  }
+
+  return { validFuncDefs, cycleErrors };
+}
+
+/**
+ * Phase C of analyzeExpressions: resolve variable dependencies via DFS.
+ * Detects circular references, undefined variables, computes evaluation depth,
+ * and propagates xy-dependency.
+ *
+ * @param {Map} defsMap - variable name → { rhs, deps, dependsOnXY, exprId }
+ * @param {Map} funcDefs - validated function definitions
+ * @returns {{ resolved: Map, resolveErrors: Map }}
+ */
+function _resolveVariables(defsMap, funcDefs) {
+  const resolved  = new Map(); // name → { depth, dependsOnXY, error }
+  const resolving = new Set(); // currently on the DFS path (cycle detection)
+  const resolveErrors = new Map(); // exprId → error string
 
   function resolve(name) {
     if (resolved.has(name)) return resolved.get(name);
@@ -1033,14 +1044,14 @@ function analyzeExpressions(classifiedList) {
       resolved.set(name, r);
       return r;
     }
-    // pi is a known mathematical constant — handled by evaluateAst and astToGlsl
     if (name === 'pi') {
+      // Mathematical constant — handled by evaluateAst and astToGlsl
       const r = { depth: 0, dependsOnXY: false, error: null };
       resolved.set(name, r);
       return r;
     }
-    // Function names are recognized — not undefined variables
     if (funcDefs.has(name)) {
+      // Function names are not undefined variables
       const r = { depth: 0, dependsOnXY: false, error: null };
       resolved.set(name, r);
       return r;
@@ -1057,32 +1068,58 @@ function analyzeExpressions(classifiedList) {
     let maxDepth = 0;
     let depOnXY = def.dependsOnXY;
     let error = null;
-
     for (const dep of def.deps) {
       const r = resolve(dep);
-      if (r.error) {
-        error = r.error;
-        break;
-      }
+      if (r.error) { error = r.error; break; }
       if (r.dependsOnXY) depOnXY = true;
       maxDepth = Math.max(maxDepth, r.depth + 1);
     }
-
     resolving.delete(name);
+
     const result = { depth: maxDepth, dependsOnXY: depOnXY, error };
     resolved.set(name, result);
     return result;
   }
 
-  // Resolve all definitions
   for (const [name, def] of defsMap) {
     const r = resolve(name);
-    if (r.error) {
-      errors.set(def.exprId, r.error);
-    }
+    if (r.error) resolveErrors.set(def.exprId, r.error);
   }
 
-  // Separate definitions into constants and xy-dependent
+  return { resolved, resolveErrors };
+}
+
+/**
+ * Analyze all expressions in a graph box: resolve dependencies, detect errors,
+ * classify definitions as constants vs xy-dependent, and collect function definitions.
+ *
+ * @param {Array} classifiedList - Array of { kind, exprId, ... } objects
+ * @returns {Object} Analysis result (includes funcDefs)
+ */
+function analyzeExpressions(classifiedList) {
+  // Phase A: build defsMap and funcDefs without mutating the input list.
+  const { defsMap, rawFuncDefs, expandedList, parseErrors } = _buildExpandedList(classifiedList);
+
+  // Phase B: remove any function definitions that have circular call chains.
+  const { validFuncDefs, cycleErrors } = _detectFuncCycles(rawFuncDefs);
+
+  // Phase C: resolve variable dependencies and propagate xy-dependency.
+  const { resolved, resolveErrors } = _resolveVariables(defsMap, validFuncDefs);
+
+  // Merge all error maps into one.
+  const errors = new Map([...parseErrors, ...cycleErrors, ...resolveErrors]);
+
+  // Lookup helper for dep resolution in implicit/parametric validation.
+  // Handles pi and function names that _resolveVariables only adds to `resolved`
+  // when they appear as transitive dependencies of a user variable.
+  const lookupResolved = (name) => {
+    if (resolved.has(name)) return resolved.get(name);
+    if (name === 'pi') return { depth: 0, dependsOnXY: false, error: null };
+    if (validFuncDefs.has(name)) return { depth: 0, dependsOnXY: false, error: null };
+    return { depth: 0, dependsOnXY: false, error: `Undefined variable '${name}'` };
+  };
+
+  // Separate definitions into constants (no x/y dependency) and xy-dependent.
   const constants = [];
   const xyDefs = [];
   for (const [name, def] of defsMap) {
@@ -1094,73 +1131,56 @@ function analyzeExpressions(classifiedList) {
       constants.push({ name, rhs: def.rhs, depth: r.depth, exprId: def.exprId });
     }
   }
-
-  // Sort constants by depth (ascending) so dependencies are evaluated first
+  // Sort by depth so dependencies are evaluated before dependents.
   constants.sort((a, b) => a.depth - b.depth);
-  // Sort xyDefs by depth too for proper ordering in shader
   xyDefs.sort((a, b) => a.depth - b.depth);
 
-  // Validate implicit expressions
+  // Validate implicit expressions (using expandedList which includes reclassified duplicates).
   const implicits = [];
-  for (const expr of classifiedList) {
+  for (const expr of expandedList) {
     if (expr.kind !== 'implicit') continue;
     if (errors.has(expr.exprId)) continue;
 
-    // Check for undefined variables and propagate xy-dependency
     let depOnXY = expr.allVars.has('x') || expr.allVars.has('y');
     let exprError = null;
     for (const dep of expr.deps) {
-      const r = resolve(dep);
+      const r = lookupResolved(dep);
       if (r.error) { exprError = r.error; break; }
       if (r.dependsOnXY) depOnXY = true;
     }
-    if (exprError) {
-      errors.set(expr.exprId, exprError);
-      continue;
-    }
-    if (!depOnXY) {
-      errors.set(expr.exprId, 'Expression does not depend on x or y');
-      continue;
-    }
+    if (exprError) { errors.set(expr.exprId, exprError); continue; }
+    if (!depOnXY) { errors.set(expr.exprId, 'Expression does not depend on x or y'); continue; }
     implicits.push({ lhs: expr.lhs, rhs: expr.rhs, deps: expr.deps, exprId: expr.exprId });
   }
 
-  // Validate parametric expressions
+  // Validate parametric expressions.
   const parametrics = [];
-  for (const expr of classifiedList) {
+  for (const expr of expandedList) {
     if (expr.kind !== 'parametric') continue;
     if (errors.has(expr.exprId)) continue;
 
     const vars = new Set(expr.deps);
-
-    // x and y are not valid in parametric context (they belong to implicit equations)
     if (vars.has('x') || vars.has('y')) {
       errors.set(expr.exprId, "Parametric expressions cannot use x or y");
       continue;
     }
-
-    // Must reference t as the free variable
     if (!vars.has('t')) {
       errors.set(expr.exprId, "Parametric expressions must use variable t");
       continue;
     }
 
-    // All deps other than t must resolve to constants (no xy-dependency)
-    const depsExcludingT = new Set(vars);
-    depsExcludingT.delete('t');
+    // All deps other than t must resolve to constants (no xy-dependency).
     let exprError = null;
-    for (const dep of depsExcludingT) {
-      const r = resolve(dep);
+    for (const dep of vars) {
+      if (dep === 't') continue;
+      const r = lookupResolved(dep);
       if (r.error) { exprError = r.error; break; }
       if (r.dependsOnXY) {
         exprError = `Variable '${dep}' depends on x or y, which is not valid in a parametric expression`;
         break;
       }
     }
-    if (exprError) {
-      errors.set(expr.exprId, exprError);
-      continue;
-    }
+    if (exprError) { errors.set(expr.exprId, exprError); continue; }
 
     parametrics.push({ xExpr: expr.xExpr, yExpr: expr.yExpr, deps: expr.deps, exprId: expr.exprId });
   }
@@ -1175,7 +1195,7 @@ function analyzeExpressions(classifiedList) {
     constantValues: new Map(),
     defsMap,
     resolved,
-    funcDefs,
+    funcDefs: validFuncDefs,
   };
 }
 
@@ -1218,7 +1238,7 @@ function evaluateAst(ast, values, funcDefs = new Map()) {
       throw new Error(`Undefined variable '${ast.name}' during evaluation`);
     }
     case 'derivative': {
-      const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs));
+      const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs, values));
       return evaluateAst(derivedAst, values, funcDefs);
     }
     case 'primecall': {
@@ -1230,7 +1250,7 @@ function evaluateAst(ast, values, funcDefs = new Map()) {
         throw new Error(`Function '${ast.name}' expects ${def.params.length} argument(s), got ${ast.args.length}`);
       let bodyAst = def.body;
       for (let i = 0; i < ast.order; i++)
-        bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs));
+        bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs, values));
       const innerValues = new Map(values);
       innerValues.set(def.params[0], evaluateAst(ast.args[0], values, funcDefs));
       return evaluateAst(bodyAst, innerValues, funcDefs);
@@ -1502,7 +1522,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
       if (ast.name === 'pi') return mk(Math.PI);    // π — always numeric, never a unit
       if (SI_BASE_UNITS.has(ast.name)) return ast; // unit symbol — always symbolic
       if (DERIVED_UNIT_EXPANSIONS[ast.name] !== undefined) {
-        if (!CHEM_ONLY_UNITS.has(ast.name) || _activePhysicsChem) return ast;
+        if (!CHEM_ONLY_UNITS.has(ast.name) || opts.physicsChem) return ast;
         // Chem-only unit (L, mL, μL) when chem mode is off — fall through to undefined
       }
       if (SCALED_UNIT_ATOMS[ast.name] !== undefined) return ast; // scaled unit — keep symbolic
@@ -1517,7 +1537,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
 
       const TRIG = new Set(['sin','cos','tan','asin','acos','atan','ln','exp','abs']);
       if (TRIG.has(ast.name)) {
-        const arg = simplifyAst(recurse(ast.args[0]));
+        const arg = simplifyAst(recurse(ast.args[0]), opts);
         if (arg.type === 'point') throw new Error(`Cannot apply ${ast.name}() to a point`);
         if (arg.type === 'number') {
           // Purely numeric — evaluate
@@ -1537,7 +1557,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
         // Symbolic arg — warn if units are present
         const unitVars = collectUnitVarsInAst(arg);
         if (unitVars.size > 0) warnings.push({ funcName: ast.name, units: [...unitVars] });
-        return simplifyAst({ type: 'call', name: ast.name, args: [arg] });
+        return simplifyAst({ type: 'call', name: ast.name, args: [arg] }, opts);
       }
 
       if (['add','sub','mul','div','pow','neg'].includes(ast.name)) {
@@ -1545,8 +1565,8 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
         const [l, r] = args;
         const lp = l && l.type === 'point', rp = r && r.type === 'point';
         if (lp || rp) {
-          const sx = (a, b) => simplifyAst({ type: 'call', name: ast.name, args: [a, b] });
-          const s1 = a => simplifyAst({ type: 'call', name: 'neg', args: [a] });
+          const sx = (a, b) => simplifyAst({ type: 'call', name: ast.name, args: [a, b] }, opts);
+          const s1 = a => simplifyAst({ type: 'call', name: 'neg', args: [a] }, opts);
           switch (ast.name) {
             case 'add':
               if (lp && rp) return { type: 'point', args: [sx(l.args[0], r.args[0]), sx(l.args[1], r.args[1])] };
@@ -1566,7 +1586,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
               if (lp) return { type: 'point', args: [s1(l.args[0]), s1(l.args[1])] };
           }
         }
-        return simplifyAst({ type: 'call', name: ast.name, args });
+        return simplifyAst({ type: 'call', name: ast.name, args }, opts);
       }
 
       // User-defined function
@@ -1590,7 +1610,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
     }
 
     case 'derivative': {
-      const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs));
+      const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs, valueMap), opts);
       return evaluateAstSymbolic(derivedAst, valueMap, funcDefs, opts);
     }
 
@@ -1600,7 +1620,7 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
       if (def.params.length !== 1) throw new Error(`Prime notation requires single-parameter function`);
       let body = def.body;
       for (let i = 0; i < ast.order; i++)
-        body = simplifyAst(differentiateAst(body, def.params[0], funcDefs));
+        body = simplifyAst(differentiateAst(body, def.params[0], funcDefs, valueMap), opts);
       const innerMap = new Map(valueMap);
       innerMap.set(def.params[0], recurse(ast.args[0]));
       return evaluateAstSymbolic(body, innerMap, funcDefs, opts);
@@ -1610,22 +1630,49 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
   }
 }
 
-/** Symbolically differentiate an AST with respect to varName. Returns a new AST. */
-function differentiateAst(ast, varName, funcDefs = new Map()) {
+/**
+ * Symbolically differentiate an AST with respect to varName. Returns a new AST.
+ * @param {Object} ast - AST node to differentiate
+ * @param {string} varName - variable to differentiate with respect to
+ * @param {Map} funcDefs - user-defined function definitions
+ * @param {Map|null} valueMap - optional map of variable names to runtime values or AST nodes;
+ *   used to detect point-typed constants so they return (0,0) instead of scalar 0
+ * @returns {Object} differentiated AST node
+ */
+function differentiateAst(ast, varName, funcDefs = new Map(), valueMap = null) {
   const n0 = { type: 'number', value: 0 };
   const n1 = { type: 'number', value: 1 };
   const n2 = { type: 'number', value: 2 };
   const num = v => ({ type: 'number', value: v });
   const call = (name, ...args) => ({ type: 'call', name, args });
-  const diff = node => differentiateAst(node, varName, funcDefs);
+  const diff = node => differentiateAst(node, varName, funcDefs, valueMap);
 
   if (ast.type === 'number') return n0;
-  if (ast.type === 'variable') return ast.name === varName ? n1 : n0;
+  if (ast.type === 'variable') {
+    if (ast.name === varName) return n1;
+    // If the variable holds a point value, its derivative is the zero point (0,0)
+    if (valueMap && valueMap.has(ast.name)) {
+      const val = valueMap.get(ast.name);
+      if (isPoint(val) || (val && typeof val === 'object' && val.type === 'point'))
+        return { type: 'point', args: [n0, n0] };
+    }
+    return n0;
+  }
 
   if (ast.type === 'derivative') {
     // Nested derivative: differentiate the inner derivative result
-    const inner = differentiateAst(ast.arg, ast.variable, funcDefs);
-    return differentiateAst(inner, varName, funcDefs);
+    const inner = differentiateAst(ast.arg, ast.variable, funcDefs, valueMap);
+    return differentiateAst(inner, varName, funcDefs, valueMap);
+  }
+
+  if (ast.type === 'point') {
+    // d/dt (x(t), y(t)) = (dx/dt, dy/dt)
+    return { type: 'point', args: ast.args.map(diff) };
+  }
+
+  if (ast.type === 'member') {
+    // d/dvar (P.x) = (dP/dvar).x
+    return { type: 'member', arg: diff(ast.arg), field: ast.field };
   }
 
   if (ast.type === 'primecall') {
@@ -1638,10 +1685,10 @@ function differentiateAst(ast, varName, funcDefs = new Map()) {
       throw new CompileError(`Prime notation requires a single-parameter function`);
     let bodyAst = def.body;
     for (let i = 0; i < ast.order; i++)
-      bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs));
+      bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs, valueMap));
     const paramMap = new Map([[def.params[0], ast.args[0]]]);
     const substituted = substituteAst(bodyAst, paramMap);
-    return differentiateAst(substituted, varName, funcDefs);
+    return differentiateAst(substituted, varName, funcDefs, valueMap);
   }
 
   const [a, b] = ast.args;
@@ -1680,7 +1727,7 @@ function differentiateAst(ast, varName, funcDefs = new Map()) {
         const def = funcDefs.get(ast.name);
         const paramMap = new Map(def.params.map((p, i) => [p, ast.args[i]]));
         const substituted = substituteAst(def.body, paramMap);
-        return differentiateAst(substituted, varName, funcDefs);
+        return differentiateAst(substituted, varName, funcDefs, valueMap);
       }
       throw new CompileError(`Cannot differentiate: ${ast.name}`);
     }
@@ -1829,15 +1876,19 @@ function _termSignature(factors) {
     .join('*');
 }
 
-/** Expand a canonical term's factors to SI base units. Returns {coeff, siUnits} or null. */
-function _termToSISignature(term) {
+/**
+ * Expand a canonical term's factors to SI base units. Returns {coeff, siUnits} or null.
+ * @param {{coeff: number, factors: Map<string,number>}} term
+ * @param {{physicsChem?: boolean}} opts
+ */
+function _termToSISignature(term, opts = {}) {
   let coeff = term.coeff;
   const siUnits = {};
   for (const [key, exp] of term.factors) {
     if (SI_BASE_UNITS.has(key)) {
       siUnits[key] = (siUnits[key] || 0) + exp;
     } else if (DERIVED_UNIT_EXPANSIONS[key]) {
-      if (CHEM_ONLY_UNITS.has(key) && !_activePhysicsChem) return null;
+      if (CHEM_ONLY_UNITS.has(key) && !opts.physicsChem) return null;
       const d = DERIVED_UNIT_EXPANSIONS[key];
       coeff *= Math.pow(d.coeff, exp);
       for (const [u, e] of Object.entries(d.units))
@@ -1864,9 +1915,13 @@ function _siSignatureKey(siUnits) {
  * Given a base unit name, its power, and the SI coefficient, return the best-scaled
  * unit name and display coefficient, or null if no prefix gives a display coeff in [1, 1000).
  * For m^3 when chem mode is active, liter units are preferred over length cubed.
+ * @param {string} baseName
+ * @param {number} power
+ * @param {number} siCoeff
+ * @param {{physicsChem?: boolean}} opts
  */
-function _selectBestScale(baseName, power, siCoeff) {
-  if (baseName === 'm' && power === 3 && _activePhysicsChem) {
+function _selectBestScale(baseName, power, siCoeff, opts = {}) {
+  if (baseName === 'm' && power === 3 && opts.physicsChem) {
     for (const { name, p } of [{ name: 'L', p: 1e-3 }, { name: 'mL', p: 1e-6 }, { name: 'μL', p: 1e-9 }]) {
       const d = Math.abs(siCoeff) / p;
       if (d >= 1 && d < 1000) return { name, power: 1, newCoeff: siCoeff / p };
@@ -1885,9 +1940,12 @@ function _selectBestScale(baseName, power, siCoeff) {
   return { name: largest.name, power, newCoeff: siCoeff / Math.pow(largest.p, power) };
 }
 
-/** Rewrite a term to its best-scaled named unit form, or return it unchanged if no match. */
-function _simplifyTermUnits(term, atomMap) {
-  const si = _termToSISignature(term);
+/**
+ * Rewrite a term to its best-scaled named unit form, or return it unchanged if no match.
+ * @param {{physicsChem?: boolean}} opts
+ */
+function _simplifyTermUnits(term, atomMap, opts = {}) {
+  const si = _termToSISignature(term, opts);
   if (!si) return term;
 
   // All dimensions cancel — pure dimensionless number.
@@ -1932,7 +1990,7 @@ function _simplifyTermUnits(term, atomMap) {
     return term;
   }
 
-  const scaled = _selectBestScale(baseName, basePower, displayCoeff);
+  const scaled = _selectBestScale(baseName, basePower, displayCoeff, opts);
   // If no ideal prefix found: fall back to base unit only when the original term has mixed
   // factors (e.g. Mm²·kPa·m⁻¹·s² → kg). For single-factor terms (e.g. yr^{-1}), return
   // the original so we don't force an ugly coefficient onto a derived unit (e.g. 3e-8 Hz).
@@ -1945,8 +2003,11 @@ function _simplifyTermUnits(term, atomMap) {
   return { coeff: newCoeff, factors: new Map([[name, power]]) };
 }
 
-/** Merge terms with identical factor maps; fall back to SI equivalence for unit terms. */
-function _combineTerms(terms, atomMap) {
+/**
+ * Merge terms with identical factor maps; fall back to SI equivalence for unit terms.
+ * @param {{physicsChem?: boolean}} opts
+ */
+function _combineTerms(terms, atomMap, opts = {}) {
   const map = new Map();   // surfaceSig → term
   const siMap = new Map(); // siKey → surfaceSig
 
@@ -1957,14 +2018,14 @@ function _combineTerms(terms, atomMap) {
       continue;
     }
 
-    const si = _termToSISignature(t);
+    const si = _termToSISignature(t, opts);
     if (si !== null) {
       const siKey = _siSignatureKey(si.siUnits);
       const existSig = siMap.get(siKey);
       if (existSig !== undefined) {
         // SI-equivalent term exists — convert both to SI base units and combine
         const existTerm = map.get(existSig);
-        const existSI = _termToSISignature(existTerm);
+        const existSI = _termToSISignature(existTerm, opts);
         const siFactors = new Map(Object.entries(si.siUnits).map(([u, e]) => [u, e]));
         for (const u of siFactors.keys())
           if (!atomMap.has(u)) atomMap.set(u, { type: 'variable', name: u });
@@ -2227,14 +2288,16 @@ function _wrapUnitsInText(latex) {
  * Simplify an AST using canonical sum-of-products normalization.
  * Combines like terms and folds constants. Falls back to basic constant
  * folding if canonicalization fails (e.g. unsupported node types).
+ * @param {object} ast
+ * @param {{physicsChem?: boolean}} opts - pass physicsChem when called from units context
  */
-function simplifyAst(ast) {
+function simplifyAst(ast, opts = {}) {
   if (ast.type !== 'call') return ast;
   try {
     const atomMap  = new Map();
     const terms    = _toCanonical(ast, atomMap);
-    const reduced  = _combineTerms(terms, atomMap);
-    const unitSimp = reduced.map(t => _simplifyTermUnits(t, atomMap));
+    const reduced  = _combineTerms(terms, atomMap, opts);
+    const unitSimp = reduced.map(t => _simplifyTermUnits(t, atomMap, opts));
     const rebuilt  = _fromCanonical(unitSimp, atomMap);
     // Post-pass: clean up any residual mul(1,x), neg(neg(x)), etc.
     return _simplifyAstFallback(rebuilt);
@@ -2248,10 +2311,11 @@ function simplifyAst(ast) {
  * symbolic (non-unit) factors. Used by simplifyAstToBase.
  * @param {{coeff: number, factors: Map<string,number>}} term
  * @param {Map<string,object>} atomMap - atom name → AST node (mutated to add base unit entries)
+ * @param {{physicsChem?: boolean}} opts
  * @returns {{coeff: number, factors: Map<string,number>}}
  */
-function _expandTermToBaseUnits(term, atomMap) {
-  const si = _termToSISignature(term);
+function _expandTermToBaseUnits(term, atomMap, opts = {}) {
+  const si = _termToSISignature(term, opts);
   if (!si) return term; // contains symbolic non-unit variables — can't expand
   const entries = Object.entries(si.siUnits).filter(([, e]) => e !== 0);
   if (entries.length === 0) return { coeff: si.coeff, factors: new Map() };
@@ -2267,15 +2331,16 @@ function _expandTermToBaseUnits(term, atomMap) {
  * Like simplifyAst but expands all unit terms to SI base units instead of
  * collapsing them to named derived units (N, J, Pa, …).
  * @param {object} ast - AST node
+ * @param {{physicsChem?: boolean}} opts - pass physicsChem when called from units context
  * @returns {object} simplified AST with all units in SI base form
  */
-function simplifyAstToBase(ast) {
+function simplifyAstToBase(ast, opts = {}) {
   if (ast.type !== 'call') return ast;
   try {
     const atomMap = new Map();
     const terms   = _toCanonical(ast, atomMap);
-    const reduced = _combineTerms(terms, atomMap);
-    const expanded = reduced.map(t => _expandTermToBaseUnits(t, atomMap));
+    const reduced = _combineTerms(terms, atomMap, opts);
+    const expanded = reduced.map(t => _expandTermToBaseUnits(t, atomMap, opts));
     const rebuilt  = _fromCanonical(expanded, atomMap);
     return _simplifyAstFallback(rebuilt);
   } catch (_) {
@@ -2335,19 +2400,22 @@ function expandDerivatives(ast, varDefs, funcDefs) {
 /**
  * Evaluate all constant definitions in the analysis.
  * Iterates in dependency-depth order so all deps are available.
- * Stores results in analysis.constantValues.
+ *
+ * @param {Object} analysis - result of analyzeExpressions
+ * @returns {Map<string, number|object>} constantValues map (name → evaluated value)
  */
 function evaluateConstants(analysis) {
-  analysis.constantValues.clear();
+  const constantValues = new Map();
   const funcDefs = analysis.funcDefs || new Map();
   for (const c of analysis.constants) {
     try {
-      const val = evaluateAst(c.rhs, analysis.constantValues, funcDefs);
-      analysis.constantValues.set(c.name, val);
+      const val = evaluateAst(c.rhs, constantValues, funcDefs);
+      constantValues.set(c.name, val);
     } catch (e) {
       analysis.errors.set(c.exprId, e.message);
     }
   }
+  return constantValues;
 }
 
 // ── AST → GLSL code generation ──────────────────────────────────────────────
@@ -2585,19 +2653,21 @@ function compileGraphExpressions(expressions) {
     return classified;
   });
 
-  // 2. Analyze dependencies (bareExpr entries are ignored here)
+  // 2. Analyze dependencies (bareExpr entries are ignored here).
   const active = parsed.filter(p => p.kind !== 'disabled');
   const analysis = analyzeExpressions(active);
 
-  // 3. Evaluate constants
-  evaluateConstants(analysis);
+  // 3. Evaluate constants → returns a new Map.
+  // Stored on analysis so generateShaderCode / buildImplicitJsEvaluator can read it.
+  const constantValues = evaluateConstants(analysis);
+  analysis.constantValues = constantValues;
 
-  // 3c. Detect named point constants (e.g. A = (1, 2)) from constantValues.
+  // 4a. Detect named point constants (e.g. A = (1, 2)) from constantValues.
   // These are added to staticPoints for rendering; isDraggable is true when both
   // components are literal numbers (no sub-expressions).
   {
     const seenExprIds = new Set(analysis.staticPoints.map(p => p.exprId));
-    for (const [varName, val] of analysis.constantValues) {
+    for (const [varName, val] of constantValues) {
       if (!isPoint(val)) continue;
       const defEntry = analysis.defsMap.get(varName);
       if (!defEntry || defEntry.exprId == null) continue;
@@ -2608,11 +2678,11 @@ function compileGraphExpressions(expressions) {
     }
   }
 
-  // 3b. Deferred parametric detection: try to reduce each bareExpr to a point using
-  // fully-evaluated constantValues and funcDefs so all variable/function types are known.
+  // 4b. Classify bare expressions (parametric/point/standard function) now that
+  // constantValues and funcDefs are fully known.
   // Convert runtime point values {px,py} to AST point nodes for evaluateAstSymbolic.
   const symValueMap = new Map();
-  for (const [k, v] of analysis.constantValues) {
+  for (const [k, v] of constantValues) {
     if (typeof v === 'number') {
       symValueMap.set(k, { type: 'number', value: v });
     } else if (isPoint(v)) {
@@ -2634,11 +2704,11 @@ function compileGraphExpressions(expressions) {
         analysis.errors.set(exprId, 'Parametric expressions cannot use x or y');
         continue;
       }
-      // Static point: no free variables at all — evaluate both components and record
+      // Static point: no free variables at all — evaluate both components and record.
       if (!vars.has('t') && vars.size === 0) {
         try {
-          const xVal = evaluateAst(reducedAst.args[0], analysis.constantValues, analysis.funcDefs);
-          const yVal = evaluateAst(reducedAst.args[1], analysis.constantValues, analysis.funcDefs);
+          const xVal = evaluateAst(reducedAst.args[0], constantValues, analysis.funcDefs);
+          const yVal = evaluateAst(reducedAst.args[1], constantValues, analysis.funcDefs);
           analysis.staticPoints.push({ xVal, yVal, exprId, isDraggable: false, varName: null });
         } catch (e) {
           analysis.errors.set(exprId, e.message);
@@ -2667,7 +2737,7 @@ function compileGraphExpressions(expressions) {
       if (vars.has('x') && !vars.has('y') && !vars.has('t')) {
         // Test-evaluate to catch undefined functions/variables (e.g. g(x) where g is not defined)
         try {
-          const testVals = new Map(analysis.constantValues);
+          const testVals = new Map(constantValues);
           testVals.set('x', 0);
           evaluateAst(reducedAst, testVals, analysis.funcDefs);
         } catch (e) {
@@ -2683,7 +2753,7 @@ function compileGraphExpressions(expressions) {
     }
   }
 
-  // 4. Generate shader code for each implicit expression
+  // 5. Generate shader code for each implicit expression
   const renderExprs = [];
   const jsEvaluators = new Map();
 
@@ -2723,7 +2793,7 @@ function compileGraphExpressions(expressions) {
     });
   }
 
-  // 4b. Build renderExprs for standard functions (y = f(x) and bare f(x))
+  // 5b. Build renderExprs for standard functions (y = f(x) and bare f(x))
   for (const sf of (analysis.standardFuncs || [])) {
     const expr = expressions.find(e => e.id === sf.exprId);
     if (!expr) continue;
@@ -2738,7 +2808,7 @@ function compileGraphExpressions(expressions) {
     });
   }
 
-  // 5. Build evaluators for each parametric expression
+  // 5c. Build evaluators for each parametric expression
   for (const para of analysis.parametrics) {
     const expr = expressions.find(e => e.id === para.exprId);
     if (!expr) continue;
@@ -2763,7 +2833,7 @@ function compileGraphExpressions(expressions) {
     });
   }
 
-  // 6. Emit static point entries
+  // 5d. Emit static point entries
   for (const pt of analysis.staticPoints) {
     const expr = expressions.find(e => e.id === pt.exprId);
     if (!expr || !expr.enabled) continue;
@@ -2882,6 +2952,120 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
 // ── Calculator expression evaluation ────────────────────────────────────────
 
 /**
+ * Step 1a: Scan expressions for variable definitions (name = expr).
+ * First definition for a name wins; later ones are treated as equations in Step 3.
+ * Populates ctx.allDefs.
+ *
+ * @param {Array} expressions
+ * @param {{ allDefs: Map }} ctx
+ */
+function _collectCalcDefinitions(expressions, ctx) {
+  for (const e of expressions) {
+    const trimmed = e.latex.trim();
+    if (!trimmed) continue;
+    const op = findCalcOperatorAtDepth0(trimmed);
+    if (!op || op.op !== '=') continue;
+    const lhs = trimmed.slice(0, op.idx).trim();
+    // Must be a single identifier (letter or supported Greek, optional subscript)
+    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|phi|Phi|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue;
+    try {
+      const lhsAst = parseLatexToAst(lhs);
+      if (lhsAst.type !== 'variable') continue;
+      const varName = lhsAst.name; // normalized: 'x_1' for both 'x_1' and 'x_{1}'
+      if (!ctx.allDefs.has(varName))
+        ctx.allDefs.set(varName, { rhsStr: trimmed.slice(op.idx + 1).trim(), exprId: e.id, enabled: e.enabled });
+    } catch (_) { continue; }
+  }
+}
+
+/**
+ * Step 1b: Scan expressions for function definitions (f(x) = body).
+ * Runs DFS cycle detection and removes cyclic functions.
+ * Populates ctx.funcDefs and ctx.funcErrors.
+ *
+ * @param {Array} expressions
+ * @param {{ funcDefs: Map, funcErrors: Map }} ctx
+ */
+function _collectCalcFuncDefs(expressions, ctx) {
+  const rawFuncDefs = new Map(); // collect before cycle check
+  for (const e of expressions) {
+    const trimmed = e.latex.trim();
+    if (!trimmed) continue;
+    const op = findCalcOperatorAtDepth0(trimmed);
+    if (!op || op.op !== '=') continue;
+    const lhsStr = trimmed.slice(0, op.idx).trim();
+    const rhsStr = trimmed.slice(op.idx + 1).trim();
+    try {
+      const lhsAst = parseLatexToAst(lhsStr);
+      if (lhsAst.type !== 'call') continue;
+      if (BUILTIN_CALL_NAMES.has(lhsAst.name)) continue; // e.g. k^t parses as pow(k,t)
+      if (!lhsAst.args.every(a => a.type === 'variable')) continue;
+      if (rawFuncDefs.has(lhsAst.name)) continue; // first definition wins
+      rawFuncDefs.set(lhsAst.name, { params: lhsAst.args.map(a => a.name), body: parseLatexToAst(rhsStr), exprId: e.id });
+    } catch (err) {
+      ctx.funcErrors.set(e.id, err.message);
+    }
+  }
+  const { validFuncDefs, cycleErrors } = _detectFuncCycles(rawFuncDefs);
+  for (const [exprId, error] of cycleErrors) ctx.funcErrors.set(exprId, error);
+  ctx.funcDefs = validFuncDefs;
+}
+
+/**
+ * Step 2: Evaluate variable definitions in dependency order using iterative
+ * resolution. Stops when no new values are added or max iterations reached.
+ * Mutates ctx.allValues and ctx.unitValues. Returns { varAstDefs, evalErrors }.
+ *
+ * @param {{ allDefs, funcDefs, allValues, unitValues, userResolved, physicsChem }} ctx
+ * @param {{ useUnits: boolean, useSymbolic: boolean }} opts
+ * @returns {{ varAstDefs: Map, evalErrors: Map }}
+ */
+function _resolveCalcValues(ctx, { useUnits, useSymbolic }) {
+  const { allDefs, funcDefs, allValues, unitValues, userResolved, physicsChem } = ctx;
+  const evalErrors = new Map(); // variable name → last error string
+  const maxIter = allDefs.size + 1;
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    for (const [name, def] of allDefs) {
+      if (userResolved.has(name)) continue; // already resolved
+      try {
+        const rhs = parseLatexToAst(def.rhsStr);
+        if (useUnits) {
+          const val = evaluateAstSymbolic(rhs, unitValues, funcDefs, { useSymbolic, physicsChem });
+          // Store as number in allValues (non-units path) if purely numeric.
+          const numericVal = val.type === 'number' ? val.value : NaN;
+          if (!isNaN(numericVal)) allValues.set(name, numericVal);
+          unitValues.set(name, val.type === 'number' ? val.value : val);
+        } else {
+          allValues.set(name, evaluateAst(rhs, allValues, funcDefs));
+        }
+        userResolved.add(name);
+        changed = true;
+        evalErrors.delete(name);
+      } catch (err) {
+        evalErrors.set(name, err.message);
+      }
+    }
+    if (!changed) break;
+  }
+
+  // Build varAstDefs: variable → definition AST for derivative expansion in Step 3.
+  // Includes defs whose RHS has free variables or is a point (so d/db a expands correctly).
+  // Pure scalar constants (e.g. b=3) are excluded — they stay numeric during differentiation.
+  const varAstDefs = new Map();
+  for (const [name, def] of allDefs) {
+    if (!userResolved.has(name)) continue;
+    try {
+      const rhsAst = parseLatexToAst(def.rhsStr);
+      if (collectVariables(rhsAst).size > 0) varAstDefs.set(name, rhsAst);
+    } catch (_) {}
+  }
+
+  return { varAstDefs, evalErrors };
+}
+
+/**
  * Evaluate all expressions in a calculator box.
  * Returns Map<exprId, { value, boolValue, error }>.
  *
@@ -2894,170 +3078,55 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
  * - Equalities where LHS is not a single identifier produce
  *   { boolValue: true|false } using epsilon=1e-9 for floating-point tolerance
  */
-function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false, useUnits = false, useSymbolic = false, useBaseUnits = false } = {}) {
-  const results  = new Map();   // exprId → { value } | { boolValue } | { error } | { unitAst, warnings }
-  const allValues = new Map();  // variable name → number (includes disabled defs)
+function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, usePhysicsBasic = false, usePhysicsEM = false, usePhysicsChem = false, useUnits = false, useSymbolic = false, useBaseUnits = false, preloadedValues = null } = {}) {
+  const results = new Map(); // exprId → { value } | { boolValue } | { error } | { unitAst, warnings }
 
-  // Build the active constants list from enabled groups.
-  // usePhysicsConstants is the legacy flag (enables all groups).
+  // Build active constants list (usePhysicsConstants is the legacy all-groups flag).
   const activeConstants = [
     ...(usePhysicsConstants || usePhysicsBasic ? PHYSICS_CONSTANTS_BASIC : []),
     ...(usePhysicsConstants || usePhysicsEM    ? PHYSICS_CONSTANTS_EM    : []),
     ...(usePhysicsConstants || usePhysicsChem  ? PHYSICS_CONSTANTS_CHEM  : []),
   ];
 
-  // Pre-populate with physics constants so user expressions can reference them.
-  // User definitions evaluated in Step 2 take priority and will overwrite any
-  // physics constant whose name the user explicitly redefines.
+  // Initialise value maps with physics constants and any preloaded graph-context values.
+  // User definitions resolved in Step 2 take priority and can override physics constants.
+  const allValues = new Map();
+  if (preloadedValues) for (const [k, v] of preloadedValues) allValues.set(k, v);
   for (const pc of activeConstants) allValues.set(pc.varName, pc.value);
 
-  // In units mode, build a parallel value map that stores number | ASTNode values.
-  // Derived unit symbols are kept as symbolic atoms (not expanded to base units).
-  // Physics constants are stored as unit ASTs (value × base-unit expression).
-  _activePhysicsChem = !!(usePhysicsConstants || usePhysicsChem);
+  const physicsChem = !!(usePhysicsConstants || usePhysicsChem);
   let unitValues = null;
   if (useUnits) {
-    unitValues = new Map(allValues); // start with same physics constants (as numbers)
-    // Override physics constants with unit-carrying ASTs (value × SI base units).
-    for (const pc of activeConstants) {
+    unitValues = new Map(allValues); // start with same numeric physics constants
+    for (const pc of activeConstants)
       unitValues.set(pc.varName, buildConstantUnitAst(pc.value, pc.unitDims || {}));
-    }
-    // Inject liter units as symbolic atoms when chemistry mode is active.
-    if (_activePhysicsChem) {
+    if (physicsChem)
       for (const name of ['μL', 'mL', 'L'])
         if (!unitValues.has(name)) unitValues.set(name, { type: 'variable', name });
-    }
   }
 
-  // Track which names have been resolved from *user* definitions (not just
-  // pre-populated from physics constants), so Step 2 can override a physics
-  // constant when the user explicitly defines a variable with the same name.
-  const userResolved = new Set();
+  // Build evaluation context shared across all steps.
+  const ctx = {
+    allDefs:      new Map(),    // populated by Step 1a
+    funcDefs:     new Map(),    // populated by Step 1b
+    funcErrors:   new Map(),    // populated by Step 1b
+    allValues,                  // pre-populated above, extended by Step 2
+    unitValues,                 // pre-populated above, extended by Step 2
+    userResolved: new Set(),    // tracks names resolved from user definitions
+    physicsChem,
+  };
 
-  // ── Step 1a: Collect all variable definitions (enabled AND disabled) ──────────
-  // First definition for a name wins; subsequent redefinitions are ignored for
-  // value resolution (they'll be treated as equations when enabled).
-  const allDefs = new Map(); // parsed variable name → { rhsStr, exprId, enabled }
-  for (const e of expressions) {
-    const trimmed = e.latex.trim();
-    if (!trimmed) continue;
-    const op = findCalcOperatorAtDepth0(trimmed);
-    if (!op || op.op !== '=') continue;
-    const lhs = trimmed.slice(0, op.idx).trim();
-    if (!/^(?:[a-zA-Z]|\\(?:alpha|beta|gamma|delta|epsilon|theta|lambda|mu|sigma|rho|phi|Phi|omega|hbar))(?:_(?:[a-zA-Z0-9]|\{[^}]*\}))?$/.test(lhs)) continue; // must be a single variable (letter or Greek, optional subscript)
-    try {
-      const lhsAst = parseLatexToAst(lhs);
-      if (lhsAst.type !== 'variable') continue;
-      const varName = lhsAst.name; // normalized: 'x_1' for both 'x_1' and 'x_{1}'
-      if (!allDefs.has(varName)) {
-        allDefs.set(varName, { rhsStr: trimmed.slice(op.idx + 1).trim(), exprId: e.id, enabled: e.enabled });
-      }
-    } catch (_) { continue; }
-  }
+  // ── Step 1a: Collect variable definitions ──────────────────────────────────
+  _collectCalcDefinitions(expressions, ctx);
 
-  // ── Step 1b: Collect function definitions ────────────────────────────────────
-  // f(x) = body — params must not conflict with variable definitions.
-  const funcDefs  = new Map(); // name → { params, body: AST, exprId }
-  const funcErrors = new Map(); // exprId → error string
-  for (const e of expressions) {
-    const trimmed = e.latex.trim();
-    if (!trimmed) continue;
-    const op = findCalcOperatorAtDepth0(trimmed);
-    if (!op || op.op !== '=') continue;
-    const lhsStr = trimmed.slice(0, op.idx).trim();
-    const rhsStr = trimmed.slice(op.idx + 1).trim();
-    try {
-      const lhsAst = parseLatexToAst(lhsStr);
-      if (lhsAst.type !== 'call') continue;              // not a function-call pattern
-      if (BUILTIN_CALL_NAMES.has(lhsAst.name)) continue; // e.g. k^t parses as pow(k,t) — not a funcdef
-      if (!lhsAst.args.every(a => a.type === 'variable')) continue; // args must be plain variables
-      const funcName = lhsAst.name;
-      const params = lhsAst.args.map(a => a.name);
-      if (funcDefs.has(funcName)) continue; // first definition wins
-      funcDefs.set(funcName, { params, body: parseLatexToAst(rhsStr), exprId: e.id });
-    } catch (err) {
-      funcErrors.set(e.id, err.message);
-    }
-  }
+  // ── Step 1b: Collect function definitions (with cycle detection) ───────────
+  _collectCalcFuncDefs(expressions, ctx);
 
-  // Cycle detection for function definitions (DFS)
-  {
-    const funcResolved  = new Map();
-    const funcResolving = new Set();
-    function resolveFunc(name) {
-      if (funcResolved.has(name)) return funcResolved.get(name);
-      if (!funcDefs.has(name)) return { error: null };
-      if (funcResolving.has(name))
-        return { error: `Circular function dependency on '${name}'` };
-      funcResolving.add(name);
-      const def = funcDefs.get(name);
-      const calledFuncs = collectFunctionCalls(def.body, funcDefs);
-      let error = null;
-      for (const calledName of calledFuncs) {
-        const r = resolveFunc(calledName);
-        if (r.error) { error = r.error; break; }
-      }
-      funcResolving.delete(name);
-      const result = { error };
-      funcResolved.set(name, result);
-      return result;
-    }
-    for (const [name, def] of funcDefs) {
-      const r = resolveFunc(name);
-      if (r.error) {
-        funcErrors.set(def.exprId, r.error);
-        funcDefs.delete(name);
-      }
-    }
-  }
+  // ── Step 2: Evaluate definitions in dependency order ───────────────────────
+  const { varAstDefs, evalErrors } = _resolveCalcValues(ctx, { useUnits, useSymbolic });
 
-  // Build a set of all funcDef exprIds so Step 3 can identify them quickly
+  const { allDefs, funcDefs, funcErrors } = ctx;
   const funcDefExprIds = new Set([...funcDefs.values()].map(d => d.exprId));
-
-  // ── Step 2: Evaluate definitions in dependency order ────────────────────────
-  // Iterative resolution: each pass evaluates definitions whose dependencies are
-  // now known. Stops when no new values are added or max iterations reached.
-  const evalErrors = new Map(); // name → last error message
-  const maxIter = allDefs.size + 1;
-  for (let iter = 0; iter < maxIter; iter++) {
-    let changed = false;
-    for (const [name, def] of allDefs) {
-      if (userResolved.has(name)) continue; // already resolved from user definition
-      try {
-        const rhs = parseLatexToAst(def.rhsStr);
-        if (useUnits) {
-          const val = evaluateAstSymbolic(rhs, unitValues, funcDefs, { useSymbolic });
-          // Store as number in allValues (for non-units paths) if purely numeric,
-          // and as number|AST in unitValues for units-mode paths.
-          const numericVal = val.type === 'number' ? val.value : NaN;
-          if (!isNaN(numericVal)) allValues.set(name, numericVal);
-          unitValues.set(name, val.type === 'number' ? val.value : val);
-        } else {
-          const val = evaluateAst(rhs, allValues, funcDefs);
-          allValues.set(name, val); // overrides any pre-populated physics constant
-        }
-        userResolved.add(name);
-        changed = true;
-        evalErrors.delete(name);
-      } catch (err) {
-        evalErrors.set(name, err.message);
-      }
-    }
-    if (!changed) break;
-  }
-
-  // Build varAstDefs: variable name → definition AST for derivative expansion.
-  // Only includes successfully-resolved definitions whose RHS contains variables
-  // (pure numeric constants like b=3 are excluded so they stay symbolic during
-  // differentiation and are substituted numerically at evaluation time).
-  const varAstDefs = new Map();
-  for (const [name, def] of allDefs) {
-    if (!userResolved.has(name)) continue;
-    try {
-      const rhsAst = parseLatexToAst(def.rhsStr);
-      if (collectVariables(rhsAst).size > 0) varAstDefs.set(name, rhsAst);
-    } catch (_) {}
-  }
 
   // ── Step 3: Evaluate all expressions (enabled and disabled) and record results
   for (const e of expressions) {
@@ -3081,11 +3150,11 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
       const processed = varAstDefs.size > 0 ? expandDerivatives(ast, varAstDefs, funcDefs) : ast;
       if (useUnits) {
         const warnings = [];
-        const val = evaluateAstSymbolic(processed, unitValues, funcDefs, { useSymbolic, warnings });
+        const val = evaluateAstSymbolic(processed, unitValues, funcDefs, { useSymbolic, warnings, physicsChem });
         if (val.type === 'number') return { value: val.value };
         if (val.type === 'point') return { pointAst: val };
         let unitAst = val;
-        try { unitAst = useBaseUnits ? simplifyAstToBase(val) : simplifyAst(val); } catch (_) {}
+        try { unitAst = useBaseUnits ? simplifyAstToBase(val, { physicsChem }) : simplifyAst(val, { physicsChem }); } catch (_) {}
         return { unitAst, warnings };
       }
       const val = evaluateAst(processed, allValues, funcDefs);
@@ -3128,7 +3197,7 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
           const v = unitValues.get(lhsVarName);
           if (typeof v === 'number') results.set(e.id, { value: v });
           else if (v && v.type === 'point') results.set(e.id, { pointAst: v });
-          else { let unitAst = v; try { unitAst = useBaseUnits ? simplifyAstToBase(v) : simplifyAst(v); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
+          else { let unitAst = v; try { unitAst = useBaseUnits ? simplifyAstToBase(v, { physicsChem }) : simplifyAst(v, { physicsChem }); } catch (_) {} results.set(e.id, { unitAst, warnings: [] }); }
         } else if (!useUnits && allValues.has(lhsVarName)) {
           const v = allValues.get(lhsVarName);
           if (isPoint(v)) results.set(e.id, { pointValue: v });

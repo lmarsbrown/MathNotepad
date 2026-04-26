@@ -241,6 +241,26 @@ function enterGraphMode(boxId) {
   renderer.canvas.style.width  = '100%';
   renderer.canvas.style.height = '100%';
 
+  // 2D overlay for axis labels (pointer-events:none so pan/zoom still works)
+  const labelCanvas = document.createElement('canvas');
+  labelCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
+  previewContent.appendChild(labelCanvas);
+  renderer._labelCanvas = labelCanvas;
+
+  // Home button: resets view to default bounds
+  const homeBtn = document.createElement('button');
+  homeBtn.id = 'graph-home-btn';
+  homeBtn.title = 'Reset view';
+  homeBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+    <path d="M10 2.5 L2 9 H4.5 V17 H8.5 V12.5 H11.5 V17 H15.5 V9 H18 Z"/>
+  </svg>`;
+  homeBtn.addEventListener('click', () => {
+    renderer.xMin = -5; renderer.xMax = 5;
+    renderer.yMin = -5; renderer.yMax = 5;
+    scheduleGraphRender();
+  });
+  previewContent.appendChild(homeBtn);
+
   // Set up re-render callback for pan/zoom
   renderer._onRender = () => scheduleGraphRender();
 
