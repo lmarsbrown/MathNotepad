@@ -1495,6 +1495,7 @@ function matchDerivedUnit(sig) {
   return null;
 }
 
+let astCount = 0;
 /**
  * Symbolically evaluate an AST, substituting numeric values but leaving unit
  * and (optionally) free-variable symbols intact. Returns a simplified AST node.
@@ -1672,7 +1673,10 @@ function differentiateAst(ast, varName, funcDefs = new Map(), valueMap = null) {
 
   if (ast.type === 'member') {
     // d/dvar (P.x) = (dP/dvar).x
-    return { type: 'member', arg: diff(ast.arg), field: ast.field };
+    const dArg = diff(ast.arg);
+    // If the inner derivative is scalar 0, the component is also 0
+    if (dArg.type === 'number' && dArg.value === 0) return n0;
+    return { type: 'member', arg: dArg, field: ast.field };
   }
 
   if (ast.type === 'primecall') {
@@ -1705,7 +1709,12 @@ function differentiateAst(ast, varName, funcDefs = new Map(), valueMap = null) {
       return call('div',
         call('sub', call('mul', da, b), call('mul', a, db)),
         call('pow', b, n2));
-    case 'pow': // general power: a^b * (db*ln(a) + b*da/a)
+    case 'pow':
+      if (b.type === 'number') {
+        // Simple power rule: n * a^(n-1) * da — avoids ln/division, numerically stable when a=0
+        return call('mul', call('mul', b, call('pow', a, num(b.value - 1))), da);
+      }
+      // General power: a^b * (db*ln(a) + b*da/a)
       return call('mul', { ...ast },
         call('add',
           call('mul', db, call('ln', a)),
@@ -1745,10 +1754,17 @@ function differentiateAst(ast, varName, funcDefs = new Map(), valueMap = null) {
 // are the same expression and their exponents can be added.
 // ---------------------------------------------------------------------------
 
-/** Return a stable string key for an atom node (variable or call). */
+/** Return a stable string key for an atom node (variable, call, or member). */
 function _atomKey(ast, atomMap) {
   if (ast.type === 'variable') return ast.name;
   if (ast.type === 'number') throw new Error('numbers are not atoms');
+  if (ast.type === 'member') {
+    const innerSimp = simplifyAst(ast.arg);
+    const innerKey = _astCanonicalString(innerSimp, atomMap);
+    const key = `member(${innerKey}).${ast.field}`;
+    atomMap.set(key, { ...ast, arg: innerSimp });
+    return key;
+  }
   // Recursively simplify each argument so that e.g. sin(x+2x) → sin(3x).
   const simplifiedArgs = ast.args.map(a => simplifyAst(a));
   const argKeys = simplifiedArgs.map(a => _astCanonicalString(a, atomMap));
@@ -1761,6 +1777,7 @@ function _atomKey(ast, atomMap) {
 function _astCanonicalString(ast, atomMap) {
   if (ast.type === 'number') return String(ast.value);
   if (ast.type === 'variable') return ast.name;
+  if (ast.type === 'member') return `member(${_astCanonicalString(ast.arg, atomMap)}).${ast.field}`;
   const argStrs = ast.args.map(a => _astCanonicalString(a, atomMap));
   return `${ast.name}(${argStrs.join(',')})`;
 }
@@ -1793,6 +1810,10 @@ function _toCanonical(ast, atomMap) {
     return [{ coeff: 1, factors: new Map([[key, 1]]) }];
   }
 
+  if (ast.type === 'member') {
+    const key = _atomKey(ast, atomMap);
+    return [{ coeff: 1, factors: new Map([[key, 1]]) }];
+  }
   if (ast.type !== 'call') throw new Error('unsupported node type');
 
   const { name, args } = ast;
@@ -2113,6 +2134,15 @@ function _fromCanonical(terms, atomMap) {
 
 /** Fallback: basic constant folding, single bottom-up pass. */
 function _simplifyAstFallback(ast) {
+  if (ast.type === 'point') return { type: 'point', args: ast.args.map(_simplifyAstFallback) };
+  if (ast.type === 'member') {
+    const inner = _simplifyAstFallback(ast.arg);
+    // member of a point literal → extract component
+    if (inner.type === 'point') return ast.field === 'x' ? inner.args[0] : inner.args[1];
+    // member of a scalar 0 → 0 (arises from diff of a constant point variable)
+    if (inner.type === 'number' && inner.value === 0) return inner;
+    return { type: 'member', arg: inner, field: ast.field };
+  }
   if (ast.type !== 'call') return ast;
 
   const args = ast.args.map(_simplifyAstFallback);
@@ -2292,6 +2322,14 @@ function _wrapUnitsInText(latex) {
  * @param {{physicsChem?: boolean}} opts - pass physicsChem when called from units context
  */
 function simplifyAst(ast, opts = {}) {
+  // Simplify point components independently — canonical algebra doesn't apply to vectors.
+  if (ast.type === 'point') return { type: 'point', args: ast.args.map(a => simplifyAst(a, opts)) };
+  if (ast.type === 'member') {
+    const inner = simplifyAst(ast.arg, opts);
+    if (inner.type === 'point') return ast.field === 'x' ? inner.args[0] : inner.args[1];
+    if (inner.type === 'number' && inner.value === 0) return inner;
+    return { type: 'member', arg: inner, field: ast.field };
+  }
   if (ast.type !== 'call') return ast;
   try {
     const atomMap  = new Map();
@@ -2335,6 +2373,13 @@ function _expandTermToBaseUnits(term, atomMap, opts = {}) {
  * @returns {object} simplified AST with all units in SI base form
  */
 function simplifyAstToBase(ast, opts = {}) {
+  if (ast.type === 'point') return { type: 'point', args: ast.args.map(a => simplifyAstToBase(a, opts)) };
+  if (ast.type === 'member') {
+    const inner = simplifyAstToBase(ast.arg, opts);
+    if (inner.type === 'point') return ast.field === 'x' ? inner.args[0] : inner.args[1];
+    if (inner.type === 'number' && inner.value === 0) return inner;
+    return { type: 'member', arg: inner, field: ast.field };
+  }
   if (ast.type !== 'call') return ast;
   try {
     const atomMap = new Map();
