@@ -434,8 +434,15 @@ async function saveCurrentProject() {
           .catch(err => console.warn('Disk write failed:', err));
       }
       renderProjectsList();
+      return;
     }
-  } else {
+    // Project ID was set but project not found — reset to unsaved state and fall through
+    console.warn('saveCurrentProject: currentProjectId', currentProjectId, 'not found in projects list. Resetting to unsaved state.');
+    currentProjectId = null;
+    projectTitleLabel.textContent = 'Untitled';
+  }
+  // No project ID or stale ID cleared above — prompt to create new project
+  {
     const title = prompt('Project title:')?.trim();
     if (!title) return;
     const id = Date.now().toString();
@@ -585,4 +592,46 @@ function renameProject(id) {
     projectTitleLabel.textContent = newTitle;
   }
   renderProjectsList();
+}
+
+/**
+ * Debug function to inspect storage state. Call from browser console: debugStorageState()
+ * Returns object with all relevant state for diagnosing project persistence issues.
+ */
+function debugStorageState() {
+  const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+  const projects = loadProjects();
+  const matchingProject = draft?.projectId ? projects.find(p => p.id === draft.projectId) : null;
+
+  const state = {
+    currentProjectId,
+    displayedTitle: projectTitleLabel.textContent,
+    isDirty,
+    draft: draft ? {
+      projectId: draft.projectId,
+      latexLength: draft.latex?.length ?? 0,
+      latexPreview: draft.latex?.slice(0, 100) ?? null,
+    } : null,
+    projectsCount: projects.length,
+    projects: projects.map(p => ({ id: p.id, title: p.title, onDisk: !!p.onDisk })),
+    draftProjectFound: !!matchingProject,
+    matchingProjectTitle: matchingProject?.title ?? null,
+    workspaceConnected: !!currentWorkspaceHandle,
+    workspaceName: localStorage.getItem(WORKSPACE_NAME_KEY),
+  };
+
+  console.log('=== Storage Debug State ===');
+  console.log('currentProjectId:', currentProjectId);
+  console.log('displayedTitle:', state.displayedTitle);
+  console.log('isDirty:', isDirty);
+  console.log('draft.projectId:', draft?.projectId);
+  console.log('draft.latexLength:', state.draft?.latexLength);
+  console.log('draftProjectFound:', state.draftProjectFound);
+  if (!state.draftProjectFound && draft?.projectId) {
+    console.warn('WARNING: draft.projectId does not match any saved project!');
+  }
+  console.log('projects:', state.projects);
+  console.log('Full state object:', state);
+
+  return state;
 }

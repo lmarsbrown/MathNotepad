@@ -1803,6 +1803,12 @@ function init() {
       const proj = loadProjects().find(p => p.id === currentProjectId);
       if (proj) {
         projectTitleLabel.textContent = proj.title;
+      } else {
+        console.warn('init: draft.projectId', currentProjectId, 'not found in projects list. Resetting to unsaved state.');
+        currentProjectId = null;
+        projectTitleLabel.textContent = 'Untitled';
+      }
+      if (proj) {
         // Passively try to restore the global workspace handle (queryPermission needs no gesture)
         idbGetWorkspace().then(async handle => {
           if (!handle) return;

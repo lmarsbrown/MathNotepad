@@ -1,0 +1,101 @@
+Note to claude: this is currently a work in progress spec that I am planning to implement later. Take no action based on the contents of this file
+
+I want to do a complete rewrite of the math system to make it more robust.
+
+There are two things that you will need to do with an expression: evaluate it, or flatten it and compile it into a shader or similar. 
+
+The goal is to make a system that is easy to extend and can handle arbitrary algebraic objects. Right now, the two main objects I am interested in are units (like for physics), and 2d points, but I want to be able to easily add things like imaginary numbers and higher dimensional vectors in the future. My first thought was to represent the system as a sum of unit vectors like the following:
+
+1x + 2y + 3m
+
+Then to evaluate, you can have functions that will take these vectors as an input and give a new vector or an error as an output. The two most important of these operations are the sum operation, which appends the list of components to eachother, and then combines like terms. The second important operation is multiplication. This would use the distributive property to multiply all of the components together, simplify all of the unit vectors, and then combine like terms. By simplifying the unit vectors I mean doing something like the following algorithm:
+
+This step should first reorder the components in a standard order. If any components are anti-commutative with eachother this should be taken into account, and likewise, if they are not commutative they should not commute. After reordering, the components that are the same should be consolidated together (their exponents summed). After that, if any components have special properties with respect to exponentiation, that should be taken into account (for example i^2 = -1). 
+
+Any operation can be implemented as a function that takes in N vectors as an input, and then returns a vector as an output. Then expressions can take the form of expressions trees where each node in the tree applies one of these functions. This system has a couple of complications:
+
+First, it needs to be possible to flatten these expressions into a form that can be executed on the GPU (for graphing). My solution to this is that instead of having numeric scalar coefficents, we have coefficients that are a scalar expression. That way, you can do this vector evaluation pass once, and it will give an expression that maps from all of the scalar components in the input, to the scalar components in the output. If the output components are compatible with a graph type, then they can be put into the glsl script as scalar expression, eliminating the need to gpu unit evaluation. 
+
+
+
+Each expression should be a node in a tree. There should be (broadly) 3 types of nodes: input nodes, internal nodes, and output nodes:
+
+Input nodes are variables that are defined in a way that they are not depenendent on any other variables or functions. 
+
+Internal nodes can be thought of as functions in that they map from a number of inputs to an output. A variable that is defined in terms of other variable is an internal node. Likewise, a bare expression is also (generally) and internal node. 
+
+Output nodes are nodes that produce some kind of graph or other output that needs expression flattening. 
+
+
+
+Adding an expression:
+
+1. Parse the expression and determine if it is an equality, an assignemnt, or a bare expression.
+
+2. If its an assigment or bare expression:
+
+Parse the (right hand side if its an assigment) expression and figure out what variables/functions it depends on. For each of its dependencies, add the new expression to the dependency's list of dependents. 
+
+If it depends on things that are not defined, add the list of unmet dependencies as a field of the expression, and then add the expression to the list of orphan expressions. 
+
+
+
+If its an assignment:
+Check to see if the variable or function that is being assigned already exists. If it does, it should check if it has a higher priority than the duplicate. If it has a higher priority, the other expression should be deleted(using the delete function), marked as duplicate, and added to the duplicate list. In this case, the rest of the steps in this function should be followed as if the new expression was not a duplicate. If the priority is lower, the new expression should be added to the duplicate expressions list and then the function should return. 
+
+Next, the expression should be added to the expressions map. 
+
+Next it should call the updateOrphans() function. 
+
+Next it should call the 
+
+
+Evaluate form function:
+This should evaluate the expression vectorally (as described above), generating a list of unit vectors with scalar expression coefficients. The form of the 
+The expression should then check this newly generated form against the cached form. If it is different, it should update the cached form and then call the evaluate form function on all of it's dependents.
+
+
+Update orphans:
+This function should 
+
+Edit Expression:
+
+Where we are leaving off:
+
+Weird things: 
+1. You only actually need to do vector flattening for expressions that depend on graph variables. 
+2. When do you call the function to update the form of later expressions. I think the answer is either when you change units, or when you change the x/y/t/etc expression? This kind of makes me think that it might make more sense to have these variables as units/vectors somehow. Wait actually, that doesn't make sense, because then other variables could get pulled into that "unit" which would cause things to get messy. 
+3. How do you handle form evaluation for functions
+
+Each expression should be considered to have multiple inputs and multiple outputs. Each component of each input variable is an input, and each component is an output. The type and number of outputs determines the form.
+
+Fundemental data type:
+One of the key changes to this new system is that it will be entirely based on a new datatype. Instead of numbers, everything is a vector.
+
+Each vector is composed up of a list of components. This represents a sum of components. Each component should have a scalar coefficient, and an ordered list of unit vectors paired with their exponents. Multiply two vectors can be done using the distributive property, and adding can be done by simply appending the lists togehter. 
+
+
+After multiplying there needs to be a component consolidation step. This step should first reorder the components in a standard order. If any components are anti-commutative with eachother this should be taken into account, and likewise, if they are not commutative they should not commute. After reordering, the components that are the same should be consolidated together (their exponents summed). After that, if any components have special properties with respect to exponentiation, that should be taken into account (for example i^2 = -1). 
+
+Flattening for glsl:
+I am not entirely sure how to do this. I think it probably makes sense to run the evaluations as vectors in glsl. 
+
+All operator nodes should have an evaluate function that calls the evaluate function of their children and uses those values 
+
+All equations should have an evaluate that pushes their output to their parents to update them.
+
+Multiplying two vectors should use the distributive property. 
+
+
+type Vector{
+    Fields{
+        CoefficientExpression: 
+    }
+}
+
+class CalcSystem{
+    modifyExpression()
+    addExpression()
+    deleteExpression()
+
+}

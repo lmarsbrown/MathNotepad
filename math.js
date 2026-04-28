@@ -86,116 +86,107 @@ const DERIVED_UNIT_EXPANSIONS = {
 // Unit names only valid when chemistry mode is active (L conflicts with length variable).
 const CHEM_ONLY_UNITS = new Set(['μL', 'mL', 'L']);
 
-// Scaled / prefixed unit atoms. Same format as DERIVED_UNIT_EXPANSIONS.
-// Base units (m, s, kg, A) and unscaled derived units (N, J, Pa, …) are NOT duplicated here.
-const SCALED_UNIT_ATOMS = {
-  // Length
-  nm:  { coeff: 1e-9,      units: { m: 1 } },
-  μm:  { coeff: 1e-6,      units: { m: 1 } },
-  mm:  { coeff: 1e-3,      units: { m: 1 } },
-  cm:  { coeff: 0.01,      units: { m: 1 } },
-  km:  { coeff: 1e3,       units: { m: 1 } },
-  // Time (small)
-  ns:  { coeff: 1e-9,      units: { s: 1 } },
-  μs:  { coeff: 1e-6,      units: { s: 1 } },
-  ms:  { coeff: 1e-3,      units: { s: 1 } },
-  // Time (large, non-SI)
-  min: { coeff: 60,        units: { s: 1 } },
-  hr:  { coeff: 3600,      units: { s: 1 } },
-  day: { coeff: 86400,     units: { s: 1 } },
-  yr:  { coeff: 3.15576e7, units: { s: 1 } },
-  // Mass (relative to kg)
-  μg:  { coeff: 1e-9,      units: { kg: 1 } },
-  mg:  { coeff: 1e-6,      units: { kg: 1 } },
-  g:   { coeff: 1e-3,      units: { kg: 1 } },
-  // Current (relative to A)
-  μA:  { coeff: 1e-6,      units: { A: 1 } },
-  mA:  { coeff: 1e-3,      units: { A: 1 } },
-  // Energy (relative to J = kg·m²·s⁻²)
-  nJ:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -2 } },
-  μJ:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2 } },
-  mJ:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2 } },
-  kJ:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -2 } },
-  MJ:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -2 } },
-  GJ:  { coeff: 1e9,       units: { kg: 1, m: 2, s: -2 } },
-  TJ:  { coeff: 1e12,      units: { kg: 1, m: 2, s: -2 } },
-  PJ:  { coeff: 1e15,      units: { kg: 1, m: 2, s: -2 } },
-  // Power (relative to W = kg·m²·s⁻³)
-  nW:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -3 } },
-  μW:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3 } },
-  mW:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3 } },
-  kW:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -3 } },
-  MW:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -3 } },
-  GW:  { coeff: 1e9,       units: { kg: 1, m: 2, s: -3 } },
-  TW:  { coeff: 1e12,      units: { kg: 1, m: 2, s: -3 } },
-  // Force (relative to N = kg·m·s⁻²)
-  mN:  { coeff: 1e-3,      units: { kg: 1, m: 1, s: -2 } },
-  kN:  { coeff: 1e3,       units: { kg: 1, m: 1, s: -2 } },
-  MN:  { coeff: 1e6,       units: { kg: 1, m: 1, s: -2 } },
-  // Pressure (relative to Pa = kg·m⁻¹·s⁻²)
-  kPa: { coeff: 1e3,       units: { kg: 1, m: -1, s: -2 } },
-  MPa: { coeff: 1e6,       units: { kg: 1, m: -1, s: -2 } },
-  GPa: { coeff: 1e9,       units: { kg: 1, m: -1, s: -2 } },
-  // Frequency (relative to Hz = s⁻¹)
-  kHz: { coeff: 1e3,       units: { s: -1 } },
-  MHz: { coeff: 1e6,       units: { s: -1 } },
-  GHz: { coeff: 1e9,       units: { s: -1 } },
-  THz: { coeff: 1e12,      units: { s: -1 } },
-  // Voltage (relative to V = kg·m²·s⁻³·A⁻¹)
-  μV:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3, A: -1 } },
-  mV:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3, A: -1 } },
-  kV:  { coeff: 1e3,       units: { kg: 1, m: 2, s: -3, A: -1 } },
-  MV:  { coeff: 1e6,       units: { kg: 1, m: 2, s: -3, A: -1 } },
-  // Charge (relative to C = s·A)
-  μC:  { coeff: 1e-6,      units: { s: 1, A: 1 } },
-  mC:  { coeff: 1e-3,      units: { s: 1, A: 1 } },
-  // Capacitance (relative to F = kg⁻¹·m⁻²·s⁴·A²)
-  pF:  { coeff: 1e-12,     units: { kg: -1, m: -2, s: 4, A: 2 } },
-  nF:  { coeff: 1e-9,      units: { kg: -1, m: -2, s: 4, A: 2 } },
-  μF:  { coeff: 1e-6,      units: { kg: -1, m: -2, s: 4, A: 2 } },
-  mF:  { coeff: 1e-3,      units: { kg: -1, m: -2, s: 4, A: 2 } },
-  // Inductance (relative to H = kg·m²·s⁻²·A⁻²)
-  nH:  { coeff: 1e-9,      units: { kg: 1, m: 2, s: -2, A: -2 } },
-  μH:  { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2, A: -2 } },
-  mH:  { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2, A: -2 } },
-  // Magnetic flux density (relative to T = kg·s⁻²·A⁻¹)
-  μT:  { coeff: 1e-6,      units: { kg: 1, s: -2, A: -1 } },
-  mT:  { coeff: 1e-3,      units: { kg: 1, s: -2, A: -1 } },
-  // Weber (relative to Wb = kg·m²·s⁻²·A⁻¹)
-  μWb: { coeff: 1e-6,      units: { kg: 1, m: 2, s: -2, A: -1 } },
-  mWb: { coeff: 1e-3,      units: { kg: 1, m: 2, s: -2, A: -1 } },
-  // Resistance (relative to Ω = kg·m²·s⁻³·A⁻²)
-  'μΩ': { coeff: 1e-6,      units: { kg: 1, m: 2, s: -3, A: -2 } },
-  'mΩ': { coeff: 1e-3,      units: { kg: 1, m: 2, s: -3, A: -2 } },
-  'kΩ': { coeff: 1e3,       units: { kg: 1, m: 2, s: -3, A: -2 } },
-  'MΩ': { coeff: 1e6,       units: { kg: 1, m: 2, s: -3, A: -2 } },
-  'GΩ': { coeff: 1e9,       units: { kg: 1, m: 2, s: -3, A: -2 } },
+/**
+ * SI prefix multipliers, keyed by prefix symbol.
+ * @type {Object<string, number>}
+ */
+const UNIT_PREFIXES = {
+  p: 1e-12, n: 1e-9, 'μ': 1e-6, m: 1e-3, c: 0.01, k: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15,
 };
 
-// Scale series for each base/derived unit, used by _selectBestScale.
-// Each entry: { name: string, p: number } where p is the prefix multiplier relative to SI.
-const SCALABLE_UNITS_SERIES = {
-  m:   [{name:'nm',p:1e-9},{name:'μm',p:1e-6},{name:'mm',p:1e-3},{name:'cm',p:0.01},
-        {name:'m',p:1},{name:'km',p:1e3}],
-  s:   [{name:'ns',p:1e-9},{name:'μs',p:1e-6},{name:'ms',p:1e-3},{name:'s',p:1},
-        {name:'min',p:60},{name:'hr',p:3600},{name:'day',p:86400},{name:'yr',p:3.15576e7}],
-  kg:  [{name:'μg',p:1e-9},{name:'mg',p:1e-6},{name:'g',p:1e-3},{name:'kg',p:1}],
-  A:   [{name:'μA',p:1e-6},{name:'mA',p:1e-3},{name:'A',p:1}],
-  J:   [{name:'nJ',p:1e-9},{name:'μJ',p:1e-6},{name:'mJ',p:1e-3},{name:'J',p:1},
-        {name:'kJ',p:1e3},{name:'MJ',p:1e6},{name:'GJ',p:1e9},{name:'TJ',p:1e12},{name:'PJ',p:1e15}],
-  W:   [{name:'nW',p:1e-9},{name:'μW',p:1e-6},{name:'mW',p:1e-3},{name:'W',p:1},
-        {name:'kW',p:1e3},{name:'MW',p:1e6},{name:'GW',p:1e9},{name:'TW',p:1e12}],
-  N:   [{name:'mN',p:1e-3},{name:'N',p:1},{name:'kN',p:1e3},{name:'MN',p:1e6}],
-  Pa:  [{name:'Pa',p:1},{name:'kPa',p:1e3},{name:'MPa',p:1e6},{name:'GPa',p:1e9}],
-  Hz:  [{name:'Hz',p:1},{name:'kHz',p:1e3},{name:'MHz',p:1e6},{name:'GHz',p:1e9},{name:'THz',p:1e12}],
-  V:   [{name:'μV',p:1e-6},{name:'mV',p:1e-3},{name:'V',p:1},{name:'kV',p:1e3},{name:'MV',p:1e6}],
-  C:   [{name:'μC',p:1e-6},{name:'mC',p:1e-3},{name:'C',p:1}],
-  F:   [{name:'pF',p:1e-12},{name:'nF',p:1e-9},{name:'μF',p:1e-6},{name:'mF',p:1e-3},{name:'F',p:1}],
-  H:   [{name:'nH',p:1e-9},{name:'μH',p:1e-6},{name:'mH',p:1e-3},{name:'H',p:1}],
-  T:   [{name:'μT',p:1e-6},{name:'mT',p:1e-3},{name:'T',p:1}],
-  Wb:  [{name:'μWb',p:1e-6},{name:'mWb',p:1e-3},{name:'Wb',p:1}],
-  'Ω':  [{name:'μΩ',p:1e-6},{name:'mΩ',p:1e-3},{name:'Ω',p:1},{name:'kΩ',p:1e3},{name:'MΩ',p:1e6},{name:'GΩ',p:1e9}],
+/**
+ * Specification for generating prefixed/scaled unit variants from base and derived units.
+ *
+ * Each key is the canonical (SI) unit name. Fields:
+ * - `units`      — base-unit dimension map (same format as DERIVED_UNIT_EXPANSIONS).
+ * - `prefixes`   — array of prefix keys from UNIT_PREFIXES to generate scaled variants.
+ * - `prefixBase` — (optional) the stem that prefixes attach to when it differs from the
+ *                  key (e.g. prefixes attach to 'g', not 'kg').
+ * - `baseCoeff`  — (optional) multiplier applied on top of the prefix (default 1).
+ *                  For kg, this is 1e-3 because prefixes scale the gram, not the kilogram.
+ * - `extras`     — (optional) additional named variants with an explicit coefficient
+ *                  (e.g. min, hr, day, yr for time; g for mass).
+ *
+ * @type {Object<string, {units: Object<string,number>, prefixes: string[],
+ *        prefixBase?: string, baseCoeff?: number,
+ *        extras?: Array<{name: string, coeff: number}>}>}
+ */
+const PREFIXED_UNITS_SPEC = {
+  m:  { units: { m: 1 }, prefixes: ['n', 'μ', 'm', 'c', 'k'] },
+  s:  { units: { s: 1 }, prefixes: ['n', 'μ', 'm'], extras: [
+    { name: 'min', coeff: 60 }, { name: 'hr', coeff: 3600 },
+    { name: 'day', coeff: 86400 }, { name: 'yr', coeff: 3.15576e7 },
+  ]},
+  kg: { units: { kg: 1 }, prefixBase: 'g', baseCoeff: 1e-3,
+        prefixes: ['μ', 'm'], extras: [{ name: 'g', coeff: 1e-3 }] },
+  A:  { units: { A: 1 }, prefixes: ['μ', 'm'] },
+  J:  { units: { kg: 1, m: 2, s: -2 }, prefixes: ['n', 'μ', 'm', 'k', 'M', 'G', 'T', 'P'] },
+  W:  { units: { kg: 1, m: 2, s: -3 }, prefixes: ['n', 'μ', 'm', 'k', 'M', 'G', 'T'] },
+  N:  { units: { kg: 1, m: 1, s: -2 }, prefixes: ['m', 'k', 'M'] },
+  Pa: { units: { kg: 1, m: -1, s: -2 }, prefixes: ['k', 'M', 'G'] },
+  Hz: { units: { s: -1 }, prefixes: ['k', 'M', 'G', 'T'] },
+  V:  { units: { kg: 1, m: 2, s: -3, A: -1 }, prefixes: ['μ', 'm', 'k', 'M'] },
+  C:  { units: { s: 1, A: 1 }, prefixes: ['μ', 'm'] },
+  F:  { units: { kg: -1, m: -2, s: 4, A: 2 }, prefixes: ['p', 'n', 'μ', 'm'] },
+  H:  { units: { kg: 1, m: 2, s: -2, A: -2 }, prefixes: ['n', 'μ', 'm'] },
+  T:  { units: { kg: 1, s: -2, A: -1 }, prefixes: ['μ', 'm'] },
+  Wb: { units: { kg: 1, m: 2, s: -2, A: -1 }, prefixes: ['μ', 'm'] },
+  'Ω': { units: { kg: 1, m: 2, s: -3, A: -2 }, prefixes: ['μ', 'm', 'k', 'M', 'G'] },
 };
+
+/**
+ * Scaled / prefixed unit atoms, generated from PREFIXED_UNITS_SPEC.
+ * Same format as DERIVED_UNIT_EXPANSIONS: `{ coeff: number, units: {…} }`.
+ * Base units (m, s, kg, A) and unscaled derived units (N, J, Pa, …) are NOT included here.
+ * @type {Object<string, {coeff: number, units: Object<string,number>}>}
+ */
+const SCALED_UNIT_ATOMS = {};
+for (const [base, spec] of Object.entries(PREFIXED_UNITS_SPEC)) {
+  const stem = spec.prefixBase || base;       // prefix attaches to this (e.g. 'g' for kg)
+  const baseCoeff = spec.baseCoeff || 1;      // extra multiplier (e.g. 1e-3 for g→kg)
+
+  // Generate standard prefix variants (e.g. nm, μm, mm, cm, km)
+  for (const p of (spec.prefixes || [])) {
+    const name = p + stem;
+    SCALED_UNIT_ATOMS[name] = { coeff: UNIT_PREFIXES[p] * baseCoeff, units: { ...spec.units } };
+  }
+
+  // Generate extra named variants (e.g. min, hr, day, yr, g)
+  for (const extra of (spec.extras || [])) {
+    SCALED_UNIT_ATOMS[extra.name] = { coeff: extra.coeff, units: { ...spec.units } };
+  }
+}
+
+/**
+ * Scale series for each base/derived unit, used by _selectBestScale.
+ * Generated from PREFIXED_UNITS_SPEC. Each entry: `{ name: string, p: number }`
+ * where `p` is the prefix multiplier relative to the canonical SI unit.
+ * Entries are sorted by `p` ascending.
+ * @type {Object<string, Array<{name: string, p: number}>>}
+ */
+const SCALABLE_UNITS_SERIES = {};
+for (const [base, spec] of Object.entries(PREFIXED_UNITS_SPEC)) {
+  const stem = spec.prefixBase || base;
+  const baseCoeff = spec.baseCoeff || 1;
+  const series = [];
+
+  // Add prefixed variants
+  for (const p of (spec.prefixes || [])) {
+    series.push({ name: p + stem, p: UNIT_PREFIXES[p] * baseCoeff });
+  }
+
+  // Add extra named variants
+  for (const extra of (spec.extras || [])) {
+    series.push({ name: extra.name, p: extra.coeff });
+  }
+
+  // Add the base unit itself (p = 1 for SI base/derived units)
+  series.push({ name: base, p: 1 });
+
+  // Sort ascending by multiplier
+  series.sort((a, b) => a.p - b.p);
+  SCALABLE_UNITS_SERIES[base] = series;
+}
 
 // Compound unit simplifications — matched at display time (power=1 only).
 // These are not expanded during evaluation; they only affect how a base-unit
@@ -215,6 +206,54 @@ const SI_ALL_UNIT_NAMES = [
   ...SI_BASE_UNITS,
 ].sort((a, b) => b.length - a.length);
 const SI_ALL_UNIT_NAMES_SET = new Set(SI_ALL_UNIT_NAMES);
+
+/**
+ * Trie node for greedy longest-match unit name lookup.
+ * @typedef {Object} TrieNode
+ * @property {boolean} isEnd - true if this node marks the end of a valid unit name
+ * @property {string|null} name - the full unit name if isEnd is true
+ * @property {Object<string, TrieNode>} children - child nodes keyed by character
+ */
+
+/**
+ * Build a trie from an array of strings for O(length) longest-match lookups.
+ * @param {string[]} names - strings to insert
+ * @returns {TrieNode} root node
+ */
+function _buildUnitTrie(names) {
+  const root = { isEnd: false, name: null, children: {} };
+  for (const name of names) {
+    let node = root;
+    for (const ch of name) {
+      if (!node.children[ch]) node.children[ch] = { isEnd: false, name: null, children: {} };
+      node = node.children[ch];
+    }
+    node.isEnd = true;
+    node.name = name;
+  }
+  return root;
+}
+
+/**
+ * Walk the trie from position i in src, returning the longest matching unit name or null.
+ * @param {TrieNode} root - trie root
+ * @param {string} src - source string
+ * @param {number} i - start position
+ * @returns {string|null} longest matching name, or null
+ */
+function _trieLongestMatch(root, src, i) {
+  let node = root;
+  let longest = null;
+  for (let j = i; j < src.length; j++) {
+    const ch = src[j];
+    if (!node.children[ch]) break;
+    node = node.children[ch];
+    if (node.isEnd) longest = node.name;
+  }
+  return longest;
+}
+
+const _unitTrie = _buildUnitTrie(SI_ALL_UNIT_NAMES);
 
 
 function findEqAtDepth0(s) {
@@ -297,13 +336,10 @@ function tokenize(src) {
       continue;
     }
     if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
-      // Greedy match of multi-letter unit names (longest first).
+      // Greedy longest-match of multi-letter unit names via trie lookup.
       // Single-letter names are always caught by the fallback.
-      let matched = null;
-      for (const name of SI_ALL_UNIT_NAMES) {
-        if (name.length > 1 && src.startsWith(name, i)) { matched = name; break; }
-      }
-      if (matched) { tokens.push({ type: TK.IDENT, val: matched }); i += matched.length; }
+      const matched = _trieLongestMatch(_unitTrie, src, i);
+      if (matched && matched.length > 1) { tokens.push({ type: TK.IDENT, val: matched }); i += matched.length; }
       else          { tokens.push({ type: TK.IDENT, val: c });       i++; }
       continue;
     }
@@ -1228,6 +1264,24 @@ function isLiteralPointAst(ast) {
   return ast && ast.type === 'point' && isLiteralNumberAst(ast.args[0]) && isLiteralNumberAst(ast.args[1]);
 }
 
+/**
+ * Unary math operations shared by evaluateAst and evaluateAstSymbolic.
+ * Maps function name to the corresponding Math.* function for numeric evaluation.
+ * @type {Object<string, function(number): number>}
+ */
+const UNARY_MATH_OPS = {
+  sin:  Math.sin,
+  cos:  Math.cos,
+  tan:  Math.tan,
+  asin: Math.asin,
+  acos: Math.acos,
+  atan: Math.atan,
+  ln:   Math.log,
+  exp:  Math.exp,
+  abs:  Math.abs,
+  sqrt: Math.sqrt,
+};
+
 /** Evaluate an AST node to a numeric or point value, given a map of known values. */
 function evaluateAst(ast, values, funcDefs = new Map()) {
   switch (ast.type) {
@@ -1304,17 +1358,13 @@ function evaluateAst(ast, values, funcDefs = new Map()) {
           if (isPoint(v)) return { px: -v.px, py: -v.py };
           return -v;
         }
-        case 'sin':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply sin to a point');  return Math.sin(v);  }
-        case 'cos':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply cos to a point');  return Math.cos(v);  }
-        case 'tan':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply tan to a point');  return Math.tan(v);  }
-        case 'asin': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply asin to a point'); return Math.asin(v); }
-        case 'acos': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply acos to a point'); return Math.acos(v); }
-        case 'atan': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply atan to a point'); return Math.atan(v); }
-        case 'ln':   { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply ln to a point');   return Math.log(v);  }
-        case 'exp':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply exp to a point');  return Math.exp(v);  }
-        case 'abs':  { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply abs to a point');  return Math.abs(v);  }
-        case 'sqrt': { const v = evaluateAst(ast.args[0], values, funcDefs); if (isPoint(v)) throw new Error('Cannot apply sqrt to a point'); return Math.sqrt(v); }
         default: {
+          // Unary math functions (sin, cos, tan, etc.) via shared dispatch table
+          if (UNARY_MATH_OPS[ast.name]) {
+            const v = evaluateAst(ast.args[0], values, funcDefs);
+            if (isPoint(v)) throw new Error(`Cannot apply ${ast.name} to a point`);
+            return UNARY_MATH_OPS[ast.name](v);
+          }
           // User-defined function call
           if (funcDefs.has(ast.name)) {
             const def = funcDefs.get(ast.name);
@@ -1495,7 +1545,6 @@ function matchDerivedUnit(sig) {
   return null;
 }
 
-let astCount = 0;
 /**
  * Symbolically evaluate an AST, substituting numeric values but leaving unit
  * and (optionally) free-variable symbols intact. Returns a simplified AST node.
@@ -1536,25 +1585,12 @@ function evaluateAstSymbolic(ast, valueMap, funcDefs, opts = {}) {
         return recurse({ type: 'call', name: 'pow', args: [ast.args[0], { type: 'number', value: 0.5 }] });
       }
 
-      const TRIG = new Set(['sin','cos','tan','asin','acos','atan','ln','exp','abs']);
-      if (TRIG.has(ast.name)) {
+      // Unary math functions (sin, cos, tan, etc.) via shared dispatch table
+      if (UNARY_MATH_OPS[ast.name]) {
         const arg = simplifyAst(recurse(ast.args[0]), opts);
         if (arg.type === 'point') throw new Error(`Cannot apply ${ast.name}() to a point`);
-        if (arg.type === 'number') {
-          // Purely numeric — evaluate
-          switch (ast.name) {
-            case 'sin':  return mk(Math.sin(arg.value));
-            case 'cos':  return mk(Math.cos(arg.value));
-            case 'tan':  return mk(Math.tan(arg.value));
-            case 'asin': return mk(Math.asin(arg.value));
-            case 'acos': return mk(Math.acos(arg.value));
-            case 'atan': return mk(Math.atan(arg.value));
-            case 'ln':   return mk(Math.log(arg.value));
-            case 'exp':  return mk(Math.exp(arg.value));
-            case 'abs':  return mk(Math.abs(arg.value));
-            case 'sqrt': return mk(Math.sqrt(arg.value));
-          }
-        }
+        // Purely numeric — evaluate directly
+        if (arg.type === 'number') return mk(UNARY_MATH_OPS[ast.name](arg.value));
         // Symbolic arg — warn if units are present
         const unitVars = collectUnitVarsInAst(arg);
         if (unitVars.size > 0) warnings.push({ funcName: ast.name, units: [...unitVars] });
@@ -2463,29 +2499,87 @@ function evaluateConstants(analysis) {
   return constantValues;
 }
 
-// ── AST → GLSL code generation ──────────────────────────────────────────────
+// ── AST → code generation (shared infrastructure) ──────────────────────────
 
-/** Convert an AST to a GLSL float expression string. */
-function astToGlsl(ast, constantNames, xyDefNames, funcDefs = new Map()) {
-  const recurse = a => astToGlsl(a, constantNames, xyDefNames, funcDefs);
+/**
+ * Code-generation dialect — provides the target-specific pieces for astToCode.
+ * @typedef {Object} CodeDialect
+ * @property {function(number): string} numLit       - format a number literal
+ * @property {function(string): string} varLookup    - resolve a variable name to code
+ * @property {Object<string, function(...string): string>} ops - operator/function formatters
+ * @property {Map<string, {params: string[], body: Object}>} funcDefs - user-defined functions
+ * @property {string} [fallback]                     - default value for unhandled nodes
+ * @property {boolean} [throwOnUndefined]            - throw CompileError for unknown functions
+ */
+
+/** GLSL operator/function formatters — bare function names (no Math. prefix). */
+const GLSL_OPS = {
+  add:  (a, b) => `(${a}+${b})`,
+  sub:  (a, b) => `(${a}-${b})`,
+  mul:  (a, b) => `(${a}*${b})`,
+  div:  (a, b) => `(${a}/${b})`,
+  pow:  (a, b) => `pow(${a},${b})`,
+  neg:  (a)    => `(-(${a}))`,
+  sin:  (a)    => `sin(${a})`,
+  cos:  (a)    => `cos(${a})`,
+  tan:  (a)    => `tan(${a})`,
+  asin: (a)    => `asin(${a})`,
+  acos: (a)    => `acos(${a})`,
+  atan: (a)    => `atan(${a})`,
+  ln:   (a)    => `log(${a})`,
+  exp:  (a)    => `exp(${a})`,
+  abs:  (a)    => `abs(${a})`,
+  sqrt: (a)    => `sqrt(${a})`,
+};
+
+/** JS operator/function formatters — uses Math.* prefix. */
+const JS_OPS = {
+  add:  (a, b) => `(${a}+${b})`,
+  sub:  (a, b) => `(${a}-${b})`,
+  mul:  (a, b) => `(${a}*${b})`,
+  div:  (a, b) => `(${a}/${b})`,
+  pow:  (a, b) => `Math.pow(${a},${b})`,
+  neg:  (a)    => `(-(${a}))`,
+  sin:  (a)    => `Math.sin(${a})`,
+  cos:  (a)    => `Math.cos(${a})`,
+  tan:  (a)    => `Math.tan(${a})`,
+  asin: (a)    => `Math.asin(${a})`,
+  acos: (a)    => `Math.acos(${a})`,
+  atan: (a)    => `Math.atan(${a})`,
+  ln:   (a)    => `Math.log(${a})`,
+  exp:  (a)    => `Math.exp(${a})`,
+  abs:  (a)    => `Math.abs(${a})`,
+  sqrt: (a)    => `Math.sqrt(${a})`,
+};
+
+/**
+ * Convert an AST node to a code string using the given dialect.
+ * Handles number literals, variables, derivatives, prime-calls, built-in
+ * and user-defined function calls. User-defined functions are inlined by
+ * substitution; derivatives are symbolically computed then recursed into.
+ *
+ * @param {Object} ast               - the AST node to convert
+ * @param {CodeDialect} dialect       - target-specific formatting callbacks
+ * @returns {string} the generated code expression
+ */
+function astToCode(ast, dialect) {
+  const { numLit, varLookup, ops, funcDefs, fallback = '0', throwOnUndefined = false } = dialect;
+  const recurse = a => astToCode(a, dialect);
+
   switch (ast.type) {
-    case 'number': {
-      const s = ast.value.toString();
-      return s.includes('.') || s.includes('e') ? s : s + '.0';
-    }
+    case 'number': return numLit(ast.value);
+    case 'variable': return varLookup(ast.name);
     case 'derivative': {
+      // Symbolically differentiate, simplify, then recurse
       const derivedAst = simplifyAst(differentiateAst(ast.arg, ast.variable, funcDefs));
       return recurse(derivedAst);
     }
-    case 'variable': {
-      if (ast.name === 'pi') return '3.141592653589793';
-      if (ast.name === 'x' || ast.name === 'y') return ast.name;
-      if (constantNames.has(ast.name)) return 'u_' + ast.name;
-      if (xyDefNames.has(ast.name)) return 'v_' + ast.name;
-      return ast.name; // fallback — should be caught by analysis
-    }
     case 'primecall': {
-      if (!funcDefs.has(ast.name)) throw new CompileError(`Undefined function '${ast.name}'`);
+      // f'(x), f''(x), etc. — differentiate the function body n times then inline
+      if (!funcDefs.has(ast.name)) {
+        if (throwOnUndefined) throw new CompileError(`Undefined function '${ast.name}'`);
+        return fallback;
+      }
       const def = funcDefs.get(ast.name);
       let bodyAst = def.body;
       for (let i = 0; i < ast.order; i++)
@@ -2495,95 +2589,73 @@ function astToGlsl(ast, constantNames, xyDefNames, funcDefs = new Map()) {
     }
     case 'call': {
       const args = ast.args.map(recurse);
-      switch (ast.name) {
-        case 'add': return `(${args[0]}+${args[1]})`;
-        case 'sub': return `(${args[0]}-${args[1]})`;
-        case 'mul': return `(${args[0]}*${args[1]})`;
-        case 'div': return `(${args[0]}/${args[1]})`;
-        case 'pow': return `pow(${args[0]},${args[1]})`;
-        case 'neg': return `(-(${args[0]}))`;
-        case 'sin': return `sin(${args[0]})`;
-        case 'cos': return `cos(${args[0]})`;
-        case 'tan': return `tan(${args[0]})`;
-        case 'asin': return `asin(${args[0]})`;
-        case 'acos': return `acos(${args[0]})`;
-        case 'atan': return `atan(${args[0]})`;
-        case 'ln':  return `log(${args[0]})`;
-        case 'exp': return `exp(${args[0]})`;
-        case 'abs': return `abs(${args[0]})`;
-        case 'sqrt': return `sqrt(${args[0]})`;
-        default: {
-          if (funcDefs.has(ast.name)) {
-            const def = funcDefs.get(ast.name);
-            const paramMap = new Map(def.params.map((p, i) => [p, ast.args[i]]));
-            return recurse(substituteAst(def.body, paramMap));
-          }
-          throw new CompileError(`Undefined function '${ast.name}'`);
-        }
+      // Built-in operator/function — use dialect ops table
+      if (ops[ast.name]) return ops[ast.name](...args);
+      // User-defined function — inline by substitution
+      if (funcDefs.has(ast.name)) {
+        const def = funcDefs.get(ast.name);
+        const paramMap = new Map(def.params.map((p, i) => [p, ast.args[i]]));
+        return recurse(substituteAst(def.body, paramMap));
       }
+      if (throwOnUndefined) throw new CompileError(`Undefined function '${ast.name}'`);
+      return fallback;
     }
-    default: return '0.0';
+    default: return fallback;
   }
 }
 
-/** Build an AST → JS evaluator function(x, y) with constant values baked in. */
+// ── AST → GLSL code generation ──────────────────────────────────────────────
+
+/**
+ * Convert an AST to a GLSL float expression string.
+ * Delegates to the shared astToCode with a GLSL dialect.
+ *
+ * @param {Object} ast                       - the AST to convert
+ * @param {Set<string>} constantNames        - names that map to uniforms (u_ prefix)
+ * @param {Set<string>} xyDefNames           - names that map to xy-def locals (v_ prefix)
+ * @param {Map<string, Object>} [funcDefs]   - user-defined function definitions
+ * @returns {string} GLSL float expression
+ */
+function astToGlsl(ast, constantNames, xyDefNames, funcDefs = new Map()) {
+  return astToCode(ast, {
+    numLit: v => { const s = v.toString(); return s.includes('.') || s.includes('e') ? s : s + '.0'; },
+    varLookup: name => {
+      if (name === 'pi') return '3.141592653589793';
+      if (name === 'x' || name === 'y') return name;
+      if (constantNames.has(name)) return 'u_' + name;
+      if (xyDefNames.has(name)) return 'v_' + name;
+      return name; // fallback — should be caught by analysis
+    },
+    ops: GLSL_OPS,
+    funcDefs,
+    fallback: '0.0',
+    throwOnUndefined: true,
+  });
+}
+
+/**
+ * Build an AST → JS evaluator function(x, y) with constant values baked in.
+ * Returns a Function(x, y) or null if compilation fails.
+ *
+ * @param {Object} ast                             - the AST to compile
+ * @param {Map<string, number>} constantValues     - constant name → numeric value
+ * @param {Map<string, Object>} [funcDefs]         - user-defined function definitions
+ * @returns {Function|null} evaluator function(x, y) or null on error
+ */
 function astToJsFunction(ast, constantValues, funcDefs = new Map()) {
-  function gen(node) {
-    switch (node.type) {
-      case 'number': return String(node.value);
-      case 'variable': {
-        if (node.name === 'pi') return String(Math.PI);
-        if (node.name === 'x') return 'x';
-        if (node.name === 'y') return 'y';
-        if (constantValues.has(node.name)) return String(constantValues.get(node.name));
-        return '0'; // fallback
-      }
-      case 'derivative': {
-        const derivedAst = simplifyAst(differentiateAst(node.arg, node.variable, funcDefs));
-        return gen(derivedAst);
-      }
-      case 'primecall': {
-        if (!funcDefs.has(node.name)) return '0';
-        const def = funcDefs.get(node.name);
-        let bodyAst = def.body;
-        for (let i = 0; i < node.order; i++)
-          bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs));
-        const paramMap = new Map([[def.params[0], node.args[0]]]);
-        return gen(substituteAst(bodyAst, paramMap));
-      }
-      case 'call': {
-        const args = node.args.map(gen);
-        switch (node.name) {
-          case 'add': return `(${args[0]}+${args[1]})`;
-          case 'sub': return `(${args[0]}-${args[1]})`;
-          case 'mul': return `(${args[0]}*${args[1]})`;
-          case 'div': return `(${args[0]}/${args[1]})`;
-          case 'pow': return `Math.pow(${args[0]},${args[1]})`;
-          case 'neg': return `(-(${args[0]}))`;
-          case 'sin': return `Math.sin(${args[0]})`;
-          case 'cos': return `Math.cos(${args[0]})`;
-          case 'tan': return `Math.tan(${args[0]})`;
-          case 'asin': return `Math.asin(${args[0]})`;
-          case 'acos': return `Math.acos(${args[0]})`;
-          case 'atan': return `Math.atan(${args[0]})`;
-          case 'ln':  return `Math.log(${args[0]})`;
-          case 'exp': return `Math.exp(${args[0]})`;
-          case 'abs': return `Math.abs(${args[0]})`;
-          case 'sqrt': return `Math.sqrt(${args[0]})`;
-          default: {
-            if (funcDefs.has(node.name)) {
-              const def = funcDefs.get(node.name);
-              const paramMap = new Map(def.params.map((p, i) => [p, node.args[i]]));
-              return gen(substituteAst(def.body, paramMap));
-            }
-            return '0';
-          }
-        }
-      }
-      default: return '0';
-    }
-  }
-  const body = gen(ast);
+  const body = astToCode(ast, {
+    numLit: v => String(v),
+    varLookup: name => {
+      if (name === 'pi') return String(Math.PI);
+      if (name === 'x') return 'x';
+      if (name === 'y') return 'y';
+      if (constantValues.has(name)) return String(constantValues.get(name));
+      return '0'; // fallback
+    },
+    ops: JS_OPS,
+    funcDefs,
+    fallback: '0',
+  });
   try {
     return new Function('x', 'y', `"use strict"; return (${body});`);
   } catch {
@@ -2807,7 +2879,7 @@ function compileGraphExpressions(expressions) {
     if (!expr) continue;
 
     // Redirect y = f(x) (LHS is y, RHS has no y or t) to standard function rendering
-    const lhsIsY = impl.lhs.type === 'var' && impl.lhs.name === 'y';
+    const lhsIsY = impl.lhs.type === 'variable' && impl.lhs.name === 'y';
     if (lhsIsY) {
       const rhsVars = collectVariables(impl.rhs);
       if (!rhsVars.has('y') && !rhsVars.has('t')) {
@@ -2923,67 +2995,32 @@ function buildImplicitJsEvaluator(implicitExpr, analysis, funcDefs = new Map()) 
   collectXYDeps(implicitExpr.deps);
 
   // Build JS function body: define xy-dep vars then return LHS - RHS
+  /** @param {number} v - format a numeric literal, wrapping negatives in parens */
   function numLit(v) {
     const s = String(v);
     return s.startsWith('-') ? `(${s})` : s;
   }
-  function genJs(node) {
-    switch (node.type) {
-      case 'number': return numLit(node.value);
-      case 'variable': {
-        if (node.name === 'x') return 'x';
-        if (node.name === 'y') return 'y';
-        if (constantValues.has(node.name)) return numLit(constantValues.get(node.name));
-        // xy-dependent def — use local var
-        return 'v_' + node.name;
-      }
-      case 'primecall': {
-        if (!funcDefs.has(node.name)) return '0';
-        const def = funcDefs.get(node.name);
-        let bodyAst = def.body;
-        for (let i = 0; i < node.order; i++)
-          bodyAst = simplifyAst(differentiateAst(bodyAst, def.params[0], funcDefs));
-        const paramMap = new Map([[def.params[0], node.args[0]]]);
-        return genJs(substituteAst(bodyAst, paramMap));
-      }
-      case 'call': {
-        const args = node.args.map(genJs);
-        switch (node.name) {
-          case 'add': return `(${args[0]}+${args[1]})`;
-          case 'sub': return `(${args[0]}-${args[1]})`;
-          case 'mul': return `(${args[0]}*${args[1]})`;
-          case 'div': return `(${args[0]}/${args[1]})`;
-          case 'pow': return `Math.pow(${args[0]},${args[1]})`;
-          case 'neg': return `(-(${args[0]}))`;
-          case 'sin': return `Math.sin(${args[0]})`;
-          case 'cos': return `Math.cos(${args[0]})`;
-          case 'tan': return `Math.tan(${args[0]})`;
-          case 'asin': return `Math.asin(${args[0]})`;
-          case 'acos': return `Math.acos(${args[0]})`;
-          case 'atan': return `Math.atan(${args[0]})`;
-          case 'ln':  return `Math.log(${args[0]})`;
-          case 'exp': return `Math.exp(${args[0]})`;
-          case 'abs': return `Math.abs(${args[0]})`;
-          case 'sqrt': return `Math.sqrt(${args[0]})`;
-          default: {
-            if (funcDefs.has(node.name)) {
-              const def = funcDefs.get(node.name);
-              const paramMap = new Map(def.params.map((p, i) => [p, node.args[i]]));
-              return genJs(substituteAst(def.body, paramMap));
-            }
-            return '0';
-          }
-        }
-      }
-      default: return '0';
-    }
-  }
+
+  // Dialect for implicit JS evaluator: constants inlined, xy-defs use v_ prefix
+  const dialect = {
+    numLit,
+    varLookup: name => {
+      if (name === 'x') return 'x';
+      if (name === 'y') return 'y';
+      if (constantValues.has(name)) return numLit(constantValues.get(name));
+      // xy-dependent def — use local var
+      return 'v_' + name;
+    },
+    ops: JS_OPS,
+    funcDefs,
+    fallback: '0',
+  };
 
   let body = '';
   for (const d of neededXYDefs) {
-    body += `var v_${d.name} = ${genJs(d.rhs)};\n`;
+    body += `var v_${d.name} = ${astToCode(d.rhs, dialect)};\n`;
   }
-  body += `return (${genJs(implicitExpr.lhs)})-(${genJs(implicitExpr.rhs)});`;
+  body += `return (${astToCode(implicitExpr.lhs, dialect)})-(${astToCode(implicitExpr.rhs, dialect)});`;
 
   try {
     return new Function('x', 'y', `"use strict";\n${body}`);
@@ -3265,17 +3302,8 @@ function evaluateCalcExpressions(expressions, { usePhysicsConstants = false, use
             results.set(e.id, { error: 'Cannot compare a point and a scalar' });
           } else if (lhsRes.value !== undefined && rhsRes.value !== undefined) {
             
-            //The average scale of the values so that differences in tiny values don't get marked as a rounding error. 
-            let scale = 10**Math.ceil(
-              Math.min(-Math.log10(0.5*(Math.abs(lhsRes.value)+Math.abs(rhsRes.value))),1e-10)
-            );
-            if(scale==Infinity){
-              scale=1;
-            }
-            console.log(0.5*(Math.abs(lhsRes.value)+Math.abs(rhsRes.value)),scale);
-            
-
-            results.set(e.id, { boolValue: Math.abs(lhsRes.value - rhsRes.value)*scale < 1e-9 });
+            const maxMag = Math.max(Math.abs(lhsRes.value), Math.abs(rhsRes.value), 1);
+            results.set(e.id, { boolValue: Math.abs(lhsRes.value - rhsRes.value) <= 1e-9 * maxMag });
           } else if (lhsRes.unitAst && rhsRes.unitAst) {
             const lSig = astToUnitSignature(lhsRes.unitAst);
             const rSig = astToUnitSignature(rhsRes.unitAst);

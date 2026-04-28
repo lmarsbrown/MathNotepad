@@ -95,13 +95,14 @@ class GraphRenderer {
     this._pointInstData = null;
 
     // Draggable point interaction
-    this._draggingPoint    = false;
-    this._dragPointExprId  = null;
-    this._dragPointVarName = null;
-    this._dragLastX        = 0;
-    this._dragLastY        = 0;
-    this._onPointDrag      = null;
-    this._onPointDragEnd   = null;
+    this._draggingPoint      = false;
+    this._dragPointExprId    = null;
+    this._dragPointVarName   = null;
+    this._dragLastX          = 0;
+    this._dragLastY          = 0;
+    this._hoveredPointExprId = null;
+    this._onPointDrag        = null;
+    this._onPointDragEnd     = null;
 
     this._initThickenShader();
     this._initParametricThinLineShader();
@@ -210,6 +211,7 @@ class GraphRenderer {
         this._dragLastY        = ptHit.y;
         this._pendingDrag      = false;   // suppress pan
         this._mousedownHitCurve = true;   // suppress background click
+        if (this._onRender) this._onRender(); // show solid fill immediately on press
         return;
       }
       // Focus the curve immediately on press; begin snap mode if a curve was hit
@@ -229,14 +231,26 @@ class GraphRenderer {
 
     c.addEventListener('mousemove', e => {
       if (this._dragging) return;
-      // Update cursor: pointer over a curve, default otherwise
+      // Update cursor and hover state for draggable points
       const rect = c.getBoundingClientRect();
       const px = Math.round((e.clientX - rect.left) * (this.width  / rect.width));
       const py = Math.round((e.clientY - rect.top)  * (this.height / rect.height));
       const ptHover = this._pickPointAt(px, py);
-      c.style.cursor = ptHover ? 'grab' : (this.pickAt(px, py) !== null ? 'pointer' : '');
+      const newHoverId = ptHover ? ptHover.exprId : null;
+      if (newHoverId !== this._hoveredPointExprId) {
+        this._hoveredPointExprId = newHoverId;
+        if (this._onRender) this._onRender();
+      }
+      c.style.cursor = ptHover ? 'move' : (this.pickAt(px, py) !== null ? 'pointer' : '');
       if (this._holding) {
         this._updateSnap(px, py);
+        if (this._onRender) this._onRender();
+      }
+    });
+
+    c.addEventListener('mouseleave', () => {
+      if (this._hoveredPointExprId !== null) {
+        this._hoveredPointExprId = null;
         if (this._onRender) this._onRender();
       }
     });
@@ -280,10 +294,12 @@ class GraphRenderer {
         if (this._onPointDragEnd) {
           this._onPointDragEnd(this._dragPointExprId, this._dragPointVarName, this._dragLastX, this._dragLastY);
         }
-        this._draggingPoint    = false;
-        this._dragPointExprId  = null;
-        this._dragPointVarName = null;
+        this._draggingPoint      = false;
+        this._dragPointExprId    = null;
+        this._dragPointVarName   = null;
+        this._hoveredPointExprId = null; // will be re-set by next mousemove if still hovering
         c.style.cursor = '';
+        if (this._onRender) this._onRender();
         return;
       }
       this._pendingDrag = false;
@@ -1243,11 +1259,14 @@ void main() {
     float dist = length(v_uv) * expandPx;
     float r = v_size * 0.5;
     float solid = smoothstep(r + 1.0, r - 1.0, dist);
+    // v_isDraggable encodes state: 0=not draggable, 1=normal, 2=hovered, 3=dragging
     if (v_isDraggable > 0.5) {
         float ringR1 = r + 3.0;
         float ringR2 = r + 7.0;
         float ring = (1.0 - smoothstep(ringR2 - 1.0, ringR2, dist)) * smoothstep(ringR1, ringR1 + 1.0, dist);
-        float alpha = max(solid, ring * 0.4);
+        float innerFill = 1.0 - smoothstep(ringR2 - 1.0, ringR2, dist);
+        float fillOpacity = v_isDraggable > 2.5 ? 1.0 : (v_isDraggable > 1.5 ? 0.3 : 0.0);
+        float alpha = max(solid, max(ring * 0.4, innerFill * fillOpacity));
         if (alpha < 0.001) discard;
         fragColor = vec4(v_color * alpha, alpha);
     } else {
@@ -1640,7 +1659,8 @@ void main() {
     }
     const d = this._pointInstData;
 
-    // Pack per-instance data: [worldX, worldY, r, g, b, size, isDraggable]
+    // Pack per-instance data: [worldX, worldY, r, g, b, size, state]
+    // state: 0=not draggable, 1=normal, 2=hovered, 3=dragging
     for (let i = 0; i < count; i++) {
       const e = pointExprs[i];
       const c = this._parseColor(e.color);
@@ -1648,7 +1668,13 @@ void main() {
       d[b]   = e.x;    d[b+1] = e.y;
       d[b+2] = c[0];   d[b+3] = c[1];  d[b+4] = c[2];
       d[b+5] = e.pointSize ?? 8.0;
-      d[b+6] = e.draggable ? 1.0 : 0.0;
+      let state = 0.0;
+      if (e.draggable) {
+        if (this._draggingPoint && this._dragPointExprId === e.exprId) state = 3.0;
+        else if (!this._draggingPoint && this._hoveredPointExprId === e.exprId) state = 2.0;
+        else state = 1.0;
+      }
+      d[b+6] = state;
     }
 
     // Upload instance data to GPU
